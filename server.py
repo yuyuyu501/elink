@@ -1,11 +1,11 @@
 import socket
 import threading
-import io
 import time
-import hashlib
 import pyautogui
-from PIL import Image, ImageGrab
-from protocol import send_cmd, recv_cmd, send_screen
+import dxcam
+import av
+from codec import create_encoder
+from protocol import send_cmd, recv_cmd, send_video
 
 MOUSE_BUTTON_MAP = {1: 'left', 2: 'middle', 3: 'right'}
 TK_KEY_MAP = {
@@ -101,49 +101,60 @@ class Server:
 
         def screen_sender():
             nonlocal running
-            prev_hash = None
-            quality = 50
-            TARGET_BPS = 8_000_000
-            FRAME_INTERVAL = 1.0 / 60
-            window_bytes = 0
-            window_start = time.monotonic()
-            while running:
-                frame_start = time.monotonic()
-                try:
-                    img = ImageGrab.grab()
-                    thumb = img.resize((32, 24), Image.LANCZOS)
-                    h = hashlib.md5(thumb.tobytes()).hexdigest()
-                    if h != prev_hash:
-                        prev_hash = h
-                        buf = io.BytesIO()
-                        img.save(buf, format='JPEG', quality=quality)
-                        data = buf.getvalue()
-                        send_screen(sock, data)
-                        window_bytes += len(data)
+            camera = None
+            encoder = None
+            try:
+                camera = dxcam.create()
+                camera.start(target_fps=60)
+                encoder = create_encoder(w, h, bitrate=8_000_000, fps=60)
 
-                    now = time.monotonic()
-                    elapsed = now - window_start
-                    if elapsed >= 1.0:
-                        actual_bps = window_bytes * 8 / elapsed
-                        self.current_bps = actual_bps
-                        if actual_bps > TARGET_BPS * 1.1:
-                            quality = max(10, quality - 5)
-                        elif actual_bps < TARGET_BPS * 0.6 and quality < 85:
-                            quality += 5
-                        window_bytes = 0
-                        window_start = now
+                TARGET_BPS = 8_000_000
+                window_bytes = 0
+                window_start = time.monotonic()
+                frame_skip = 1
+                frame_count = 0
 
-                    sleep_time = FRAME_INTERVAL - (now - frame_start)
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-                except (ConnectionError, OSError):
-                    running = False
-                    break
-                except Exception as e:
-                    if on_error:
-                        on_error(f'screen error: {e}')
-                    running = False
-                    break
+                while running:
+                    frame_start = time.monotonic()
+                    try:
+                        frame = camera.get_latest_frame()
+                        if frame is not None:
+                            frame_count += 1
+                            if frame_count % frame_skip == 0:
+                                av_frame = av.VideoFrame.from_ndarray(frame, format='bgr24')
+                                for packet in encoder.encode(av_frame):
+                                    data = packet.to_bytes()
+                                    send_video(sock, data)
+                                    window_bytes += len(data)
+
+                        now = time.monotonic()
+                        elapsed = now - window_start
+                        if elapsed >= 1.0:
+                            actual_bps = window_bytes * 8 / elapsed
+                            self.current_bps = actual_bps
+                            if actual_bps > TARGET_BPS * 1.1:
+                                frame_skip = min(8, frame_skip + 1)
+                            elif actual_bps < TARGET_BPS * 0.6 and frame_skip > 1:
+                                frame_skip = max(1, frame_skip - 1)
+                            window_bytes = 0
+                            window_start = now
+
+                        sleep_time = (1.0 / 60) - (time.monotonic() - frame_start)
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
+                    except (ConnectionError, OSError):
+                        running = False
+                        break
+                    except Exception as e:
+                        if on_error:
+                            on_error(f'screen error: {e}')
+                        running = False
+                        break
+            finally:
+                if camera:
+                    camera.stop()
+                if encoder:
+                    encoder.close()
 
         threads = [
             threading.Thread(target=cmd_receiver, daemon=True),

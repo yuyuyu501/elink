@@ -4,6 +4,7 @@ import json
 MSG_CMD = b'CMD '
 MSG_SCR = b'SCR '
 MSG_PNG = b'PNG '
+MSG_VID = b'VID '
 
 def _recv_exact(sock, n):
     buf = b''
@@ -33,7 +34,7 @@ def send_screen(sock, jpeg_data):
 
 def recv_msg(sock):
     msg_type = _recv_exact(sock, 4)
-    if msg_type not in (MSG_CMD, MSG_SCR, MSG_PNG):
+    if msg_type not in (MSG_CMD, MSG_SCR, MSG_PNG, MSG_VID):
         raise ValueError(f'Unknown message type: {msg_type}')
     length = struct.unpack('!I', _recv_exact(sock, 4))[0]
     data = _recv_exact(sock, length)
@@ -47,4 +48,8 @@ def recv_screen(sock):
 
 def send_png(sock, data):
     header = MSG_PNG + struct.pack('!I', len(data))
+    sock.sendall(header + data)
+
+def send_video(sock, data):
+    header = MSG_VID + struct.pack('!I', len(data))
     sock.sendall(header + data)

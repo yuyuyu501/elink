@@ -2,8 +2,9 @@ import tkinter as tk
 from tkinter import messagebox
 import socket
 import threading
+import pyglet
 from server import Server
-from client import ClientController
+from client import ClientWindow
 
 
 class App:
@@ -97,22 +98,12 @@ class App:
 
     def _start_client(self, host, port, local_port):
         self.root.withdraw()
+        self.root.update()
 
-        win = tk.Toplevel(self.root)
-        win.title(f'Elink - 控制 {host}:{port}')
-        win.geometry('1024x700')
-        win.protocol('WM_DELETE_WINDOW', lambda: self._stop_client(win))
-
-        self.client_obj = ClientController(win, host, port, on_disconnect=lambda: self._stop_client(win))
-
-    def _stop_client(self, win):
-        if self.client_obj:
-            self.client_obj.stop()
-            self.client_obj = None
-        try:
-            win.destroy()
-        except tk.TclError:
-            pass
+        self.client_obj = ClientWindow(host, port,
+                                       on_disconnect=lambda: pyglet.app.exit())
+        pyglet.app.run()
+        self.client_obj = None
         self.root.deiconify()
 
     def _start_server(self, port):
