@@ -1,9 +1,9 @@
 import socket
 import threading
 import time
+import sys
+import numpy as np
 import pyautogui
-import dxcam
-import av
 from codec import create_encoder
 from protocol import send_cmd, recv_cmd, send_video
 
@@ -101,12 +101,30 @@ class Server:
 
         def screen_sender():
             nonlocal running
-            camera = None
+            import av
+            cap = None
             encoder = None
+            get_frame = None
+            stop_cap = None
             try:
-                camera = dxcam.create()
-                camera.start(target_fps=60)
                 encoder = create_encoder(w, h, bitrate=8_000_000, fps=60)
+
+                if sys.platform == 'win32':
+                    import dxcam
+                    cap = dxcam.create()
+                    cap.start(target_fps=60)
+                    def get_frame():
+                        return cap.get_latest_frame()
+                    stop_cap = lambda: cap.stop() if cap else None
+                else:
+                    import mss
+                    cap = mss.mss()
+                    mon = cap.monitors[1]
+                    def get_frame():
+                        img = cap.grab(mon)
+                        arr = np.frombuffer(img.bgra, np.uint8).reshape(img.height, img.width, 4)
+                        return arr[:, :, :3]
+                    stop_cap = lambda: cap.close() if cap else None
 
                 TARGET_BPS = 8_000_000
                 window_bytes = 0
@@ -117,7 +135,7 @@ class Server:
                 while running:
                     frame_start = time.monotonic()
                     try:
-                        frame = camera.get_latest_frame()
+                        frame = get_frame()
                         if frame is not None:
                             frame_count += 1
                             if frame_count % frame_skip == 0:
@@ -151,8 +169,8 @@ class Server:
                         running = False
                         break
             finally:
-                if camera:
-                    camera.stop()
+                if stop_cap:
+                    stop_cap()
                 if encoder:
                     encoder.close()
 

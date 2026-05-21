@@ -1,13 +1,19 @@
 import av
 import os
+import sys
 
 _ENCODER_CANDIDATES = [
     ('h264_nvenc', {'preset': 'p1', 'tune': 'll', 'rc': 'cbr', 'zerolatency': '1'}),
-    ('h264_amf',   {'usage': 'lowlatency', 'quality': 'speed', 'rc': 'cbr'}),
+]
+if sys.platform == 'win32':
+    _ENCODER_CANDIDATES.append(
+        ('h264_amf', {'usage': 'lowlatency', 'quality': 'speed', 'rc': 'cbr'}),
+    )
+_ENCODER_CANDIDATES.extend([
     ('h264_qsv',   {'preset': 'veryfast', 'rc': 'cbr'}),
     ('libx264',    {'preset': 'ultrafast', 'tune': 'zerolatency',
                     'crf': '23', 'threads': str(min(os.cpu_count() or 4, 8))}),
-]
+])
 
 _DECODER_CANDIDATES = ['h264_cuvid', 'h264_dxva2', 'h264_qsv', 'h264']
 
