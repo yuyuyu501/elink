@@ -88,7 +88,7 @@ class Server:
             while running:
                 try:
                     cmd = recv_cmd(sock)
-                    self._execute_cmd(cmd)
+                    self._execute_cmd(cmd, sock)
                 except (ConnectionError, ValueError):
                     running = False
                     break
@@ -157,10 +157,15 @@ class Server:
         except OSError:
             pass
 
-    def _execute_cmd(self, cmd):
+    def _execute_cmd(self, cmd, sock=None):
         t = cmd.get('type')
 
-        if t == 'mouse_move':
+        if t == 'ping' and sock:
+            from protocol import send_png
+            import json
+            send_png(sock, json.dumps({'ts': cmd['ts']}).encode('utf-8'))
+
+        elif t == 'mouse_move':
             pyautogui.moveTo(cmd['x'], cmd['y'])
 
         elif t == 'mouse_down':

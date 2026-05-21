@@ -2,9 +2,11 @@ import socket
 import threading
 import queue
 import io
+import time
+import json
 import tkinter as tk
 from PIL import Image, ImageTk
-from protocol import send_cmd, recv_screen, recv_cmd
+from protocol import send_cmd, recv_cmd, recv_msg, MSG_SCR, MSG_PNG
 
 TK_KEY_MAP = {
     'Shift_L': 'shift', 'Shift_R': 'shift',
@@ -55,6 +57,11 @@ class ClientController(tk.Frame):
         self.running = False
         self.photo = None
 
+        self.fps = 0
+        self.frame_count = 0
+        self.fps_timer = time.monotonic()
+        self.latency = 0.0
+
         self._build_ui()
         self.after(500, self._connect)
 
@@ -67,6 +74,10 @@ class ClientController(tk.Frame):
         tk.Label(top, text=f'目标: {self.host}:{self.port}').pack(side=tk.LEFT, padx=8)
         self.status_var = tk.StringVar(value='连接中...')
         tk.Label(top, textvariable=self.status_var).pack(side=tk.LEFT, padx=8)
+        self.fps_label = tk.Label(top, text='FPS: 0')
+        self.fps_label.pack(side=tk.LEFT, padx=8)
+        self.latency_label = tk.Label(top, text='延迟: 0ms')
+        self.latency_label.pack(side=tk.LEFT, padx=8)
         tk.Button(top, text='断开', command=self._disconnect).pack(side=tk.RIGHT, padx=8, pady=2)
 
         self.canvas = tk.Canvas(self, bg='black', highlightthickness=0)
@@ -110,6 +121,7 @@ class ClientController(tk.Frame):
             t.start()
 
             self.after(50, self._update_display)
+            self.after(2000, self._send_ping)
         except Exception as e:
             self.status_var.set(f'连接失败: {e}')
             self.after(2000, self._on_disconnect)
@@ -117,14 +129,18 @@ class ClientController(tk.Frame):
     def _screen_receiver(self):
         while self.running:
             try:
-                jpeg_data = recv_screen(self.sock)
-                img = Image.open(io.BytesIO(jpeg_data))
-                if self.img_queue.full():
-                    try:
-                        self.img_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                self.img_queue.put(img)
+                msg_type, data = recv_msg(self.sock)
+                if msg_type == MSG_PNG:
+                    resp = json.loads(data.decode('utf-8'))
+                    self.latency = (time.monotonic() - resp['ts']) * 1000
+                elif msg_type == MSG_SCR:
+                    img = Image.open(io.BytesIO(data))
+                    if self.img_queue.full():
+                        try:
+                            self.img_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                    self.img_queue.put(img)
             except (ConnectionError, EOFError, OSError):
                 self.running = False
                 break
@@ -135,6 +151,14 @@ class ClientController(tk.Frame):
     def _update_display(self):
         if not self.running:
             return
+
+        now = time.monotonic()
+        self.frame_count += 1
+        dt = now - self.fps_timer
+        if dt >= 1.0:
+            self.fps = self.frame_count / dt
+            self.frame_count = 0
+            self.fps_timer = now
 
         try:
             img = self.img_queue.get_nowait()
@@ -162,7 +186,19 @@ class ClientController(tk.Frame):
         except queue.Empty:
             pass
 
+        self.fps_label.config(text=f'FPS: {self.fps:.0f}')
+        self.latency_label.config(text=f'延迟: {self.latency:.0f}ms')
+
         self.after(50, self._update_display)
+
+    def _send_ping(self):
+        if not self.running or not self.sock:
+            return
+        try:
+            send_cmd(self.sock, {'type': 'ping', 'ts': time.monotonic()})
+        except OSError:
+            pass
+        self.after(2000, self._send_ping)
 
     def _to_remote(self, cx, cy):
         rx = int((cx - self.offset_x) / self.scale)
