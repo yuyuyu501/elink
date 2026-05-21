@@ -1,6 +1,8 @@
-import av
 import os
 import sys
+from fractions import Fraction
+
+import av
 
 _ENCODER_CANDIDATES = [
     ('h264_nvenc', {'preset': 'p1', 'tune': 'll', 'rc': 'cbr', 'zerolatency': '1'}),
@@ -45,7 +47,7 @@ def create_encoder(width, height, bitrate=8_000_000, fps=60):
     ctx.height = height
     ctx.pix_fmt = 'yuv420p'
     ctx.framerate = fps
-    ctx.time_base = (1, fps)
+    ctx.time_base = Fraction(1, fps)
 
     opts = {}
     for cname, copts in _ENCODER_CANDIDATES:
