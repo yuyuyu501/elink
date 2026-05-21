@@ -87,7 +87,7 @@ class ClientWindow(pyglet.window.Window):
                 raise ValueError('Missing screen_info')
             self.remote_w = info['width']
             self.remote_h = info['height']
-            self.set_title(f'Elink - {self.host}:{self.port} ({self.remote_w}x{self.remote_h})')
+            self.set_caption(f'Elink - {self.host}:{self.port} ({self.remote_w}x{self.remote_h})')
 
             self.running = True
             t = threading.Thread(target=self._receiver, daemon=True)
