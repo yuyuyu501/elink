@@ -61,6 +61,7 @@ class ClientController(tk.Frame):
         self.frame_count = 0
         self.fps_timer = time.monotonic()
         self.latency = 0.0
+        self.bandwidth = 0.0
 
         self._build_ui()
         self.after(500, self._connect)
@@ -78,6 +79,8 @@ class ClientController(tk.Frame):
         self.fps_label.pack(side=tk.LEFT, padx=8)
         self.latency_label = tk.Label(top, text='延迟: 0ms')
         self.latency_label.pack(side=tk.LEFT, padx=8)
+        self.bandwidth_label = tk.Label(top, text='带宽: 0Mbps')
+        self.bandwidth_label.pack(side=tk.LEFT, padx=8)
         tk.Button(top, text='断开', command=self._disconnect).pack(side=tk.RIGHT, padx=8, pady=2)
 
         self.canvas = tk.Canvas(self, bg='black', highlightthickness=0)
@@ -133,6 +136,8 @@ class ClientController(tk.Frame):
                 if msg_type == MSG_PNG:
                     resp = json.loads(data.decode('utf-8'))
                     self.latency = (time.monotonic() - resp['ts']) * 1000
+                    if 'bw' in resp:
+                        self.bandwidth = resp['bw'] / 1_000_000
                 elif msg_type == MSG_SCR:
                     img = Image.open(io.BytesIO(data))
                     if self.img_queue.full():
@@ -188,6 +193,7 @@ class ClientController(tk.Frame):
 
         self.fps_label.config(text=f'FPS: {self.fps:.0f}')
         self.latency_label.config(text=f'延迟: {self.latency:.0f}ms')
+        self.bandwidth_label.config(text=f'带宽: {self.bandwidth:.1f}Mbps')
 
         self.after(50, self._update_display)
 

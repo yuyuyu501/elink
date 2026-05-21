@@ -40,6 +40,7 @@ class Server:
         self.server_sock = None
         self.client_sock = None
         self.running = False
+        self.current_bps = 0
 
     def start(self, on_status=None, on_error=None):
         self.running = True
@@ -124,6 +125,7 @@ class Server:
                     elapsed = now - window_start
                     if elapsed >= 1.0:
                         actual_bps = window_bytes * 8 / elapsed
+                        self.current_bps = actual_bps
                         if actual_bps > TARGET_BPS * 1.1:
                             quality = max(10, quality - 5)
                         elif actual_bps < TARGET_BPS * 0.6 and quality < 85:
@@ -163,7 +165,10 @@ class Server:
         if t == 'ping' and sock:
             from protocol import send_png
             import json
-            send_png(sock, json.dumps({'ts': cmd['ts']}).encode('utf-8'))
+            send_png(sock, json.dumps({
+                'ts': cmd['ts'],
+                'bw': self.current_bps,
+            }).encode('utf-8'))
 
         elif t == 'mouse_move':
             pyautogui.moveTo(cmd['x'], cmd['y'])
