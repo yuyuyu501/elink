@@ -18,6 +18,19 @@
 pip install -r requirements.txt
 ```
 
+**Linux 额外依赖：**
+
+```bash
+# Debian/Ubuntu
+sudo apt install python3-tk python3-dev scrot
+# Arch Linux
+sudo pacman -S tk scrot
+# 若 scrot 不可用，可安装 gnome-screenshot：
+sudo apt install gnome-screenshot
+```
+
+> Linux 下 `pyautogui` 需要 `python3-tk` 和 scrot（或 gnome-screenshot）支持屏幕截图。
+
 ### 运行
 
 ```bash
