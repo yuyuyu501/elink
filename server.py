@@ -42,7 +42,7 @@ class Server:
         self.running = False
         self.current_bps = 0
 
-    def start(self, on_status=None, on_error=None):
+    def start(self, on_status=None, on_error=None, on_connect=None, on_disconnect=None):
         self.running = True
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -50,17 +50,21 @@ class Server:
         self.server_sock.listen(1)
         self.server_sock.settimeout(1.0)
 
-        t = threading.Thread(target=self._accept_loop, args=(on_status, on_error), daemon=True)
+        t = threading.Thread(target=self._accept_loop, args=(on_status, on_error, on_connect, on_disconnect), daemon=True)
         t.start()
 
-    def _accept_loop(self, on_status, on_error):
+    def _accept_loop(self, on_status, on_error, on_connect, on_disconnect):
         while self.running:
             try:
                 client, addr = self.server_sock.accept()
                 self.client_sock = client
                 if on_status:
                     on_status(f'已连接: {addr[0]}:{addr[1]}')
+                if on_connect:
+                    on_connect(addr[0])
                 self._handle_client(client, on_status, on_error)
+                if on_disconnect:
+                    on_disconnect()
                 if on_status:
                     on_status('等待连接...')
                 self.client_sock = None
