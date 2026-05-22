@@ -5,7 +5,13 @@ import time
 import json
 import pyglet
 import pyglet.image
-import pyglet.sprite
+from pyglet.gl import (
+    GL_TEXTURE_2D, GL_RGB, GL_UNSIGNED_BYTE, GL_LINEAR,
+    GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER,
+    glBindTexture, glTexParameteri, glTexImage2D, glTexSubImage2D,
+    glActiveTexture, GL_TEXTURE0, GL_TRIANGLES,
+)
+from pyglet.graphics import Batch, Group
 from pyglet.window import key, mouse
 from protocol import send_cmd, recv_cmd, recv_msg, MSG_VID, MSG_PNG
 from codec import create_decoder
@@ -39,6 +45,19 @@ CTRL_KEYS = {'shift', 'ctrl', 'alt', 'win'}
 MOUSE_BTN_MAP = {mouse.LEFT: 1, mouse.MIDDLE: 2, mouse.RIGHT: 3}
 
 
+class _TexGroup(Group):
+    def __init__(self, tex_id):
+        super().__init__()
+        self.tex_id = tex_id
+
+    def set_state(self):
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.tex_id)
+
+    def unset_state(self):
+        pass
+
+
 class ClientWindow(pyglet.window.Window):
     def __init__(self, host, port, on_disconnect=None):
         self.host = host
@@ -65,7 +84,9 @@ class ClientWindow(pyglet.window.Window):
         super().__init__(1024, 700, f'Elink - {host}:{port}', resizable=True)
 
         self.texture = None
-        self.sprite = None
+        self._batch = None
+        self._group = None
+        self._vl = None
 
         t = threading.Thread(target=self._connect, daemon=True)
         t.start()
@@ -150,32 +171,65 @@ class ClientWindow(pyglet.window.Window):
             if self.texture is None:
                 image_data = pyglet.image.ImageData(w, h, 'RGB', data)
                 self.texture = image_data.get_texture()
-                self.sprite = pyglet.sprite.Sprite(self.texture)
-            elif w != self.texture.width or h != self.texture.height:
-                image_data = pyglet.image.ImageData(w, h, 'RGB', data)
-                self.texture = image_data.get_texture()
-                self.sprite = pyglet.sprite.Sprite(self.texture)
+
+                self._group = _TexGroup(self.texture.id)
+                self._batch = Batch()
+
+                prog = self._default_program
+                indices = [0, 1, 2, 0, 2, 3]
+                self._vl = prog.vertex_list_indexed(
+                    4, GL_TRIANGLES, indices, self._batch, self._group,
+                    position=('f', (0.0,) * 8),
+                    tex_coords=('f', (0.0,) * 8),
+                )
+                self._update_quad()
             else:
-                image_data = pyglet.image.ImageData(w, h, 'RGB', data)
-                self.texture.blit_into(image_data, 0, 0, 0)
+                glBindTexture(GL_TEXTURE_2D, self.texture.id)
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
+                                GL_RGB, GL_UNSIGNED_BYTE, data)
         except queue.Empty:
             pass
+
+    def _update_quad(self):
+        if self._vl is None:
+            return
+        cw, ch = self.width, self.height
+        sx = cw / self.remote_w
+        sy = ch / self.remote_h
+        s = min(sx, sy)
+        dw = int(self.remote_w * s)
+        dh = int(self.remote_h * s)
+        ox = (cw - dw) // 2
+        oy = (ch - dh) // 2
+
+        x0, y0 = ox, oy
+        x1, y1 = ox + dw, oy + dh
+
+        self._vl.position[:] = [
+            x0, y0,
+            x1, y0,
+            x1, y1,
+
+            x0, y0,
+            x1, y1,
+            x0, y1,
+        ]
+        self._vl.tex_coords[:] = [
+            0.0, 1.0,
+            1.0, 1.0,
+            1.0, 0.0,
+
+            0.0, 1.0,
+            1.0, 0.0,
+            0.0, 0.0,
+        ]
 
     def on_draw(self):
         self.clear()
 
-        if self.sprite:
-            cw, ch = self.width, self.height
-            sx = cw / self.remote_w
-            sy = ch / self.remote_h
-            s = min(sx, sy)
-            dw = int(self.remote_w * s)
-            dh = int(self.remote_h * s)
-            ox = (cw - dw) // 2
-            oy = (ch - dh) // 2
-
-            self.sprite.update(x=ox, y=oy, scale_x=dw / self.remote_w, scale_y=dh / self.remote_h)
-            self.sprite.draw()
+        if self._batch:
+            self._update_quad()
+            self._batch.draw()
 
         pyglet.text.Label(
             f'FPS: {self.fps}  延迟: {self.latency:.0f}ms  带宽: {self.bandwidth:.1f}Mbps',
