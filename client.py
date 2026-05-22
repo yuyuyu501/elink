@@ -4,7 +4,7 @@ import queue
 import time
 import json
 import pyglet
-from pyglet.gl import *
+from pyglet.gl import GL_TEXTURE_2D, GL_RGB, GL_BGR, GL_UNSIGNED_BYTE, GL_LINEAR, GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, glBindTexture, glTexParameteri, glTexImage2D, glTexSubImage2D
 from pyglet.window import key, mouse
 from protocol import send_cmd, recv_cmd, recv_msg, MSG_VID, MSG_PNG
 from codec import create_decoder
@@ -50,9 +50,6 @@ class ClientWindow(pyglet.window.Window):
 
         self.decoder = create_decoder()
         self.frame_queue = queue.Queue(maxsize=2)
-        self.tex_id = GLuint(0)
-        glGenTextures(1, self.tex_id)
-        self.tex_ready = False
 
         self.remote_w = 1920
         self.remote_h = 1080
@@ -65,6 +62,9 @@ class ClientWindow(pyglet.window.Window):
         self.modifiers_pressed = set()
 
         super().__init__(1024, 700, f'Elink - {host}:{port}', resizable=True)
+
+        self.texture = None
+        self.sprite = None
 
         t = threading.Thread(target=self._connect, daemon=True)
         t.start()
@@ -139,19 +139,23 @@ class ClientWindow(pyglet.window.Window):
             img = f.to_ndarray(format='bgr24')
             h, w = img.shape[:2]
 
-            glBindTexture(GL_TEXTURE_2D, self.tex_id)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0,
-                         GL_BGR_EXT, GL_UNSIGNED_BYTE, img.tobytes())
-            self.tex_ready = True
+            self.remote_w = w
+            self.remote_h = h
+
+            if self.texture is None:
+                image_data = pyglet.image.ImageData(w, h, 'BGR', img.tobytes(), pitch=-w * 3)
+                self.texture = image_data.get_texture()
+                self.sprite = pyglet.sprite.Sprite(self.texture)
+            else:
+                glBindTexture(GL_TEXTURE_2D, self.texture.id)
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGR, GL_UNSIGNED_BYTE, img.tobytes())
         except queue.Empty:
             pass
 
     def on_draw(self):
         self.clear()
 
-        if self.tex_ready:
+        if self.sprite:
             cw, ch = self.width, self.height
             sx = cw / self.remote_w
             sy = ch / self.remote_h
@@ -161,34 +165,27 @@ class ClientWindow(pyglet.window.Window):
             ox = (cw - dw) // 2
             oy = (ch - dh) // 2
 
-            glEnable(GL_TEXTURE_2D)
-            glBindTexture(GL_TEXTURE_2D, self.tex_id)
-            glColor3f(1, 1, 1)
-            glBegin(GL_QUADS)
-            glTexCoord2f(0, 1); glVertex2f(ox, oy)
-            glTexCoord2f(1, 1); glVertex2f(ox + dw, oy)
-            glTexCoord2f(1, 0); glVertex2f(ox + dw, oy + dh)
-            glTexCoord2f(0, 0); glVertex2f(ox, oy + dh)
-            glEnd()
-            glDisable(GL_TEXTURE_2D)
+            self.sprite.update(x=ox, y=oy, scale_x=dw / self.remote_w, scale_y=dh / self.remote_h)
+            self.sprite.draw()
 
-        text = f'FPS: {self.fps}  延迟: {self.latency:.0f}ms  带宽: {self.bandwidth:.1f}Mbps'
-        pyglet.text.Label(text, font_size=13, x=10, y=self.height - 18,
-                          anchor_y='center', color=(0, 255, 0, 255)).draw()
+        pyglet.text.Label(
+            f'FPS: {self.fps}  延迟: {self.latency:.0f}ms  带宽: {self.bandwidth:.1f}Mbps',
+            font_size=13, x=10, y=self.height - 18,
+            anchor_y='center', color=(0, 255, 0, 255),
+        ).draw()
 
         if not self.running and not self.closing:
-            pyglet.text.Label('连接断开', font_size=24,
-                              x=self.width // 2, y=self.height // 2,
-                              anchor_x='center', anchor_y='center',
-                              color=(255, 0, 0, 255)).draw()
+            pyglet.text.Label(
+                '连接断开', font_size=24,
+                x=self.width // 2, y=self.height // 2,
+                anchor_x='center', anchor_y='center',
+                color=(255, 0, 0, 255),
+            ).draw()
 
     def on_resize(self, width, height):
-        glViewport(0, 0, width, height)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        glOrtho(0, width, 0, height, -1, 1)
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
+        self.viewport = (0, 0, width, height)
+        from pyglet.math import Mat4
+        self.projection = Mat4.orthogonal_projection(0, width, 0, height, -1, 1)
 
     # ---------- input ----------
 
