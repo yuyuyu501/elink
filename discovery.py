@@ -37,6 +37,9 @@ class _DiscoveryListener:
     def remove_service(self, zeroconf, service_type, name):
         self.discovery.remove_service(zeroconf, service_type, name)
 
+    def update_service(self, zeroconf, service_type, name):
+        pass
+
 
 class Discovery:
     def __init__(self):
