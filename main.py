@@ -96,8 +96,8 @@ class App:
 
         self.status_label = tk.Label(list_frame, text='状态: 服务已停止',
                                      fg='#888888', anchor=tk.W,
-                                     bg='#f0f0f0', pady=(5, 0))
-        self.status_label.pack(fill=tk.X)
+                                     bg='#f0f0f0')
+        self.status_label.pack(fill=tk.X, pady=(5, 0))
 
         sep3 = tk.Frame(self.root, height=1, bg='#cccccc')
         sep3.pack(fill=tk.X, padx=10, pady=(5, 0))
