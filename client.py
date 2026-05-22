@@ -4,7 +4,8 @@ import queue
 import time
 import json
 import pyglet
-from pyglet.gl import GL_TEXTURE_2D, GL_RGB, GL_BGR, GL_UNSIGNED_BYTE, GL_LINEAR, GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, glBindTexture, glTexParameteri, glTexImage2D, glTexSubImage2D
+import pyglet.image
+import pyglet.sprite
 from pyglet.window import key, mouse
 from protocol import send_cmd, recv_cmd, recv_msg, MSG_VID, MSG_PNG
 from codec import create_decoder
@@ -138,17 +139,25 @@ class ClientWindow(pyglet.window.Window):
             f = self.frame_queue.get_nowait()
             img = f.to_ndarray(format='bgr24')
             h, w = img.shape[:2]
+            if w == 0 or h == 0:
+                return
 
             self.remote_w = w
             self.remote_h = h
 
+            data = img[:, :, ::-1].tobytes()
+
             if self.texture is None:
-                image_data = pyglet.image.ImageData(w, h, 'BGR', img.tobytes(), pitch=-w * 3)
+                image_data = pyglet.image.ImageData(w, h, 'RGB', data)
+                self.texture = image_data.get_texture()
+                self.sprite = pyglet.sprite.Sprite(self.texture)
+            elif w != self.texture.width or h != self.texture.height:
+                image_data = pyglet.image.ImageData(w, h, 'RGB', data)
                 self.texture = image_data.get_texture()
                 self.sprite = pyglet.sprite.Sprite(self.texture)
             else:
-                glBindTexture(GL_TEXTURE_2D, self.texture.id)
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGR, GL_UNSIGNED_BYTE, img.tobytes())
+                image_data = pyglet.image.ImageData(w, h, 'RGB', data)
+                self.texture.blit_into(image_data, 0, 0, 0)
         except queue.Empty:
             pass
 
