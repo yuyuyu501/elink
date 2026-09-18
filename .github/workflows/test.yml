@@ -1,0 +1,26 @@
+name: Windows Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run automated tests
+        run: python -m pytest -q

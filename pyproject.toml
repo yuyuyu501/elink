@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elink-desktop"
+version = "0.4.0"
+description = "Independent Windows desktop streaming with DXGI, hardware H.264 and WebRTC"
+requires-python = ">=3.11,<3.14"
+dependencies = ["PySide6==6.10.2", "cryptography==46.0.5", "aiortc==1.14.0", "av==16.1.0",
+                "aiohttp==3.13.2", "dxcam==0.0.5", "numpy==2.2.6", "soundcard==0.4.5",
+                "sounddevice==0.5.3", "opencv-python==4.12.0.88", "aioice==0.10.2"]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2", "pyinstaller==6.16.0"]
+
+[project.scripts]
+elink = "elink.app:main"
+
+[tool.setuptools.packages.find]
+include = ["elink*"]
+
+[tool.setuptools.package-data]
+elink = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

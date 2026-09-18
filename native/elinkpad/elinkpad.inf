@@ -1,0 +1,49 @@
+[Version]
+Signature = "$WINDOWS NT$"
+Class = System
+ClassGuid = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider = %Provider%
+CatalogFile = elinkpad.cat
+DriverVer = 09/14/2026,0.4.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DriverCopy = 13
+[SourceDisksNames]
+1 = %Disk%
+[SourceDisksFiles]
+ElinkPad.dll = 1
+[Manufacturer]
+%Provider% = Models,NTamd64.10.0...19041
+[Models.NTamd64.10.0...19041]
+%Device% = Install,Elink\VirtualPadV1
+[Install.NT]
+CopyFiles = DriverCopy
+[DriverCopy]
+ElinkPad.dll
+[Install.NT.HW]
+AddReg = Security
+[Security]
+; Local interactive users can play games and acquire the single control lease.
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+[Install.NT.Services]
+AddService = WUDFRd,0x000001fa,Reflector.Service
+[Reflector.Service]
+DisplayName = "Windows Driver Foundation - User-mode Driver Framework Reflector"
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %12%\WUDFRd.sys
+[Install.NT.Wdf]
+UmdfService = ElinkPad,ElinkPad.Service
+UmdfServiceOrder = ElinkPad
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+UmdfFileObjectPolicy = AllowNullAndUnknownFileObjects
+UmdfHostProcessSharing = ProcessSharingDisabled
+[ElinkPad.Service]
+UmdfLibraryVersion = 2.15.0
+ServiceBinary = %13%\ElinkPad.dll
+[Strings]
+Provider = "Elink"
+Device = "Elink Virtual Xbox Pad (Experimental)"
+Disk = "ElinkPad experimental driver"
