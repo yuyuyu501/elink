@@ -1,4 +1,4 @@
-# Elink 0.4 Preview
+# Elink 0.4.1 Preview
 
 Windows 独立远程桌面与游戏串流原型。Elink 自己负责采集、会话、配对、播放器和输入；不需要 Sunshine 或 Moonlight，不下载或启动它们。
 
@@ -14,7 +14,7 @@ python -m venv .venv
 
 本地便携构建入口：`dist/Elink/Elink.exe`，需保留整个文件夹。构建：`.venv/Scripts/python.exe -m scripts.build`。
 
-日常开发按“本地修改 → 自动测试 → Git 同步”执行；已审阅并暂存修改后运行 `.venv/Scripts/python.exe -m scripts.check_and_sync --message "修改说明"`。**打包只在明确要求时执行**：`.venv/Scripts/python.exe -m scripts.package_windows`，生成经 EXE 自测的便携 ZIP 和校验报告，不做 Git 操作。详见 [开发与打包流程](docs/development-workflow.md)。
+日常开发按“本地修改 → 自动测试 → Git 同步 → Windows 打包 → GitHub Release”执行，发布后由用户安装新版并手动测试。更新版本号、写好发布说明并审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.release_windows --message "修改说明" --notes docs/releases/v0.4.1.md`。各阶段失败即停止；打包与上传脚本也可单独重试。详见 [开发与打包流程](docs/development-workflow.md)。
 
 自动化测试：`.venv/Scripts/python.exe -m pytest -q`。便携包自测可运行 `Elink.exe --self-test <独立测试目录>`，结果写入该目录；实际桌面采集自测为 `--self-test-desktop`，两者均不向系统注入键鼠。
 
@@ -39,7 +39,7 @@ python -m venv .venv
 
 自动替换仅支持解压后的便携版，目录及上级目录需可写，需预留 3 GiB 加下载包大小的空间。用户配置和配对数据仍在 `%LOCALAPPDATA%\Elink`，或外置的 `ELINK_DATA_DIR`；不支持将数据放在应用文件夹内进行自动更新。源码运行时可检测版本并前往 Releases 手动下载。下载依赖能访问 GitHub；网络失败或 API 限流时可重试或手动更新。
 
-**已发布的 0.4.0 EXE 尚无此入口，需要先手动安装一次包含更新功能的新版本。** 当前源码修改不会自动更新已下载的 EXE，也未创建新 Release。更新说明、校验与回退边界见 [应用更新说明](docs/application-updates.md)。
+**0.4.0 EXE 没有更新入口，需要先手动安装一次 0.4.1 或更高版本。** 后续可通过“关于 → 检测更新”升级。更新说明、校验与回退边界见 [应用更新说明](docs/application-updates.md)。
 
 ## 当前能力
 

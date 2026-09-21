@@ -1,42 +1,48 @@
-# 开发与打包流程
+# 开发、打包与发布流程
 
-日常流程固定为：**本地修改 → 自动测试 → Git 同步**。
-只有用户明确要求打包或发布时，才执行独立打包脚本。普通提交、测试通过和 push 均不会触发构建 EXE、创建 tag 或 GitHub Release。
+2026-09-21 起，用户授权的默认流程为：**本地修改 → 自动测试 → Git 同步 → Windows 打包 → GitHub Release → 用户安装后手动功能测试**。每次完成应用更新都按此流程推进，无需再次询问是否打包发布。不会安装驱动。
 
-## 日常更新
+## 默认入口
 
-先检查并暂存本次修改，再运行：
+先检查工作区和远端，保留无关修改。每次发布使用未被占用的新版本，默认递增补丁号，同时更新 `elink/__init__.py` 和 `pyproject.toml`。在 `docs/releases/v<版本>.md` 写好此次发布说明，审阅并暂存本次文件，然后运行：
 
 ```powershell
 git status --short
-git add <本次修改的文件或目录>
-.venv/Scripts/python.exe -m scripts.check_and_sync --message "说明本次修改"
+git add <本次修改的具体文件>
+.venv/Scripts/python.exe -m scripts.release_windows --message "说明本次修改" --notes docs/releases/v0.4.1.md
 ```
 
-脚本运行完整 pytest 测试集，确认测试期间源码和暂存区没有变化，再拉取上游状态；只有远端可快进时才提交并 push。测试失败、工作区未审阅、远端有新提交或认证失败时返回非零退出码，不强推、不自动合并、不打包。
+请将示例说明路径换成本次版本。该入口依次调用三个独立阶段，任一失败立即停止：
 
-脚本只提交已暂存的修改，不自行执行 `git add --all`。非忽略的未暂存/未跟踪文件会导致提前停止，防止测试代码与提交代码不一致。存在其他任务的修改时，由开发者分别审阅和提交，不得丢弃它们来通过检查。push 失败后已创建的本地提交会保留；解决认证/网络问题后重跑脚本即可测试并重试同步。
+1. `check_and_sync`：完整 pytest，确认测试期间源码及暂存区未变，再检查上游。只提交已审阅/暂存文件并 push；不强推、不丢弃修改、不自动合并分叉。不自行 `git add --all`，存在未暂存或未跟踪源码时停止。
+2. `package_windows`：重跑测试，构建 PyInstaller 便携目录，运行真实 EXE 音视频/退出自测，再用隔离副本验证目录替换、重启与配置保留，检查源码未变，最后生成 ZIP 与校验报告。
+3. `publish_release`：确认包与干净工作区、远端 main 提交一致，且对应 push 的 GitHub Windows CI 成功。先创建预览版草稿，上传并核对所有资产大小及 SHA-256，再公开发布。已发布版本不覆盖；同一提交的未完成草稿可继续上传缺失的资产。
 
-GitHub Actions 在 main 推送或 PR 时补跑 Windows 测试；它不打包、不上传二进制、不创建 Release。远端 CI 不能替代本地测试，也不能替代双机/游戏验收。
+GitHub Actions 补跑 Windows 单元测试，不直接打包。构建仍在本地 Windows 桌面环境进行，需要项目 `.venv`、`pip install -e ".[dev]"` 和可用音频输出设备。发布使用 Git Credential Manager 内已有的 GitHub HTTPS 凭据，只在内存读取，不写入仓库或产物。
 
-## 按需 Windows 打包
-
-仅在明确要求打包时运行：
+## 失败后独立重试
 
 ```powershell
+# 测试并同步源码，不执行后两个阶段
+.venv/Scripts/python.exe -m scripts.check_and_sync --message "修改说明"
+
+# 构建/自测/生成便携 ZIP，不做 Git 或网络发布
 .venv/Scripts/python.exe -m scripts.package_windows
+
+# 上传已有验证包，不重新构建；路径替换成本次成功产物
+.venv/Scripts/python.exe -m scripts.publish_release --package dist/releases/v0.4.1/<UTC时间> --notes docs/releases/v0.4.1.md
 ```
 
-需要 Windows x64、项目 `.venv` 和 `pip install -e ".[dev]"`。脚本执行测试、现有 PyInstaller 构建、打包后的 EXE 自测，并检查声音/画面帧和退出清理。自测使用合成画面与静音音频，需要可用的 Windows 桌面和音频输出设备；不会安装驱动或注入系统输入。
+如果 CI 仍在运行，保留包并等待 CI 完成后重试上传。上传中断保留草稿；已有资产若校验不一致，停止并报告，不自动删除或覆盖。push 失败保留本地提交；远端分叉需要先审阅解决，再重新测试。源码发生变更后必须同步并重新打包，不能发布旧工作区产物。
 
-成功后的产物：
+## 产物与验收
 
-- `dist/Elink/Elink.exe`：直接运行的 Windows 程序。
+- `dist/Elink/Elink.exe`：Windows 可运行程序，必须保留整个文件夹。
 - `dist/releases/v<版本>/<UTC时间>/Elink-<版本>-windows-x64.zip`：完整便携包。
-- 同目录 `SHA256SUMS.txt` 与 `verification.json`：校验值、源码文件散列、Git 提交/脏工作区状态、自测结果。
+- 同目录 `SHA256SUMS.txt` 和 `verification.json`：ZIP 校验、源码散列、提交、EXE 和更新自测、待用户验收状态。
 
-EXE 是便携目录程序，运行时需要旁边的 `_internal` 和 DLL；分发应发送完整 ZIP，不能只复制 EXE。这样保留可替换的动态库，也避免单文件程序每次启动解压全部媒体组件。后续需要单文件自解压版或安装器时单独增加。
+这是便携目录应用，不能只发 EXE。`_internal` 包含媒体和界面运行库；不需要用户安装 Python。不会每次启动解压全部库，也保留动态库可替换性。安装器或单文件自解压版不属于当前发布格式。
 
-脚本自动读取 `elink.__version__` 和 `pyproject.toml` 并要求两者一致；不会自动升级版本。不跳过测试，不覆盖已有成功发布目录；失败会停止，`dist/Elink` 可能留下本次未验收构建，以非零退出码和缺少新的验证目录为准。脚本不提交、不 push、不打 tag、不创建或发布 GitHub Release。
+真实 EXE 更新自测使用同版本副本，检查替换机制，不代表未来版本的数据迁移正确。发布仍标记 Preview、未签名和用户手动验收待完成。用户安装后重点检查双机连接、光标、键鼠、声音、手柄和游戏表现；发现问题再修复并发布新版本，不改写已发布资产。
 
-当前仍是未签名预览版。独立 ElinkPad 驱动不包含在应用安装流程内。公开二进制发行前应按 `THIRD_PARTY_NOTICES.md` 准备对应依赖的源码和许可证材料。双机性能问题见 `two-machine-test-20260918.md`。
+ElinkPad 实验驱动不会随应用更新安装。第三方组件要求见 `THIRD_PARTY_NOTICES.md`；双机性能已知问题见 `two-machine-test-20260918.md`。

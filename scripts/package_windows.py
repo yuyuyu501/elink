@@ -1,4 +1,4 @@
-"""Explicit Windows packaging: tests -> build -> EXE self-test -> portable ZIP."""
+"""Windows packaging: tests -> build -> EXE and updater checks -> portable ZIP."""
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -13,6 +13,7 @@ import tomllib
 
 from elink import __version__
 from elink.processes import native_environment
+from scripts.test_portable_update import verify_portable_update
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,6 +52,7 @@ def package():
                        cwd=ROOT, env=native_environment(), check=True, timeout=120)
         report = json.loads((diagnostics / 'result.json').read_text(encoding='utf-8'))
         validate_self_test(report)
+        upgrade = verify_portable_update(ROOT / 'dist' / 'Elink', temporary / 'update-check')
         if source_snapshot() != snapshot:
             raise RuntimeError('Source changed during packaging; rerun before distributing this build.')
         filename = f'Elink-{__version__}-windows-x64'
@@ -58,6 +60,7 @@ def package():
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         receipt = dict(version=__version__, built_at=stamp, commit=revision, source_dirty=dirty,
                        source_sha256=snapshot, package_sha256=digest, self_test=report,
+                       updater_test=upgrade, manual_acceptance='pending',
                        signed=False, channel='preview', format='portable-folder')
         (temporary / 'verification.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
         (temporary / 'SHA256SUMS.txt').write_text(f'{digest}  {archive.name}\n', encoding='ascii')
@@ -68,6 +71,7 @@ def package():
     print(f'Verified preview package: {destination}')
     print(f'Run: {ROOT / "dist" / "Elink" / "Elink.exe"}')
     print('Unzip the whole portable folder; keep its DLLs. No Git push, tag, release upload or driver install performed.')
+    return destination
 
 
 def main():
