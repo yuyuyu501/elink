@@ -70,7 +70,15 @@ def run(root: Path, desktop=False):
                       audio_output_active=bool(client.output and client.output.stream.active),
                       stream_statistics=asdict(client.stats))
         player.grab().save(str(root / "player.png"))
-        for index, name in enumerate(("remote", "host", "network")):
+        player.open_controls()
+        app.processEvents()
+        player.control_menu.grab().save(str(root / "control-menu.png"))
+        player.control_menu.close()
+        player.open_quality()
+        app.processEvents()
+        player.settings_dialog.grab().save(str(root / "stream-settings.png"))
+        player.settings_dialog.reject()
+        for index, name in enumerate(("devices", "settings", "network")):
             window.tabs.setCurrentIndex(index)
             app.processEvents()
             window.grab().save(str(root / f"{name}.png"))

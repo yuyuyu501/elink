@@ -1,4 +1,4 @@
-# Elink 0.4.3 Preview
+# Elink 0.4.4 Preview
 
 Windows 独立远程桌面与游戏串流原型。Elink 自己负责采集、发现、会话、播放器和输入；不需要 Sunshine 或 Moonlight，不下载或启动它们。
 
@@ -14,7 +14,7 @@ python -m venv .venv
 
 本地便携构建入口：`dist/Elink/Elink.exe`，需保留整个文件夹。构建：`.venv/Scripts/python.exe -m scripts.build`。
 
-日常开发按“本地修改 → 自动测试 → Git 同步 → Windows 打包 → GitHub Release”执行，发布后由用户安装新版并手动测试。更新版本号、写好发布说明并审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.release_windows --message "修改说明" --notes docs/releases/v0.4.3.md`。各阶段失败即停止；打包与上传脚本也可单独重试。详见 [开发与打包流程](docs/development-workflow.md)。
+日常开发按“本地修改 → 自动测试 → Git 同步 → Windows 打包 → GitHub Release”执行，发布后由用户安装新版并手动测试。更新版本号、写好发布说明并审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.release_windows --message "修改说明" --notes docs/releases/v0.4.4.md`。各阶段失败即停止；打包与上传脚本也可单独重试。详见 [开发与打包流程](docs/development-workflow.md)。
 
 自动化测试：`.venv/Scripts/python.exe -m pytest -q`。便携包自测可运行 `Elink.exe --self-test <独立测试目录>`，结果写入该目录；实际桌面采集自测为 `--self-test-desktop`，两者均不向系统注入键鼠。
 
@@ -24,11 +24,13 @@ python -m venv .venv
 
 1. 两端启动 Elink。启动后默认可被控，同一时间只允许一台控制端接入，默认 HTTPS TCP 49200。Windows 防火墙需允许 Elink 入站；媒体使用 ICE 动态 UDP 端口。
 2. 如果两端没有可达地址，先自行安装、登录外部 Tailscale，并让两端在允许互访的同一 tailnet 内。Elink 不修改 Tailscale 账户或系统网络设置。
-3. 控制端“远程连接”会自动发现同局域网和同 Tailscale 下正在运行 Elink 的机器。相同机器的多个地址会合并为一项，优先使用局域网地址；选择后直接开始串流，也可手动填写地址。
-4. 控制端选择分辨率、目标帧率、码率、声音和手柄，然后开始串流。点击画面捕获输入；Ctrl+Alt+Shift+Z 释放输入，F10 显示 / 隐藏统计，F11 切换全屏，Ctrl+Alt+Shift+Q 断开。Esc 正常发送给游戏。游戏可从远端桌面启动。
+3. 控制端“设备”页会自动发现同局域网和同 Tailscale 下正在运行 Elink 的机器。相同机器的多个地址会合并为一项，优先使用局域网地址；点击设备即可开始连接，也可使用“通过地址连接”。本机状态和断开当前控制端按钮也位于设备页。
+4. “设置”页保存默认串流偏好；串流窗口上方的“控制中心”可调整画质、鼠标、手柄、本机静音、统计和全屏。画质与声音传输设置通过“应用并重新连接”生效，鼠标、手柄和静音立即生效。点击画面捕获输入；F8 打开控制中心并释放输入，Ctrl+Alt+Shift+Z 释放输入，F10 显示 / 隐藏统计，F11 切换全屏，Ctrl+Alt+Shift+Q 断开。Esc 正常发送给游戏。游戏可从远端桌面启动。
 5. 在主机点击“断开当前控制端”可结束会话，随后自动恢复等待连接。退出程序会释放输入并停止接入。没有开机启动或后台系统服务。
 
 旧 0.2 版本的 GameStream 配对不可复用；0.3 使用独立 `desktop-v3.json` 设置，旧配置与用户数据保留。
+
+首页不再显示常驻日志或串流参数表单，连接失败以可选择复制的提示显示。详细记录在“网络诊断 → 查看诊断记录”中，默认收起。监听端口与本机手柄后端移入“设置 → 高级设置”。
 
 ### 实时状态、鼠标显示与应用更新
 
@@ -58,7 +60,7 @@ python -m venv .venv
 
 没有自有信令服务器、公网 STUN/TURN 或内置 Tailscale。没有可达路径且 Tailscale 不可用时，无法连接。跨 NAT 不作成功保证；中继可能增加延迟。
 
-目前只串流主显示器当前桌面；没有 HDR、HEVC/AV1、多显示器选择、专用游戏启动列表、剪贴板/文件传输、UAC/锁屏控制、服务模式、独立窗口级采集。F10 / F11 被播放器保留。Linux 和 Android 尚未实现，不计划 macOS/iOS。
+目前只串流主显示器当前桌面；没有 HDR、HEVC/AV1、多显示器选择、专用游戏启动列表、剪贴板/文件传输、UAC/锁屏控制、服务模式、独立窗口级采集。F8 / F10 / F11 被播放器保留。Linux 和 Android 尚未实现，不计划 macOS/iOS。
 
 NVENC/D3D11VA 可在本机验证；AMF/QSV、实际物理手柄游戏和跨网表现需要对应设备与第二台电脑验收。
 

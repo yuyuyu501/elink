@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget,
+                               QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QScrollArea, QFrame,
                                QVBoxLayout, QWidget)
 
 from ..core.runtime import Runtime
@@ -19,6 +20,7 @@ from ..discovery import NetworkScope, discover, machine_id
 from ..storage import atomic_json
 from .player import Player
 from .about import AboutPage
+from .controls import StreamOptions, DeviceCard
 from .. import __version__
 
 
@@ -43,7 +45,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.root = root
         self.runtime = Runtime(self)
-        self.runtime.message.connect(self.report_error)
+        self.runtime.message.connect(self.handle_message)
         self.server = None
         self.auto_host = auto_host
         self.host_future = None
@@ -51,6 +53,10 @@ class MainWindow(QMainWindow):
         self.host_retry_at = 0.0
         self.client = Client(root, self.runtime.message.emit, self.runtime.feedback.emit)
         self.player = None
+        self.selected_host = None
+        self.session_address = None
+        self.resume_view = None
+        self.device_buttons = []
         self.scope = NetworkScope()
         self.local_id = machine_id()
         self.discovery_future = None
@@ -60,8 +66,8 @@ class MainWindow(QMainWindow):
         self.poll_pending = False
         self.config_path = root / "desktop-v3.json"
         self.config_error = False
-        self.setWindowTitle(f"Elink · 独立串流预览版 {__version__}")
-        self.resize(1120, 800)
+        self.setWindowTitle(f"Elink · {__version__}")
+        self.resize(1040, 760)
         self.setMinimumSize(900, 680)
         outer = QWidget()
         self.setCentralWidget(outer)
@@ -70,9 +76,14 @@ class MainWindow(QMainWindow):
         title = QHBoxLayout()
         title.addWidget(text_label("Elink", "pageTitle"))
         title.addStretch()
-        title.addWidget(text_label(f"WINDOWS · H.264 / OPUS · {__version__} PREVIEW", "muted"))
+        title.addWidget(text_label(f"WINDOWS  /  {__version__} PREVIEW", "muted"))
         layout.addLayout(title)
-        layout.addWidget(text_label("连接自己的游戏主机", "sectionTitle"))
+        layout.addWidget(text_label("你的设备，随时连接。", "muted"))
+        self.notice = text_label("", "errorNotice")
+        self.notice.setTextFormat(Qt.TextFormat.PlainText)
+        self.notice.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.notice.hide()
+        layout.addWidget(self.notice)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
         self.make_remote()
@@ -80,12 +91,8 @@ class MainWindow(QMainWindow):
         self.make_network()
         self.about = AboutPage(self)
         self.tabs.addTab(self.about, "关于")
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(200)
-        self.log.setMaximumHeight(130)
-        layout.addWidget(self.log)
         self.statusBar().showMessage("正在准备本机连接…" if auto_host else "诊断模式")
+        self.statusBar().hide()
         self.load_config()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_host)
@@ -98,96 +105,101 @@ class MainWindow(QMainWindow):
             self.discovery_timer.start(10000)
             QTimer.singleShot(100, self.refresh_network)
 
-    def page(self, name):
+    def page(self, name, scroll=False):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 20, 4, 10)
-        self.tabs.addTab(page, name)
+        if scroll:
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setWidget(page)
+            self.tabs.addTab(area, name)
+        else:
+            self.tabs.addTab(page, name)
         return layout
 
     def make_remote(self):
-        layout = self.page("远程连接")
-        layout.addWidget(text_label("两端打开 Elink 即可自动发现并连接；同一台电脑同时只接受一个控制端。", "notice"))
-        row = QHBoxLayout()
-        self.hosts = QComboBox()
-        self.hosts.addItem("选择发现的主机…", None)
-        self.hosts.activated.connect(self.select_host)
-        row.addWidget(self.hosts, 1)
-        self.refresh_button = button("刷新主机", self.refresh_network)
-        row.addWidget(self.refresh_button)
-        layout.addLayout(row)
-        self.discovery_state = text_label("自动发现同局域网 / 同 Tailscale 下运行 Elink 的主机。", "muted")
+        layout = self.page("设备")
+        heading = QHBoxLayout()
+        heading.addWidget(text_label("全部设备", "pageTitle"))
+        heading.addStretch()
+        self.refresh_button = button("刷新", self.refresh_network)
+        heading.addWidget(self.refresh_button)
+        self.manual_button = button("通过地址连接", self.manual_connect)
+        heading.addWidget(self.manual_button)
+        layout.addLayout(heading)
+        self.discovery_state = text_label("正在寻找同局域网 / Tailscale 中的设备…", "muted")
         layout.addWidget(self.discovery_state)
-        form = QFormLayout()
-        self.address = QLineEdit()
-        self.address.setPlaceholderText("自动填入，也可手动填写 IP / 主机名，默认端口 49200")
-        form.addRow("主机地址", self.address)
-        self.resolution = QComboBox()
-        for label, size in [("1920 × 1080", (1920, 1080)), ("1600 × 900", (1600, 900)), ("1280 × 720", (1280, 720))]:
-            self.resolution.addItem(label, size)
-        form.addRow("分辨率", self.resolution)
-        self.fps = QComboBox()
-        for value in (60, 90, 120, 30):
-            self.fps.addItem(f"{value} FPS", value)
-        form.addRow("目标帧率", self.fps)
-        self.bitrate = QSpinBox()
-        self.bitrate.setRange(1, 80)
-        self.bitrate.setValue(20)
-        self.bitrate.setSuffix(" Mbps")
-        form.addRow("视频码率上限", self.bitrate)
-        self.decoder = QComboBox()
-        for label, value in [("自动（优先 D3D11VA）", "auto"), ("软件 H.264", "software"), ("D3D11VA", "hardware")]:
-            self.decoder.addItem(label, value)
-        form.addRow("解码器", self.decoder)
-        layout.addLayout(form)
-        row = QHBoxLayout()
-        self.audio = QCheckBox("传输系统声音（立体声）")
-        self.audio.setChecked(True)
-        self.game_mouse = QCheckBox("游戏相对鼠标")
-        self.game_mouse.setChecked(True)
-        self.controllers = QCheckBox("XInput 手柄 / 震动")
-        self.controllers.setChecked(True)
-        for item in (self.audio, self.game_mouse, self.controllers):
-            row.addWidget(item)
-        layout.addLayout(row)
-        row = QHBoxLayout()
-        self.connect_button = button("开始串流", self.connect_remote, True)
-        self.disconnect_button = button("断开", self.disconnect_remote)
-        for item in (self.connect_button, self.disconnect_button):
-            row.addWidget(item)
-        row.addStretch()
-        layout.addLayout(row)
-        layout.addWidget(text_label("当前支持当前桌面串流，可在桌面中启动游戏。120 FPS 是请求目标，实际表现取决于显卡、显示器、网络和解码性能。", "muted"))
-        layout.addStretch()
+        local = QFrame()
+        local.setObjectName("localDevice")
+        local_layout = QHBoxLayout(local)
+        labels = QVBoxLayout()
+        labels.addWidget(text_label(f"{socket.gethostname()}  ·  本机", "sectionTitle"))
+        self.host_status = text_label("正在准备…", "muted")
+        labels.addWidget(self.host_status)
+        self.session_status = text_label("等待连接", "muted")
+        labels.addWidget(self.session_status)
+        local_layout.addLayout(labels, 1)
+        self.end_session_button = button("断开当前控制端", self.end_host_session)
+        self.end_session_button.setObjectName("danger")
+        self.end_session_button.hide()
+        local_layout.addWidget(self.end_session_button)
+        layout.addWidget(local)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        self.devices_layout = QVBoxLayout(content)
+        self.devices_layout.setContentsMargins(0, 8, 0, 0)
+        self.devices_layout.setSpacing(10)
+        self.devices_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        self.display_hosts([])
+        self.address = QLineEdit(self)
+        self.address.hide()  # Persist the last/manual endpoint without a permanent form.
+
+    def manual_connect(self):
+        from PySide6.QtWidgets import QInputDialog
+        address, accepted = QInputDialog.getText(self, "通过地址连接", "IP 或主机名（可附端口）", text=self.address.text())
+        if accepted and address.strip():
+            self.selected_host = None
+            self.address.setText(address.strip())
+            self.connect_remote()
 
     def make_host(self):
-        layout = self.page("本机被控")
-        layout.addWidget(text_label("Elink 运行时默认可被控。同一时间只允许一台设备连接；被占用时其它设备不能接入。退出 Elink 即停止被控。", "notice"))
-        row = QHBoxLayout()
+        layout = self.page("设置", scroll=True)
+        layout.addWidget(text_label("默认串流偏好", "pageTitle"))
+        layout.addWidget(text_label("首次连接使用这些设置；连接后也可在画面上方的控制中心调整。", "muted"))
+        self.options = StreamOptions()
+        for name in StreamOptions.fields:
+            setattr(self, name, getattr(self.options, name))
+        layout.addWidget(self.options)
+        advanced = button("高级设置  ▸", lambda: self.advanced.setVisible(not self.advanced.isVisible()))
+        layout.addWidget(advanced, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.advanced = QWidget()
+        advanced_layout = QVBoxLayout(self.advanced)
+        form = QFormLayout()
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
         self.port.setValue(49200)
-        row.addWidget(text_label("监听端口"))
-        row.addWidget(self.port)
-        self.apply_host_button = button("应用连接设置", self.apply_host_settings)
-        row.addWidget(self.apply_host_button)
-        self.host_status = text_label("正在准备…", "muted")
-        row.addWidget(self.host_status, 1)
-        layout.addLayout(row)
+        form.addRow("本机监听端口", self.port)
         self.pad_backend = QComboBox()
-        self.pad_backend.addItem("ViGEmBus（兼容模式，需已安装）", "vigem")
+        self.pad_backend.addItem("ViGEmBus（需已安装）", "vigem")
         self.pad_backend.addItem("ElinkPad（实验驱动，单手柄）", "elinkpad")
         self.pad_backend.addItem("禁用虚拟手柄", "disabled")
-        pad_form = QFormLayout()
-        pad_form.addRow("主机手柄后端", self.pad_backend)
-        layout.addLayout(pad_form)
-        self.session_status = text_label("当前无串流连接", "sectionTitle")
-        layout.addWidget(self.session_status)
-        self.end_session_button = button("断开当前控制端", self.end_host_session)
-        self.end_session_button.setEnabled(False)
-        layout.addWidget(self.end_session_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        form.addRow("本机手柄后端", self.pad_backend)
+        advanced_layout.addLayout(form)
+        self.apply_host_button = button("应用连接设置", self.apply_host_settings)
+        advanced_layout.addWidget(self.apply_host_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        advanced_layout.addWidget(text_label("ElinkPad 尚未签名或完成游戏验证。更改本机连接设置前需结束被控会话。", "muted"))
+        self.advanced.hide()
+        layout.addWidget(self.advanced)
+        layout.addWidget(button("保存默认偏好", self.save_preferences), alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addStretch()
-        layout.addWidget(text_label("ElinkPad 尚未签名或完成实机游戏验证，需在独立测试系统加载。手柄后端失败不会自动切换；键鼠控制暂不支持锁屏和 UAC 安全桌面。", "muted"))
+
+    def save_preferences(self):
+        self.save_config()
+        self.show_notice("默认偏好已保存，下次连接生效。", error=False)
 
     def make_network(self):
         layout = self.page("网络诊断")
@@ -203,20 +215,50 @@ class MainWindow(QMainWindow):
         self.peers = QListWidget()
         self.peers.itemDoubleClicked.connect(self.select_peer)
         layout.addWidget(self.peers)
-        layout.addWidget(text_label("远程连接页会合并同一台主机的局域网 / Tailscale 地址。Tailscale 在线不等于 Elink 正在运行；路径探测才能确认网络路径。HTTPS 使用 TCP 49200，自动发现使用 UDP 49201，媒体使用 ICE 动态 UDP 端口；防火墙需允许 Elink 应用入站。", "muted"))
+        layout.addWidget(text_label("设备页会合并同一台主机的局域网 / Tailscale 地址。Tailscale 在线不等于 Elink 正在运行；路径探测才能确认网络路径。HTTPS 使用 TCP 49200，自动发现使用 UDP 49201，媒体使用 ICE 动态 UDP 端口；防火墙需允许 Elink 应用入站。", "muted"))
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(200)
+        self.log.setMaximumHeight(150)
+        self.log.hide()
+        layout.addWidget(button("查看诊断记录 / 收起", lambda: self.log.setVisible(not self.log.isVisible())),
+                         alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.log)
+
+    def show_notice(self, message, error=True):
+        self.notice.setObjectName("errorNotice" if error else "notice")
+        self.notice.setText(str(message))
+        self.notice.style().unpolish(self.notice)
+        self.notice.style().polish(self.notice)
+        self.notice.show()
+
+    def handle_message(self, message):
+        if message.startswith(("控制端会话：", "被控会话：")):
+            self.append_log(message)
+            if message.endswith(":failed") or message.endswith("：failed"):
+                self.report_error("连接已中断，请检查网络或对端状态，然后重新连接。")
+        else:
+            self.report_error(message)
 
     def append_log(self, message):
         self.log.appendPlainText(f"{time.strftime('%H:%M:%S')}  {message}")
 
     def report_error(self, message):
         self.append_log(message)
-        self.statusBar().showMessage(str(message), 12000)
+        self.show_notice(message)
+        if self.player:
+            self.player.show_error(message)
 
     def set_busy(self, busy):
         self.busy = busy
-        self.connect_button.setEnabled(not busy)
+        self.manual_button.setEnabled(not busy)
+        for widget in self.device_buttons:
+            widget.setEnabled(not busy)
 
     def connect_remote(self):
+        if self.busy or self._closing:
+            return
         if self.player:
             self.player.raise_()
             return
@@ -225,20 +267,26 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.report_error(str(exc))
             return
+        self.notice.hide()
+        self.session_address = address
         self.save_config()
+        self.show_notice(f"正在连接 {address}…", error=False)
         self.set_busy(True)
         width, height = self.resolution.currentData()
         config = dict(width=width, height=height, fps=self.fps.currentData(), bitrate=self.bitrate.value(), audio=self.audio.isChecked())
-        host = self.hosts.currentData()
+        host = self.selected_host
         addresses = [address]
         if host and address in host.routes:
             addresses += [route for route in host.routes if route != address]
         decoder = self.decoder.currentData()
+        muted = bool(self.resume_view and self.resume_view['muted'])
         async def connect():
             import aiohttp
+            self.client.set_muted(muted)
             for index, route in enumerate(addresses):
                 try:
-                    return await self.client.connect(route, config, decoder)
+                    result = await self.client.connect(route, config, decoder)
+                    return route, result
                 except (OSError, asyncio.TimeoutError, aiohttp.ClientError):
                     if index == len(addresses) - 1:
                         raise
@@ -247,23 +295,62 @@ class MainWindow(QMainWindow):
     def connected(self, result):
         if self._closing:
             return
-        self.player = Player(self.runtime, self.client, game_mouse=self.game_mouse.isChecked(), controllers=self.controllers.isChecked())
+        self.session_address = result[0]
+        self.notice.hide()
+        self.player = Player(self.runtime, self.client, game_mouse=self.game_mouse.isChecked(), controllers=self.controllers.isChecked(), preferences=self.options.values())
+        self.player.settings_changed.connect(self.update_session_preferences)
+        self.player.reconfigure.connect(self.reconfigure_session)
         self.player.ended.connect(self.disconnect_remote)
-        self.player.show()
+        view, self.resume_view = self.resume_view, None
+        if view:
+            self.player.setGeometry(view['geometry'])
+            self.player.show_statistics = view['statistics']
+            self.player.muted = view['muted']
+        if view and view['fullscreen']:
+            self.player.showFullScreen()
+        else:
+            self.player.show()
         self.set_busy(False)
         self.append_log("串流窗口已打开，正在等待画面。")
 
     def connect_failed(self, message):
+        self.resume_view = None
         self.set_busy(False)
-        self.report_error(message)
+        self.report_error(f"连接失败：{message or '连接超时或对端未响应'}\n请确认对端 Elink 正在运行、设备可以互访，或刷新设备后重试。")
 
     def disconnect_remote(self):
+        self.resume_view = None
         player, self.player = self.player, None
         if player:
+            player.ended.disconnect(self.disconnect_remote)
             player.close()
             player.deleteLater()
         self.set_busy(True)
         self.runtime.submit(self.client.disconnect(), lambda _: self.set_busy(False), self.connect_failed)
+
+    def update_session_preferences(self, values):
+        self.options.restore(values)
+        self.save_config()
+
+    def reconfigure_session(self, values):
+        if self.busy or self._closing or not self.player:
+            return
+        self.update_session_preferences(values)
+        address = self.session_address
+        player, self.player = self.player, None
+        self.resume_view = dict(geometry=player.normalGeometry(), fullscreen=player.isFullScreen(),
+                                statistics=player.show_statistics, muted=player.muted)
+        player.ended.disconnect(self.disconnect_remote)
+        player.close()
+        player.deleteLater()
+        self.set_busy(True)
+        self.show_notice("正在应用画质设置，重新连接中…", error=False)
+        def reconnect(_):
+            self.set_busy(False)
+            if not self._closing:
+                self.address.setText(address)
+                self.connect_remote()
+        self.runtime.submit(self.client.disconnect(), reconnect, self.connect_failed)
 
     def start_host(self):
         if self._closing or self.host_starting or self.server and self.server.runner:
@@ -340,32 +427,37 @@ class MainWindow(QMainWindow):
             self.apply_host_button.setEnabled(not active and not self.host_starting)
             self.session_status.setText(f"当前控制端：{address}" if active else "当前无串流连接")
             self.end_session_button.setEnabled(active)
+            self.end_session_button.setVisible(active)
         self.runtime.submit(snapshot(), display, lambda _: setattr(self, "poll_pending", False))
 
-    def select_host(self, index):
-        host = self.hosts.itemData(index)
-        if host:
-            self.address.setText(host.address)
+    def select_host(self, host):
+        if self.busy:
+            return
+        self.selected_host = host
+        self.address.setText(host.address)
+        self.connect_remote()
 
     def display_hosts(self, hosts):
-        previous = self.hosts.currentData()
-        selected = previous.id if previous else None
-        follow = not self.address.text() or previous and self.address.text() in previous.routes
-        self.hosts.blockSignals(True)
-        self.hosts.clear()
-        self.hosts.addItem("选择发现的主机…", None)
+        while self.devices_layout.count() > 1:
+            item = self.devices_layout.takeAt(0)
+            item.widget().hide()
+            item.widget().deleteLater()
+        self.device_buttons = []
         for host in hosts:
+            if host.id == self.local_id:
+                continue
             routes = " / ".join(dict.fromkeys(host.routes.values()))
-            self.hosts.addItem(f"{host.name} · {routes} · {host.address}", host)
-        index = next((i for i in range(1, self.hosts.count()) if self.hosts.itemData(i).id == selected), 0)
-        if not index and follow and hosts:
-            index = 1
-        self.hosts.setCurrentIndex(index)
-        self.hosts.blockSignals(False)
-        if follow and index:
-            self.select_host(index)
-        self.discovery_state.setText(f"发现 {len(hosts)} 台主机 · 选择后点击开始串流 · 每 10 秒刷新" if hosts else
-                                    "暂未发现主机：请确认对端 Elink 正在运行，或直接填写地址连接。")
+            card = DeviceCard(host.name, f"{routes}  ·  {host.address}")
+            card.clicked.connect(lambda checked=False, host=host: self.select_host(host))
+            card.setEnabled(not self.busy)
+            self.device_buttons.append(card)
+            self.devices_layout.insertWidget(self.devices_layout.count() - 1, card)
+        if not self.device_buttons:
+            empty = text_label("还没有发现其他设备\n在另一台电脑打开 Elink，连接同一局域网或 Tailscale 后即可在这里看到。", "emptyState")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setMinimumHeight(160)
+            self.devices_layout.insertWidget(0, empty)
+        self.discovery_state.setText(f"{len(self.device_buttons)} 台可连接设备 · 点击即可连接 · 自动刷新")
 
     def refresh_network(self):
         if self.discovery_pending or self._closing:
@@ -395,24 +487,26 @@ class MainWindow(QMainWindow):
         def failed(message):
             done()
             if not self._closing:
-                self.discovery_state.setText(f"发现暂不可用：{message}，可直接填写主机地址。")
+                self.discovery_state.setText(f"发现暂不可用：{message}，可通过地址连接。")
         self.discovery_future = self.runtime.submit(probe(), display, failed)
 
     def select_peer(self, item):
+        self.selected_host = None
         self.address.setText(item.data(Qt.ItemDataRole.UserRole))
         self.tabs.setCurrentIndex(0)
+        self.connect_remote()
 
     def probe_route(self):
         executable = tailscale_path()
         if not executable:
             self.report_error("未找到外部 Tailscale。")
             return
-        self.runtime.submit(asyncio.to_thread(tailnet_ping, executable, self.address.text()), lambda p: self.report_error(f"路径 {p.kind} · RTT {p.latency_ms} ms · {p.detail}"))
+        self.runtime.submit(asyncio.to_thread(tailnet_ping, executable, self.address.text()), lambda p: self.show_notice(f"路径 {p.kind} · RTT {p.latency_ms} ms · {p.detail}", error=False))
 
     def check_nat(self):
         executable = tailscale_path()
         if executable:
-            self.runtime.submit(asyncio.to_thread(netcheck, executable), lambda report: self.report_error(json.dumps(report, ensure_ascii=False)))
+            self.runtime.submit(asyncio.to_thread(netcheck, executable), lambda report: self.show_notice(json.dumps(report, ensure_ascii=False), error=False))
         else:
             self.report_error("未找到外部 Tailscale。")
 

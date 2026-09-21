@@ -371,6 +371,7 @@ class Client:
         # No persistent client authorizations or pairing records in automatic mode.
         self.notify, self.feedback = notify, feedback
         self.play_audio = play_audio
+        self.muted = False
         self.pc = None
         self.session_id = ""
         self.endpoint = None
@@ -524,6 +525,7 @@ class Client:
             if track.kind == "audio" and self.play_audio:
                 try:
                     self.output = AudioOutput()
+                    self.output.muted = self.muted
                 except Exception as exc:
                     self.notify(f"本机音频输出不可用：{exc}")
             while True:
@@ -542,6 +544,11 @@ class Client:
                 self.notify(f"{track.kind} 轨道结束：{exc}")
                 if track.kind == "video":
                     self.schedule_disconnect()
+
+    def set_muted(self, muted):
+        self.muted = bool(muted)
+        if self.output:
+            self.output.muted = self.muted
 
     def send(self, event):
         if not self.pc:

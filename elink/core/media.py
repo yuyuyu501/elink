@@ -162,6 +162,7 @@ class AudioOutput:
         self.lock = threading.Lock()
         self.frames = collections.deque(maxlen=5)
         self.remainder = np.empty((0, 2), dtype=np.float32)
+        self.muted = False
         self.resampler = av.AudioResampler(format="flt", layout="stereo", rate=48000)
         self.stream = sd.OutputStream(samplerate=48000, channels=2, dtype="float32", blocksize=480,
                                       latency="low", callback=self._callback)
@@ -180,6 +181,8 @@ class AudioOutput:
                 output[offset:offset + size] = self.remainder[:size]
                 self.remainder = self.remainder[size:]
                 offset += size
+            if self.muted:
+                output.fill(0)
 
     def feed(self, frame):
         for converted in self.resampler.resample(frame):
