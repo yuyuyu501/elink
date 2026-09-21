@@ -75,6 +75,15 @@ def run(root: Path, desktop=False):
         player.control_menu.grab().save(str(root / "control-menu.png"))
         player.control_menu.close()
         player.open_quality()
+        from .ui.controls import StreamOptions
+        from PySide6.QtWidgets import QPushButton
+        pump(lambda: any(b.text() == '应用并重新连接' and b.isEnabled()
+                         for b in player.settings_dialog.findChildren(QPushButton)))
+        display = player.settings_dialog.findChild(StreamOptions).display_snapshot
+        if desktop:
+            if not display:
+                raise RuntimeError('Real desktop display capabilities were not returned.')
+            result['display_capabilities'] = display
         app.processEvents()
         player.settings_dialog.grab().save(str(root / "stream-settings.png"))
         player.settings_dialog.reject()

@@ -168,14 +168,12 @@ class MainWindow(QMainWindow):
 
     def make_host(self):
         layout = self.page("设置", scroll=True)
-        layout.addWidget(text_label("默认串流偏好", "pageTitle"))
-        layout.addWidget(text_label("首次连接使用这些设置；连接后也可在画面上方的控制中心调整。", "muted"))
-        self.options = StreamOptions()
+        layout.addWidget(text_label("本机连接设置", "pageTitle"))
+        layout.addWidget(text_label("画质与显示设置请在远控窗口的控制中心调整。这里仅设置本机接入方式。", "muted"))
+        self.options = StreamOptions(self)
+        self.options.hide()
         for name in StreamOptions.fields:
             setattr(self, name, getattr(self.options, name))
-        layout.addWidget(self.options)
-        advanced = button("高级设置  ▸", lambda: self.advanced.setVisible(not self.advanced.isVisible()))
-        layout.addWidget(advanced, alignment=Qt.AlignmentFlag.AlignLeft)
         self.advanced = QWidget()
         advanced_layout = QVBoxLayout(self.advanced)
         form = QFormLayout()
@@ -192,14 +190,8 @@ class MainWindow(QMainWindow):
         self.apply_host_button = button("应用连接设置", self.apply_host_settings)
         advanced_layout.addWidget(self.apply_host_button, alignment=Qt.AlignmentFlag.AlignLeft)
         advanced_layout.addWidget(text_label("ElinkPad 尚未签名或完成游戏验证。更改本机连接设置前需结束被控会话。", "muted"))
-        self.advanced.hide()
         layout.addWidget(self.advanced)
-        layout.addWidget(button("保存默认偏好", self.save_preferences), alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addStretch()
-
-    def save_preferences(self):
-        self.save_config()
-        self.show_notice("默认偏好已保存，下次连接生效。", error=False)
 
     def make_network(self):
         layout = self.page("网络诊断")
@@ -272,8 +264,7 @@ class MainWindow(QMainWindow):
         self.save_config()
         self.show_notice(f"正在连接 {address}…", error=False)
         self.set_busy(True)
-        width, height = self.resolution.currentData()
-        config = dict(width=width, height=height, fps=self.fps.currentData(), bitrate=self.bitrate.value(), audio=self.audio.isChecked())
+        config = dict(width=1920, height=1080, follow_display=True, fps=self.fps.currentData(), bitrate=self.bitrate.value(), audio=self.audio.isChecked())
         host = self.selected_host
         addresses = [address]
         if host and address in host.routes:
@@ -520,7 +511,7 @@ class MainWindow(QMainWindow):
             self.port.setValue(value.get("port", 49200))
             self.bitrate.setValue(value.get("bitrate", 20))
             self.pad_backend.setCurrentIndex(max(0, self.pad_backend.findData(value.get("pad_backend", "vigem"))))
-            for name in ("resolution", "fps", "decoder"):
+            for name in ("fps", "decoder"):
                 widget = getattr(self, name)
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value.get(name, 0))))
             for name in ("audio", "game_mouse", "controllers"):
@@ -535,7 +526,7 @@ class MainWindow(QMainWindow):
         value = dict(address=self.address.text(), port=self.port.value(), bitrate=self.bitrate.value())
         value["pad_backend"] = self.pad_backend.currentData()
         value["update_previews"] = self.about.previews.isChecked()
-        for name in ("resolution", "fps", "decoder"):
+        for name in ("fps", "decoder"):
             value[name] = getattr(self, name).currentIndex()
         for name in ("audio", "game_mouse", "controllers"):
             value[name] = getattr(self, name).isChecked()

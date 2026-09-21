@@ -18,6 +18,7 @@ from elink.ui.controls import StreamOptions
 from elink.ui.window import MainWindow
 from elink.ui.theme import apply_theme
 from test_window import pump
+from test_display import FakeDisplay
 
 
 def close(window, app):
@@ -42,6 +43,10 @@ def test_device_single_click_failure_and_refresh_preserves_busy(tmp_path, monkey
         app.processEvents()
         assert window.device_buttons[0].height() >= 88
         assert not window.log.isVisible()
+        window.tabs.setCurrentIndex(1)
+        app.processEvents()
+        assert not window.options.isVisible()
+        window.tabs.setCurrentIndex(0)
         assert all(window.tabs.tabText(i) != '本机被控' for i in range(window.tabs.count()))
         QTest.mouseClick(window.device_buttons[0], Qt.MouseButton.LeftButton)
         assert window.busy
@@ -62,7 +67,8 @@ def test_device_single_click_failure_and_refresh_preserves_busy(tmp_path, monkey
 def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(tmp_path / 'ui', auto_refresh=False, auto_host=False)
-    host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput)
+    display = FakeDisplay()
+    host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput, display_backend=display)
     async def start():
         return await host.start('127.0.0.1', 0)
     future = window.runtime.submit(start())
@@ -70,7 +76,6 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
     port = future.result()
     window.controllers.setChecked(False)
     window.audio.setChecked(False)
-    window.resolution.setCurrentIndex(2)
     window.game_mouse.setChecked(False)
     window.show()
     try:
@@ -91,25 +96,40 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         player.open_quality()
         dialog = player.settings_dialog
         options = dialog.findChild(StreamOptions)
+        pump(app, lambda: any(b.isEnabled() and b.text() == '应用并重新连接' for b in dialog.findChildren(QPushButton)))
         options.bitrate.setValue(17)
+        assert options.display_resolution.currentData() == [1920, 1080]
+        options.display_resolution.setCurrentIndex(options.display_resolution.findData([2560, 1440]))
         dialog.reject()
         assert window.bitrate.value() == 20
+        assert not display.changes
         player.open_quality()
         dialog = player.settings_dialog
         options = dialog.findChild(StreamOptions)
+        pump(app, lambda: any(b.isEnabled() and b.text() == '应用并重新连接' for b in dialog.findChildren(QPushButton)))
         options.bitrate.setValue(12)
+        options.display_resolution.setCurrentIndex(options.display_resolution.findData([1280, 720]))
+        options.scale.setCurrentIndex(options.scale.findData(125))
         options.fps.setCurrentIndex(options.fps.findData(30))
         session = window.client.session_id
         next(b for b in dialog.findChildren(QPushButton) if b.text() == '应用并重新连接').click()
         pump(app, lambda: window.player is not None and window.player is not player
              and window.player.image is not None, timeout=25)
         assert window.client.session_id != session
+        assert display.current == [1280, 720] and display.scale == 125
         assert window.client.stats.target_mbps == 12
         assert window.fps.currentData() == 30
         assert window.player.preferences['bitrate'] == 12
         assert window.player.muted and window.client.muted
         assert not window.player.show_statistics
         assert window.session_address == f'127.0.0.1:{port}'
+        window.player.open_quality()
+        dialog = window.player.settings_dialog
+        options = dialog.findChild(StreamOptions)
+        pump(app, lambda: options.display_snapshot is not None)
+        assert options.display_resolution.currentData() == [1280, 720]
+        assert options.scale.currentData() == 125
+        dialog.reject()
         window.player.close()
         pump(app, lambda: window.player is None and not window.busy)
         assert window.client.pc is None

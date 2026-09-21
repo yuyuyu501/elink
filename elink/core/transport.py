@@ -53,12 +53,12 @@ def install():
 def settings(value):
     if not isinstance(value, dict):
         raise ValidationError("串流设置无效。")
-    result = {"width": 1920, "height": 1080, "fps": 60, "bitrate": 20, "audio": True}
+    result = {"width": 1920, "height": 1080, "fps": 60, "bitrate": 20, "audio": True, "follow_display": False}
     result.update({k: v for k, v in value.items() if k in result})
     for key, low, high in [("width", 640, 1920), ("height", 360, 1080), ("fps", 10, 120), ("bitrate", 1, 80)]:
         if type(result[key]) is not int or not low <= result[key] <= high:
             raise ValidationError(f"{key} 超出当前版本范围（{low}–{high}）。")
-    if result["width"] % 2 or result["height"] % 2 or type(result["audio"]) is not bool:
+    if result["width"] % 2 or result["height"] % 2 or type(result["audio"]) is not bool or type(result["follow_display"]) is not bool:
         raise ValidationError("分辨率必须为偶数，音频开关必须为布尔值。")
     return result
 
@@ -72,7 +72,7 @@ async def errors(request, handler):
 
 
 class HostServer:
-    def __init__(self, root: Path, *, synthetic=False, backend_factory=None, notify=lambda message: None, pad_backend="vigem", scope=None):
+    def __init__(self, root: Path, *, synthetic=False, backend_factory=None, notify=lambda message: None, pad_backend="vigem", scope=None, display_backend=None):
         if pad_backend not in PAD_BACKENDS:
             raise ValueError("未知手柄后端。")
         self.pad_backend = pad_backend
@@ -96,6 +96,8 @@ class HostServer:
         self.created = 0.0
         self.input_errors = set()
         self.control_channel = None
+        self.display_backend = display_backend
+        self.display_lock = asyncio.Lock()
 
     async def start(self, bind=None, port=49200):
         if self.runner:
@@ -107,7 +109,9 @@ class HostServer:
             return await handler(request)
         app = web.Application(middlewares=[errors, local_access], client_max_size=131072)
         app.add_routes([web.get("/v1/info", self.info), web.get("/v1/apps", self.apps),
-                        web.post("/v1/session", self.offer), web.delete("/v1/session/{id}", self.delete)])
+                        web.post("/v1/session", self.offer), web.delete("/v1/session/{id}", self.delete),
+                        web.get("/v1/session/{id}/display", self.get_display),
+                        web.post("/v1/session/{id}/display", self.set_display)])
         self.closing = False
         self.runner = web.AppRunner(app, access_log=None, shutdown_timeout=3)
         try:
@@ -132,7 +136,7 @@ class HostServer:
     def host_info(self):
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
-                "busy": self.pc is not None or self.ending}
+                "busy": self.pc is not None or self.ending, "features": ["display-settings-v1"]}
 
     async def info(self, request):
         return web.json_response(self.host_info())
@@ -236,7 +240,7 @@ class HostServer:
 
             try:
                 await pc.setRemoteDescription(RTCSessionDescription(data["sdp"], "offer"))
-                video = DesktopTrack(config["width"], config["height"], config["fps"], self.synthetic)
+                video = DesktopTrack(config["width"], config["height"], config["fps"], self.synthetic, config["follow_display"])
                 self.tracks.append(video)
                 pc.addTrack(video)
                 if config["audio"]:
@@ -253,6 +257,36 @@ class HostServer:
             except BaseException:
                 await self.end_session()
                 raise
+
+    def display_session(self, request):
+        if (not self.pc or self.ending or self.closing or request.remote != self.device_id
+                or request.match_info['id'] != self.session_id):
+            raise web.HTTPForbidden()
+        video = next((track for track in self.tracks if isinstance(track, DesktopTrack)), None)
+        if video is None:
+            raise ValidationError('当前没有可调整的显示器。')
+        if self.display_backend is None:
+            if self.synthetic:
+                raise ValidationError('测试画面没有 Windows 显示设置。')
+            from .display import WindowsDisplay
+            self.display_backend = WindowsDisplay()
+        return video
+
+    async def get_display(self, request):
+        async with self.display_lock:
+            video = self.display_session(request)
+            result = await asyncio.to_thread(self.display_backend.snapshot, video.display_name)
+            return web.json_response(result)
+
+    async def set_display(self, request):
+        change = await self.body(request)
+        async with self.display_lock:
+            video = self.display_session(request)
+            if self.input:
+                self.input.active = False
+                self.input.release()
+            result = await video.change_display(lambda: self.display_backend.apply(change, video.display_name))
+            return web.json_response(result)
 
     async def delete(self, request):
         device = request.remote
@@ -272,6 +306,10 @@ class HostServer:
                     await self.end_session()
 
     async def end_session(self):
+        async with self.display_lock:
+            await self._end_session()
+
+    async def _end_session(self):
         if self.pc:
             pc, self.pc = self.pc, None
             self.ending = True
@@ -389,6 +427,7 @@ class Client:
         self.lock = asyncio.Lock()
         self.close_task = None
         self.stats = StreamStats()
+        self.display_supported = False
 
     def schedule_disconnect(self):
         if self.close_task is None or self.close_task.done():
@@ -404,6 +443,7 @@ class Client:
             info = await request(self.endpoint, self.fp, "GET", "/v1/info")
             if info.get("protocol") != "elink" or info.get("version") != 2:
                 raise ValidationError("主机不支持自动连接，请将两端更新至 0.4.2 或更高版本。")
+            self.display_supported = "display-settings-v1" in info.get("features", [])
             if info.get("busy") is True:
                 raise ValidationError("主机正在被其他设备控制或连接中，请等待当前会话结束。")
             codecs.decode_policy = codecs.CodecPolicy(decoder=decoder)
@@ -475,6 +515,15 @@ class Client:
             except BaseException:
                 await self._disconnect()
                 raise
+
+    async def display_settings(self, change=None):
+        async with self.lock:
+            if not self.pc or not self.session_id:
+                raise ValidationError('串流已断开，请重新连接后再修改显示设置。')
+            if not self.display_supported:
+                raise ValidationError('被控端版本不支持显示设置，请将被控端升级至 0.4.5 或更高版本。')
+            return await request(self.endpoint, self.fp, 'GET' if change is None else 'POST',
+                                 f'/v1/session/{self.session_id}/display', payload=change)
 
     def task(self, coro):
         task = asyncio.create_task(coro)

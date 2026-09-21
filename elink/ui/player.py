@@ -152,10 +152,11 @@ class Player(QWidget):
         dialog.setMinimumWidth(460)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 24, 24, 24)
-        options = StreamOptions()
+        options = StreamOptions(remote_display=True)
         options.restore(self.preferences)
         layout.addWidget(options)
-        note = QLabel("应用后会短暂断开并自动重连。设置同时保存为下次连接的默认值。")
+        note = QLabel("正在读取被控端显示设置…")
+        note.setTextFormat(Qt.TextFormat.PlainText)
         note.setWordWrap(True)
         note.setObjectName('muted')
         layout.addWidget(note)
@@ -164,10 +165,44 @@ class Player(QWidget):
         cancel.clicked.connect(dialog.reject)
         apply = QPushButton("应用并重新连接")
         apply.setObjectName('primary')
+        apply.setEnabled(False)
+        hint = ('分辨率与缩放会实际修改被控电脑，断开后保留；部分程序需重新打开才适应新缩放。'
+                '\n传输画面跟随被控端比例，当前最高 1080p。应用后短暂断开并自动重连。')
+        def loaded(snapshot):
+            if self._closed or self.settings_dialog is not dialog:
+                return
+            options.set_display(snapshot)
+            note.setText(hint + ('\n' + snapshot['scale_error'] if snapshot.get('scale_error') else ''))
+            apply.setEnabled(True)
+        def failed(message):
+            if self._closed or self.settings_dialog is not dialog:
+                return
+            options.display_unavailable(message)
+            note.setText(str(message) + '\n仍可调整帧率、码率等传输设置。')
+            apply.setEnabled(True)
+        self.runtime.submit(self.client.display_settings(), loaded, failed)
         def accept():
             values = options.values()
-            dialog.accept()
-            self.reconfigure.emit(values)
+            change = options.display_change()
+            def finish(_=None):
+                if self._closed or self.settings_dialog is not dialog:
+                    return
+                dialog.setEnabled(True)
+                dialog.accept()
+                self.reconfigure.emit(values)
+            if change is None:
+                finish()
+                return
+            dialog.setEnabled(False)
+            note.setText('正在修改被控端显示设置…')
+            def rejected(message):
+                if self._closed or self.settings_dialog is not dialog:
+                    return
+                dialog.setEnabled(True)
+                options.display_unavailable(str(message))
+                options.display_snapshot = None
+                note.setText(str(message) + '\n请关闭并重新打开此窗口，读取当前显示状态。')
+            self.runtime.submit(self.client.display_settings(change), finish, rejected)
         apply.clicked.connect(accept)
         buttons.addWidget(cancel)
         buttons.addWidget(apply)
