@@ -54,8 +54,8 @@ class AboutPage(QWidget):
         self.cancel_button.clicked.connect(self.cancel)
         self.cancel_button.hide()
         layout.addWidget(self.cancel_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        note = QLabel("便携版更新将下载完整应用，校验后退出并替换、重启；配置与配对信息保留。\n"
-                      "更新会断开串流并关闭被控，新版启动后需手动重新开启。\n"
+        note = QLabel("便携版更新将下载完整应用，校验后退出并替换、重启；配置与用户数据保留。\n"
+                      "更新会断开当前串流；新版启动后自动恢复等待连接。\n"
                       "旧程序会保留在应用旁的 .Elink-update-* 文件夹，确认新版正常后可删除该备份。")
         note.setWordWrap(True)
         layout.addWidget(note)

@@ -3,10 +3,10 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QImage, QPainter
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter
 from PySide6.QtWidgets import QWidget
 
-from ..core.codecs import metrics
+from ..core.statistics import StreamStats, overlay_lines
 from ..core.input import XInput
 
 
@@ -23,9 +23,13 @@ class Player(QWidget):
         self.drawn = 0
         self.fps = 0
         self.stats_at = time.monotonic()
+        self.new_image = False
+        self.started_at = self.stats_at
+        self.elapsed = 0.0
+        self.show_statistics = True
         self.pad_indices = set()
         self.xinput = XInput() if controllers else None
-        self.setWindowTitle("Elink · F11 全屏 · Ctrl+Alt+Shift+Q 断开 · Ctrl+Alt+Shift+Z 释放输入")
+        self.setWindowTitle("Elink · F10 统计 · F11 全屏 · Ctrl+Alt+Shift+Q 断开 · Ctrl+Alt+Shift+Z 释放输入")
         self.setStyleSheet("background: #101719")
         self.resize(1280, 760)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -63,8 +67,10 @@ class Player(QWidget):
         pixels = self.client.mailbox.take()
         if pixels is not None:
             self.image = QImage(pixels.data, pixels.shape[1], pixels.shape[0], pixels.strides[0], QImage.Format.Format_RGB888).copy()
-            self.drawn += 1
+            self.new_image = True
         now = time.monotonic()
+        if self.client.pc is not None:
+            self.elapsed = now - self.started_at
         if now - self.stats_at >= 1:
             self.fps = self.drawn / (now - self.stats_at)
             self.drawn, self.stats_at = 0, now
@@ -90,13 +96,31 @@ class Player(QWidget):
             size = self.image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
             self.rect_image = QRect((self.width() - size.width()) // 2, (self.height() - size.height()) // 2, size.width(), size.height())
             painter.drawImage(self.rect_image, self.image)
-        painter.fillRect(8, 8, min(900, self.width() - 16), 52, QColor(0, 0, 0, 190))
-        painter.setPen(QColor("#e1f2ec"))
-        painter.drawText(18, 30, f"Elink  |  显示 {self.fps:.0f} FPS  |  {metrics['decoder']}  |  通道 RTT {self.client.rtt_ms:.1f} ms  |  丢弃过期画面 {self.client.mailbox.dropped}")
+            if self.new_image:
+                self.drawn += 1
+                self.new_image = False
+        if self.show_statistics:
+            snapshot = getattr(self.client, "stats", StreamStats())
+            now = time.monotonic()
+            fresh = now - snapshot.sampled_at < 3
+            rtt = self.client.rtt_ms if self.client.rtt_ms > 0 and now - self.client.last_pong < 3 else None
+            lines = overlay_lines(snapshot, self.fps, self.elapsed, rtt, self.client.pc is not None, fresh)
+            font = QFont('Consolas')
+            font.setPixelSize(12)
+            painter.setFont(font)
+            line_height = painter.fontMetrics().height() + 2
+            width = max(painter.fontMetrics().horizontalAdvance(line) for line in lines) + 14
+            painter.fillRect(4, 4, width, len(lines) * line_height + 8, QColor(0, 0, 0, 105))
+            painter.setPen(QColor('#ffffff'))
+            for index, line in enumerate(lines):
+                painter.drawText(10, 8 + painter.fontMetrics().ascent() + index * line_height, line)
         status = "输入已捕获 · Ctrl+Alt+Shift+Z 释放 · F11 全屏" if self.captured else "点击画面控制远端 · Ctrl+Alt+Shift+Q 断开"
         if self.client.pc is None:
             status = "会话已断开，请关闭窗口后重新连接。"
-        painter.drawText(18, 51, status)
+        if not self.captured or self.client.pc is None:
+            painter.fillRect(8, self.height() - 36, min(630, self.width() - 16), 28, QColor(0, 0, 0, 160))
+            painter.setPen(QColor('#ffffff'))
+            painter.drawText(18, self.height() - 17, status)
 
     def keyPressEvent(self, event):
         if event.isAutoRepeat():
@@ -107,6 +131,9 @@ class Player(QWidget):
             self.close()
         elif event.key() == Qt.Key.Key_F11:
             self.showNormal() if self.isFullScreen() else self.showFullScreen()
+        elif event.key() == Qt.Key.Key_F10:
+            self.show_statistics = not self.show_statistics
+            self.update()
         elif event.key() == Qt.Key.Key_Z and event.modifiers() & modifiers == modifiers:
             self.release()
         elif self.captured and not event.isAutoRepeat():
@@ -114,7 +141,7 @@ class Player(QWidget):
         event.accept()
 
     def keyReleaseEvent(self, event):
-        if self.captured and not event.isAutoRepeat() and event.key() != Qt.Key.Key_F11:
+        if self.captured and not event.isAutoRepeat() and event.key() not in (Qt.Key.Key_F10, Qt.Key.Key_F11):
             self.key(event, False)
         event.accept()
 

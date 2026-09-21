@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import socket
+import ssl
+import http.client
 import time
 
 from elink import __version__
@@ -87,7 +90,23 @@ def verify_portable_update(bundle, root):
     payload = workspace / 'payload' / 'Elink'
     data = root / 'userdata'
     data.mkdir()
-    (data / 'desktop-v3.json').write_text(json.dumps({'address': '127.0.0.1:49200', 'update_previews': False}), encoding='utf-8')
+    with socket.socket() as available:
+        available.bind(('127.0.0.1', 0))
+        port = available.getsockname()[1]
+    (data / 'desktop-v3.json').write_text(json.dumps({'address': '127.0.0.1:49200', 'update_previews': False,
+                                                    'port': port, 'pad_backend': 'disabled'}), encoding='utf-8')
+    def host_ready():
+        connection = http.client.HTTPSConnection('127.0.0.1', port, timeout=1,
+                                                 context=ssl._create_unverified_context())
+        try:
+            connection.request('GET', '/v1/info')
+            response = connection.getresponse()
+            value = json.loads(response.read())
+            return response.status == 200 and value.get('protocol') == 'elink' and value.get('busy') is False
+        except (OSError, ValueError, http.client.HTTPException):
+            return False
+        finally:
+            connection.close()
     sentinel = data / 'preserved-user-data.txt'
     sentinel.write_text('must survive the update', encoding='utf-8')
     shutil.copytree(bundle, target)
@@ -102,6 +121,7 @@ def verify_portable_update(bundle, root):
         wait_for(lambda: old_ready.exists() or old.poll() is not None, 'Frozen app did not start.')
         if old.poll() is not None or not old_ready.exists():
             raise RuntimeError('Frozen app exited before startup confirmation.')
+        wait_for(host_ready, 'Frozen app did not automatically accept host connections.')
         plan = workspace / 'plan.json'
         plan.write_text(json.dumps(dict(target=str(target), workspace=str(workspace),
                                        parent_pid=old.pid, data_root=str(data))), encoding='utf-8')
@@ -126,6 +146,7 @@ def verify_portable_update(bundle, root):
             raise RuntimeError('Frozen replacement failed: ' + (workspace / 'update.log').read_text(encoding='utf-8-sig'))
         if (workspace / 'app-ready').read_text(encoding='utf-8') != __version__:
             raise RuntimeError('Restarted app reported an unexpected version.')
+        wait_for(host_ready, 'Updated app did not resume automatic hosting.')
         if not (workspace / 'previous/Elink.exe').is_file():
             raise RuntimeError('Updater did not retain the previous program.')
         saved = json.loads((data / 'desktop-v3.json').read_text(encoding='utf-8'))
@@ -133,7 +154,7 @@ def verify_portable_update(bundle, root):
             raise RuntimeError('User configuration was not preserved.')
         close_app(executable, wait=True)
         wait_for(lambda: not app_windows(executable), 'Updated app did not close normally.', timeout=15)
-        return dict(ok=True, frozen=True, directory_replacement=True, restart_confirmed=True,
+        return dict(ok=True, frozen=True, directory_replacement=True, restart_confirmed=True, automatic_host_ready=True,
                     configuration_preserved=True, backup_retained=True,
                     note='Same-version replacement using two isolated copies; not a manual game test.')
     finally:

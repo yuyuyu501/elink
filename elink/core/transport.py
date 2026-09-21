@@ -20,6 +20,7 @@ from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack
 from .security import Identity
 from ..discovery import NetworkScope, Responder, DISCOVERY_PORT, machine_id
 from .buffers import tune_receiver, tune_track
+from .statistics import StreamStats, ReceiveSampler, selected_route
 
 
 def video_preferences(pc):
@@ -130,7 +131,8 @@ class HostServer:
 
     def host_info(self):
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
-                "name": socket.gethostname()[:80], "codec": "H264", "port": self.port}
+                "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
+                "busy": self.pc is not None or self.ending}
 
     async def info(self, request):
         return web.json_response(self.host_info())
@@ -153,6 +155,8 @@ class HostServer:
 
     async def offer(self, request):
         device = request.remote
+        if self.pc or self.lock.locked() or self.closing or self.ending:
+            raise web.HTTPConflict(reason="主机正在被其他设备控制或连接中")
         data = await self.body(request)
         config = settings(data.get("settings", {}))
         if data.get("type") != "offer" or not isinstance(data.get("sdp"), str) or len(data["sdp"]) > 100000:
@@ -383,6 +387,7 @@ class Client:
         self.connected_at = 0.0
         self.lock = asyncio.Lock()
         self.close_task = None
+        self.stats = StreamStats()
 
     def schedule_disconnect(self):
         if self.close_task is None or self.close_task.done():
@@ -398,10 +403,16 @@ class Client:
             info = await request(self.endpoint, self.fp, "GET", "/v1/info")
             if info.get("protocol") != "elink" or info.get("version") != 2:
                 raise ValidationError("主机不支持自动连接，请将两端更新至 0.4.2 或更高版本。")
+            if info.get("busy") is True:
+                raise ValidationError("主机正在被其他设备控制或连接中，请等待当前会话结束。")
             codecs.decode_policy = codecs.CodecPolicy(decoder=decoder)
             self.pc = pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.mailbox = FrameMailbox()
             self.audio_frames = 0
+            self.rtt_ms = 0.0
+            self.stats = StreamStats(target_mbps=config["bitrate"])
+            self.route_probe = None
+            codecs.metrics.update(decoder="未启动", decode_ms=0.0)
             self.connected_at = time.monotonic()
             self.last_pong = self.connected_at
             self.control = pc.createDataChannel("control", ordered=True)
@@ -458,6 +469,8 @@ class Client:
                 self.session_id = response["id"]
                 await pc.setRemoteDescription(RTCSessionDescription(response["sdp"], response["type"]))
                 self.task(self.heartbeat())
+                self.task(self.sample_statistics(pc, config["bitrate"]))
+                self.task(self.probe_statistics_route(pc))
             except BaseException:
                 await self._disconnect()
                 raise
@@ -467,6 +480,44 @@ class Client:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
+
+    async def probe_statistics_route(self, pc):
+        from ..network import tailscale_path, tailnet_ping
+        self.route_probe = None
+        while self.pc is pc:
+            _, address = selected_route(pc)
+            if address:
+                executable = tailscale_path()
+                if executable:
+                    try:
+                        probe = await asyncio.to_thread(tailnet_ping, executable, address)
+                        self.route_probe = (address, probe.kind, time.monotonic())
+                    except Exception:
+                        self.route_probe = None
+                await asyncio.sleep(15)
+            else:
+                await asyncio.sleep(1)
+
+    async def sample_statistics(self, pc, target):
+        sampler = ReceiveSampler()
+        while self.pc is pc:
+            now = time.monotonic()
+            try:
+                report = await pc.getStats()
+                rx, loss, jitter = sampler.sample(report, now)
+                route, address = selected_route(pc)
+                probe = getattr(self, "route_probe", None)
+                if address and probe and probe[0] == address and now - probe[2] < 35:
+                    route = {"direct": "Tailscale · UDP P2P", "relay": "Tailscale · DERP 中继",
+                             "peer-relay": "Tailscale · 节点中继"}.get(probe[1], route)
+                recent = self.mailbox.received and now - self.mailbox.updated < 2
+                self.stats = StreamStats(rx, loss, jitter,
+                                         codecs.metrics['decode_ms'] if recent else None,
+                                         codecs.metrics['decoder'] if recent else '--', route, target, now)
+            except Exception:
+                # Telemetry failure must never interrupt input or media; UI expires it.
+                pass
+            await asyncio.sleep(1)
 
     async def consume(self, track):
         try:

@@ -4,6 +4,7 @@ import json
 import sys
 import time
 import traceback
+from dataclasses import asdict
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -21,7 +22,7 @@ def run(root: Path, desktop=False):
     root.mkdir(parents=True, exist_ok=True)
     app = QApplication.instance() or QApplication([])
     apply_theme(app)
-    window = MainWindow(root / "ui", auto_refresh=False)
+    window = MainWindow(root / "ui", auto_refresh=False, auto_host=False)
     window.show()
     result = {}
     server = None
@@ -59,13 +60,15 @@ def run(root: Path, desktop=False):
         future.result()
         player = Player(runtime, client, controllers=False)
         player.show()
-        pump(lambda: client.mailbox.received > 90 and client.audio_frames > 10 and player.image is not None)
+        pump(lambda: client.mailbox.received > 90 and client.audio_frames > 10 and player.image is not None
+             and client.stats.rx_kbps is not None and client.stats.loss_percent is not None)
         if not desktop:
             assert client.output is not None and client.output.stream.active
         result.update(ok=True, desktop=desktop, video_frames=client.mailbox.received,
                       audio_frames=client.audio_frames, metrics=dict(metrics), rtt_ms=client.rtt_ms,
                       image_width=player.image.width(), image_height=player.image.height(),
-                      audio_output_active=bool(client.output and client.output.stream.active))
+                      audio_output_active=bool(client.output and client.output.stream.active),
+                      stream_statistics=asdict(client.stats))
         player.grab().save(str(root / "player.png"))
         for index, name in enumerate(("remote", "host", "network")):
             window.tabs.setCurrentIndex(index)

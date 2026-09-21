@@ -39,12 +39,16 @@ def text_label(text, style=""):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, root: Path, *, auto_refresh=True):
+    def __init__(self, root: Path, *, auto_refresh=True, auto_host=True):
         super().__init__()
         self.root = root
         self.runtime = Runtime(self)
         self.runtime.message.connect(self.report_error)
         self.server = None
+        self.auto_host = auto_host
+        self.host_future = None
+        self.host_starting = False
+        self.host_retry_at = 0.0
         self.client = Client(root, self.runtime.message.emit, self.runtime.feedback.emit)
         self.player = None
         self.scope = NetworkScope()
@@ -81,13 +85,15 @@ class MainWindow(QMainWindow):
         self.log.setMaximumBlockCount(200)
         self.log.setMaximumHeight(130)
         layout.addWidget(self.log)
-        self.statusBar().showMessage("就绪 · 本机被控未启动")
+        self.statusBar().showMessage("正在准备本机连接…" if auto_host else "诊断模式")
         self.load_config()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_host)
         self.timer.start(1000)
         self.discovery_timer = QTimer(self)
         self.discovery_timer.timeout.connect(self.refresh_network)
+        if auto_host:
+            QTimer.singleShot(0, self.start_host)
         if auto_refresh:
             self.discovery_timer.start(10000)
             QTimer.singleShot(100, self.refresh_network)
@@ -101,7 +107,7 @@ class MainWindow(QMainWindow):
 
     def make_remote(self):
         layout = self.page("远程连接")
-        layout.addWidget(text_label("两端使用 Elink 0.4.2 或更新版本。主机开启被控后，这里自动发现并直接连接。", "notice"))
+        layout.addWidget(text_label("两端打开 Elink 即可自动发现并连接；同一台电脑同时只接受一个控制端。", "notice"))
         row = QHBoxLayout()
         self.hosts = QComboBox()
         self.hosts.addItem("选择发现的主机…", None)
@@ -110,7 +116,7 @@ class MainWindow(QMainWindow):
         self.refresh_button = button("刷新主机", self.refresh_network)
         row.addWidget(self.refresh_button)
         layout.addLayout(row)
-        self.discovery_state = text_label("自动发现同局域网 / 同 Tailscale 下已开启被控的主机。", "muted")
+        self.discovery_state = text_label("自动发现同局域网 / 同 Tailscale 下运行 Elink 的主机。", "muted")
         layout.addWidget(self.discovery_state)
         form = QFormLayout()
         self.address = QLineEdit()
@@ -156,16 +162,16 @@ class MainWindow(QMainWindow):
 
     def make_host(self):
         layout = self.page("本机被控")
-        layout.addWidget(text_label("开启后，同局域网或同 Tailscale 下的设备可直接控制本机，无需邀请、配对或批准。关闭被控即停止接入。", "notice"))
+        layout.addWidget(text_label("Elink 运行时默认可被控。同一时间只允许一台设备连接；被占用时其它设备不能接入。退出 Elink 即停止被控。", "notice"))
         row = QHBoxLayout()
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
         self.port.setValue(49200)
         row.addWidget(text_label("监听端口"))
         row.addWidget(self.port)
-        self.host_toggle = button("开启被控", self.toggle_host, True)
-        row.addWidget(self.host_toggle)
-        self.host_status = text_label("已关闭", "muted")
+        self.apply_host_button = button("应用连接设置", self.apply_host_settings)
+        row.addWidget(self.apply_host_button)
+        self.host_status = text_label("正在准备…", "muted")
         row.addWidget(self.host_status, 1)
         layout.addLayout(row)
         self.pad_backend = QComboBox()
@@ -197,7 +203,7 @@ class MainWindow(QMainWindow):
         self.peers = QListWidget()
         self.peers.itemDoubleClicked.connect(self.select_peer)
         layout.addWidget(self.peers)
-        layout.addWidget(text_label("远程连接页会合并同一台主机的局域网 / Tailscale 地址。Tailscale 在线不等于 Elink 被控已开启；路径探测才能确认网络路径。HTTPS 使用 TCP 49200，自动发现使用 UDP 49201，媒体使用 ICE 动态 UDP 端口；防火墙需允许 Elink 应用入站。", "muted"))
+        layout.addWidget(text_label("远程连接页会合并同一台主机的局域网 / Tailscale 地址。Tailscale 在线不等于 Elink 正在运行；路径探测才能确认网络路径。HTTPS 使用 TCP 49200，自动发现使用 UDP 49201，媒体使用 ICE 动态 UDP 端口；防火墙需允许 Elink 应用入站。", "muted"))
 
     def append_log(self, message):
         self.log.appendPlainText(f"{time.strftime('%H:%M:%S')}  {message}")
@@ -259,51 +265,79 @@ class MainWindow(QMainWindow):
         self.set_busy(True)
         self.runtime.submit(self.client.disconnect(), lambda _: self.set_busy(False), self.connect_failed)
 
-    def toggle_host(self):
-        self.host_toggle.setEnabled(False)
-        if self.server and self.server.runner:
-            self.runtime.submit(self.server.stop(), lambda _: self.host_changed(False), self.host_failed)
-        else:
-            self.save_config()
-            port = self.port.value()
-            pad_backend = self.pad_backend.currentData()
-            self.pad_backend.setEnabled(False)
-            async def start():
-                if self.server is None:
-                    self.server = HostServer(self.root, notify=self.runtime.message.emit, pad_backend=pad_backend, scope=self.scope)
-                self.server.pad_backend = pad_backend
-                return await self.server.start(port=port)
-            self.runtime.submit(start(), lambda _: self.host_changed(True), self.host_failed)
+    def start_host(self):
+        if self._closing or self.host_starting or self.server and self.server.runner:
+            return
+        self.host_starting = True
+        self.apply_host_button.setEnabled(False)
+        port, backend = self.port.value(), self.pad_backend.currentData()
+        async def start():
+            if self.server is None:
+                self.server = HostServer(self.root, notify=self.runtime.message.emit, pad_backend=backend, scope=self.scope)
+            self.server.pad_backend = backend
+            return await self.server.start(port=port)
+        self.host_future = self.runtime.submit(start(), self.host_ready, self.host_failed)
 
-    def host_changed(self, active):
-        self.host_toggle.setEnabled(True)
-        self.host_toggle.setText("关闭被控" if active else "开启被控")
-        self.port.setEnabled(not active)
-        self.pad_backend.setEnabled(not active)
-        self.host_status.setText(f"已开启 · TCP {self.port.value()}" if active else "已关闭")
-        if not active:
-            self.session_status.setText("当前无串流连接")
-            self.end_session_button.setEnabled(False)
-        self.append_log("本机被控已开启。" if active else "本机被控已关闭，已释放输入。")
+    def host_ready(self, port):
+        self.host_starting = False
+        self.host_future = None
+        if self._closing:
+            return
+        self.apply_host_button.setEnabled(True)
+        self.host_status.setText(f"可连接 · TCP {port}")
+        self.statusBar().showMessage("本机已就绪 · 等待控制端连接")
+        self.append_log(f"本机自动就绪 · TCP {port} · 同时只允许一台控制端。")
 
     def host_failed(self, message):
-        self.host_toggle.setEnabled(True)
-        self.pad_backend.setEnabled(not (self.server and self.server.runner))
+        self.host_starting = False
+        self.host_future = None
+        self.host_retry_at = time.monotonic() + 10
+        if self._closing:
+            return
+        self.apply_host_button.setEnabled(True)
+        self.host_status.setText("设置未应用 · 当前连接服务继续运行" if self.server and self.server.runner
+                                 else "暂不可连接 · 10 秒后重试")
         self.report_error(message)
+
+    def apply_host_settings(self):
+        if self._closing or self.host_starting:
+            return
+        self.save_config()
+        self.host_starting = True
+        self.apply_host_button.setEnabled(False)
+        port, backend = self.port.value(), self.pad_backend.currentData()
+        async def apply():
+            if self.server:
+                if self.server.pc or self.server.ending or self.server.lock.locked():
+                    raise ValueError("当前正在被控制或连接中，请断开会话后再修改连接设置。")
+                await self.server.stop()
+            else:
+                self.server = HostServer(self.root, notify=self.runtime.message.emit, pad_backend=backend, scope=self.scope)
+            self.server.pad_backend = backend
+            return await self.server.start(port=port)
+        self.host_future = self.runtime.submit(apply(), self.host_ready, self.host_failed)
 
     def end_host_session(self):
         if self.server:
             self.runtime.submit(self.server.end_session(), lambda _: self.append_log("已断开当前控制端。"))
 
     def refresh_host(self):
+        if self.auto_host and not self._closing and not self.host_starting and time.monotonic() >= self.host_retry_at:
+            if not self.server or not self.server.runner:
+                self.start_host()
         if not self.server or self.poll_pending or self._closing:
             return
         self.poll_pending = True
         async def snapshot():
-            return self.server.device_id, self.server.pc is not None
+            return self.server.device_id, self.server.pc is not None or self.server.ending, self.server.port if self.server.runner else None
         def display(result):
             self.poll_pending = False
-            address, active = result
+            if self._closing:
+                return
+            address, active, port = result
+            if port:
+                self.host_status.setText(f"{'占用中' if active else '可连接'} · TCP {port}")
+            self.apply_host_button.setEnabled(not active and not self.host_starting)
             self.session_status.setText(f"当前控制端：{address}" if active else "当前无串流连接")
             self.end_session_button.setEnabled(active)
         self.runtime.submit(snapshot(), display, lambda _: setattr(self, "poll_pending", False))
@@ -331,7 +365,7 @@ class MainWindow(QMainWindow):
         if follow and index:
             self.select_host(index)
         self.discovery_state.setText(f"发现 {len(hosts)} 台主机 · 选择后点击开始串流 · 每 10 秒刷新" if hosts else
-                                    "暂未发现主机：请确认对端已开启被控，或直接填写地址连接。")
+                                    "暂未发现主机：请确认对端 Elink 正在运行，或直接填写地址连接。")
 
     def refresh_network(self):
         if self.discovery_pending or self._closing:
@@ -437,6 +471,12 @@ class MainWindow(QMainWindow):
             self.player.close()
         self.setEnabled(False)
         async def cleanup():
+            pending = self.host_future
+            if pending:
+                try:
+                    await asyncio.wrap_future(pending)
+                except Exception:
+                    pass
             await self.client.disconnect()
             if self.server:
                 await self.server.stop()

@@ -73,6 +73,9 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         client.send({"type": "pad", "index": 0, "values": [4096, 0, 0, 100, 0, 0, 0]})
         await until(lambda: any(e["type"] == "pad" for e in backend.events))
         await until(lambda: client.rtt_ms > 0)
+        await until(lambda: client.stats.rx_kbps is not None and client.stats.loss_percent is not None)
+        assert client.stats.rx_kbps > 0
+        assert client.stats.decode_ms is not None
         from elink.core.codecs import metrics
         report = {"video_frames": client.mailbox.received, "audio_frames": client.audio_frames,
                   "rtt_ms": round(client.rtt_ms, 2), "metrics": dict(metrics), "messages": messages}
@@ -91,6 +94,43 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
 
 def test_automatic_tls_webrtc_input_host_disconnect_and_reconnect(tmp_path):
     print(asyncio.run(roundtrip(tmp_path)))
+
+
+def test_simultaneous_clients_only_one_enters_negotiation(tmp_path, monkeypatch):
+    from elink.core import transport
+    async def scenario():
+        host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput)
+        clients = [Client(tmp_path / str(i), play_audio=False) for i in range(2)]
+        original_request = transport.request
+        barrier = asyncio.Event()
+        infos = []
+        async def request_together(endpoint, fp, method, path, **kwargs):
+            result = await original_request(endpoint, fp, method, path, **kwargs)
+            if path == '/v1/info':
+                infos.append(result)
+                if len(infos) == 2:
+                    barrier.set()
+                await barrier.wait()
+            return result
+        monkeypatch.setattr(transport, 'request', request_together)
+        try:
+            port = await host.start('127.0.0.1', 0)
+            results = await asyncio.wait_for(asyncio.gather(*(
+                c.connect(f'127.0.0.1:{port}', dict(width=640, height=360, audio=False)) for c in clients
+            ), return_exceptions=True), 20)
+            assert sum(r is None for r in results) == 1
+            assert sum(isinstance(r, ValidationError) for r in results) == 1
+            assert all(info['busy'] is False for info in infos)
+            winner = clients[next(i for i, r in enumerate(results) if r is None)]
+            await until(lambda: winner.mailbox.received > 5)
+            assert host.host_info()['busy']
+            await winner.disconnect()
+            await until(lambda: not host.host_info()['busy'])
+        finally:
+            for client in clients:
+                await client.disconnect()
+            await host.stop()
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("value", [{"fps": True}, {"fps": 121}, {"width": 1919}, {"audio": 1}, {"bitrate": 81}])

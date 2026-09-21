@@ -30,7 +30,7 @@ def test_about_check_channel_error_and_no_network_at_start(tmp_path, monkeypatch
         calls.append(preview)
         return None
     monkeypatch.setattr(updates, "check_release", check)
-    window = MainWindow(tmp_path, auto_refresh=False)
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
     try:
         assert window.tabs.tabText(3) == "关于"
         app.processEvents()
@@ -52,7 +52,7 @@ def test_about_check_channel_error_and_no_network_at_start(tmp_path, monkeypatch
 
 def test_declining_update_never_downloads(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
-    window = MainWindow(tmp_path, auto_refresh=False)
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
     monkeypatch.setattr(updates, "installation_dir", lambda _: tmp_path / "Elink")
     monkeypatch.setattr(QMessageBox, "question", lambda *_: QMessageBox.StandardButton.No)
     def unexpected(*_):
@@ -82,7 +82,7 @@ def test_confirm_update_prepares_before_helper_and_graceful_close(tmp_path, monk
         calls.append("helper")
     monkeypatch.setattr(updates, "prepare_update", prepare)
     monkeypatch.setattr(updates, "launch_helper", helper)
-    window = MainWindow(tmp_path / "data", auto_refresh=False)
+    window = MainWindow(tmp_path / "data", auto_refresh=False, auto_host=False)
     try:
         window.about.checked(release())
         pump(app, lambda: window._closed)
@@ -105,7 +105,7 @@ def test_download_can_be_cancelled_without_exiting(tmp_path, monkeypatch):
         await asyncio.sleep(30)
         raise AssertionError("cancel was not delivered")
     monkeypatch.setattr(updates, "prepare_update", prepare)
-    window = MainWindow(tmp_path, auto_refresh=False)
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
     try:
         window.about.checked(release())
         pump(app, lambda: bool(started))
@@ -124,7 +124,7 @@ def test_helper_failure_keeps_app_open_and_never_arms(tmp_path, monkeypatch):
     def fail(*_):
         raise RuntimeError("helper failed")
     monkeypatch.setattr(updates, "launch_helper", fail)
-    window = MainWindow(tmp_path, auto_refresh=False)
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
     try:
         window.about.prepared(workspace, window.about.generation)
         pump(app, lambda: not window.about.installing)
@@ -137,7 +137,7 @@ def test_helper_failure_keeps_app_open_and_never_arms(tmp_path, monkeypatch):
 
 def test_cancelled_completion_cannot_install_after_a_new_check(tmp_path):
     app = QApplication.instance() or QApplication([])
-    window = MainWindow(tmp_path, auto_refresh=False)
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
     workspace = tmp_path / "stage"
     workspace.mkdir()
     try:

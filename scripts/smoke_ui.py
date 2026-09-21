@@ -14,7 +14,7 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     app = QApplication([])
     apply_theme(app)
-    window = MainWindow(root, auto_refresh=False)
+    window = MainWindow(root, auto_refresh=False, auto_host=False)
     window.show()
     for width, height in ((1120, 800), (900, 680)):
         window.resize(width, height)
