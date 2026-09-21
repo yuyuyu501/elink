@@ -1,5 +1,6 @@
 """Publish a verified Windows package from a clean, synced commit with passing CI."""
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -8,7 +9,8 @@ import subprocess
 import sys
 import urllib.error
 import urllib.parse
-import urllib.request
+
+import aiohttp
 
 from elink import __version__
 from scripts.package_windows import ROOT, source_snapshot, validate_self_test
@@ -29,7 +31,9 @@ class GitHub:
         self.token = values['password']  # Never log or persist credentials.
 
     def api(self, url, method='GET', value=None, binary=None):
-        if urllib.parse.urlsplit(url).hostname not in ('api.github.com', 'uploads.github.com'):
+        parts = urllib.parse.urlsplit(url)
+        if (parts.scheme != 'https' or parts.hostname not in ('api.github.com', 'uploads.github.com')
+                or parts.username or parts.password or parts.port not in (None, 443)):
             raise RuntimeError('Unexpected GitHub API host')
         headers = {'Authorization': 'Bearer ' + self.token, 'User-Agent': 'Elink-release',
                    'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
@@ -40,9 +44,21 @@ class GitHub:
         if binary is not None:
             body = binary
             headers['Content-Type'] = 'application/octet-stream'
-        request = urllib.request.Request(url, data=body, headers=headers, method=method)
-        with urllib.request.urlopen(request, timeout=300) as response:
-            return json.load(response)
+        async def request():
+            # Match the application's direct HTTPS transport. urllib can inherit a
+            # Windows registry proxy that breaks authenticated Release requests.
+            # Never forward the authorization header through redirects.
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300, connect=30),
+                                             trust_env=False) as session:
+                async with session.request(method, url, data=body, headers=headers,
+                                           allow_redirects=False) as response:
+                    if response.status >= 300:
+                        raise urllib.error.HTTPError(url, response.status, response.reason, None, None)
+                    return await response.json()
+        try:
+            return asyncio.run(request())
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise RuntimeError(f'GitHub connection failed ({type(exc).__name__}); retry the same draft/package.') from exc
 
 
 def git(*args):

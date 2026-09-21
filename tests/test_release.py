@@ -1,5 +1,6 @@
 import hashlib
 import json
+import urllib.error
 
 import pytest
 
@@ -66,7 +67,7 @@ def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypa
         publisher.validate_package(tmp_path)
 
 
-@pytest.mark.parametrize('scenario', ['success', 'bad_asset', 'existing_public', 'ci_failed', 'wrong_tag', 'resume'])
+@pytest.mark.parametrize('scenario', ['success', 'missing_tag', 'bad_asset', 'existing_public', 'ci_failed', 'wrong_tag', 'resume'])
 def test_publish_only_after_ci_and_all_asset_checks(tmp_path, monkeypatch, scenario):
     notes, _, _ = package_fixture(tmp_path, monkeypatch)
     mutations = []
@@ -87,6 +88,8 @@ def test_publish_only_after_ci_and_all_asset_checks(tmp_path, monkeypatch, scena
             return {'workflow_runs': [dict(id=1, head_sha='abc', event='push',
                                           conclusion='failure' if scenario == 'ci_failed' else 'success')]}
         if '/git/ref/' in url:
+            if scenario == 'missing_tag':
+                raise urllib.error.HTTPError(url, 404, 'Not Found', None, None)
             return {'object': dict(type='commit', sha='wrong' if scenario == 'wrong_tag' else 'abc')}
         if '/releases?' in url:
             return [release] if scenario in ('existing_public', 'resume') else []
@@ -100,7 +103,7 @@ def test_publish_only_after_ci_and_all_asset_checks(tmp_path, monkeypatch, scena
             return dict(release, **value)
         raise AssertionError(url)
 
-    if scenario in ('success', 'resume'):
+    if scenario in ('success', 'missing_tag', 'resume'):
         assert publisher.publish(tmp_path, notes, api) == release['html_url']
         assert mutations[-1][2]['draft'] is False
         assert sum('uploads.github.com' in url for url, _, _ in mutations) == (2 if scenario == 'resume' else 3)
