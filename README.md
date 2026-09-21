@@ -1,4 +1,4 @@
-# Elink 0.4.5 Preview
+# Elink 0.4.6 Preview
 
 Windows 独立远程桌面与游戏串流原型。Elink 自己负责采集、发现、会话、播放器和输入；不需要 Sunshine 或 Moonlight，不下载或启动它们。
 
@@ -14,7 +14,7 @@ python -m venv .venv
 
 本地便携构建入口：`dist/Elink/Elink.exe`，需保留整个文件夹。构建：`.venv/Scripts/python.exe -m scripts.build`。
 
-日常开发按“本地修改 → 自动测试 → Git 同步 → Windows 打包 → GitHub Release”执行，发布后由用户安装新版并手动测试。更新版本号、写好发布说明并审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.release_windows --message "修改说明" --notes docs/releases/v0.4.5.md`。各阶段失败即停止；打包与上传脚本也可单独重试。详见 [开发与打包流程](docs/development-workflow.md)。
+日常开发按“本地修改 → 自动测试 → Git 同步 → Windows 打包 → GitHub Release”执行，发布后由用户安装新版并手动测试。更新版本号、写好发布说明并审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.release_windows --message "修改说明" --notes docs/releases/v0.4.6.md`。各阶段失败即停止；打包与上传脚本也可单独重试。详见 [开发与打包流程](docs/development-workflow.md)。
 
 自动化测试：`.venv/Scripts/python.exe -m pytest -q`。便携包自测可运行 `Elink.exe --self-test <独立测试目录>`，结果写入该目录；实际桌面采集自测为 `--self-test-desktop`，两者均不向系统注入键鼠。
 
@@ -33,6 +33,8 @@ python -m venv .venv
 首页不再显示常驻日志或串流参数表单，连接失败以可选择复制的提示显示。详细记录在“网络诊断 → 查看诊断记录”中，默认收起。“设置”页仅保留本机监听端口与手柄后端；画质表单仅在远控窗口显示。
 
 显示分辨率来自 Windows 枚举，缩放来自显示器对应的 DisplayConfig DPI 范围。缩放接口在部分系统 / 显卡上不可用时会显示原因并禁用，不写注册表或注销用户。修改实际显示设置需要被控端 0.4.5 或更高版本。详见 [被控端显示设置](docs/remote-display.md)。
+
+远控窗口使用单层自定义标题栏，控制中心和最小化 / 最大化 / 关闭按钮位于同一行。拖动标题栏移动窗口，双击切换最大化；释放输入后可拖动边缘调整大小。全屏控制时标题栏隐藏，F8 释放输入并显示控制中心；F11 退出全屏并恢复此前窗口状态。
 
 ### 实时状态、鼠标显示与应用更新
 

@@ -52,6 +52,12 @@ QTabBar::tab { padding: 12px 22px; margin-right: 8px; background: transparent; c
 QTabBar::tab:selected { color: #244ede; border-bottom: 3px solid #244ede; }
 QTabBar::tab:hover { color: #244ede; background: #edf2ff; }
 QFrame#streamToolbar { background: #edf2fa; border: 0; border-bottom: 1px solid #dfe6f1; }
+QWidget#windowResizeHandle { background: transparent; }
+QFrame#streamToolbar QPushButton { min-height: 0; max-height: 40px; border: 0; border-radius: 0; padding: 0; background: transparent; }
+QFrame#streamToolbar QPushButton#titleControl { padding: 0 18px; min-height: 40px; }
+QFrame#streamToolbar QPushButton:hover { background: #dce6f6; }
+QFrame#streamToolbar QPushButton:focus { background: #dce6f6; }
+QFrame#streamToolbar QPushButton#titleClose:hover { background: #edb1b5; }
 QLabel#streamTitle { font-family: 'Segoe UI Variable Display'; font-weight: 600; }
 QMenu { background: #ffffff; border: 1px solid #dfe6f1; border-radius: 9px; padding: 7px; }
 QMenu::item { padding: 10px 32px 10px 24px; border-radius: 5px; }

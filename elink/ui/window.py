@@ -297,8 +297,11 @@ class MainWindow(QMainWindow):
             self.player.setGeometry(view['geometry'])
             self.player.show_statistics = view['statistics']
             self.player.muted = view['muted']
+            self.player.was_maximized = view.get('was_maximized', False)
         if view and view['fullscreen']:
             self.player.showFullScreen()
+        elif view and view.get('maximized'):
+            self.player.showMaximized()
         else:
             self.player.show()
         self.set_busy(False)
@@ -330,7 +333,8 @@ class MainWindow(QMainWindow):
         address = self.session_address
         player, self.player = self.player, None
         self.resume_view = dict(geometry=player.normalGeometry(), fullscreen=player.isFullScreen(),
-                                statistics=player.show_statistics, muted=player.muted)
+                                statistics=player.show_statistics, muted=player.muted,
+                                maximized=player.isMaximized(), was_maximized=player.was_maximized)
         player.ended.disconnect(self.disconnect_remote)
         player.close()
         player.deleteLater()

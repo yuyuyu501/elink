@@ -4,9 +4,10 @@ import time
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QActionGroup
-from PySide6.QtWidgets import QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QMenu, QDialog
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QMenu, QDialog
 
 from .controls import StreamOptions
+from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_resize_handles
 
 from ..core.statistics import StreamStats, overlay_lines
 from ..core.input import XInput
@@ -19,6 +20,8 @@ class Player(QWidget):
 
     def __init__(self, runtime, client, *, game_mouse=True, controllers=True, preferences=None):
         super().__init__()
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.was_maximized = False
         self.runtime, self.client = runtime, client
         self.game_mouse, self.controllers = game_mouse, controllers
         self.preferences = dict(preferences or {})
@@ -51,18 +54,10 @@ class Player(QWidget):
         self._closed = False
 
     def make_toolbar(self):
-        self.toolbar = QFrame(self)
-        self.toolbar.setObjectName("streamToolbar")
-        row = QHBoxLayout(self.toolbar)
-        row.setContentsMargins(16, 4, 12, 4)
-        self.stream_title = QLabel("ELINK  /  远程桌面")
-        self.stream_title.setObjectName("streamTitle")
-        row.addWidget(self.stream_title)
-        row.addStretch()
-        self.controls_button = QPushButton("控制中心  F8  ▾")
-        self.controls_button.setToolTip("F8 打开控制中心并释放远端输入")
-        self.controls_button.clicked.connect(self.open_controls)
-        row.addWidget(self.controls_button)
+        self.toolbar = StreamTitleBar(self)
+        self.stream_title = self.toolbar.title
+        self.controls_button = self.toolbar.controls
+        self.resize_handles = make_resize_handles(self)
         self.error_label = QLabel(self)
         self.error_label.setObjectName("errorNotice")
         self.error_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -70,10 +65,44 @@ class Player(QWidget):
         self.error_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.error_label.hide()
 
+    def video_viewport(self):
+        return self.rect().adjusted(0, 0 if self.isFullScreen() else TITLE_HEIGHT, 0, 0)
+
+    def layout_chrome(self):
+        self.toolbar.setGeometry(0, 0, self.width(), TITLE_HEIGHT)
+        self.toolbar.setVisible(not self.isFullScreen() or not self.captured)
+        self.toolbar.update_state()
+        top = TITLE_HEIGHT if self.toolbar.isVisible() else 0
+        self.error_label.setGeometry(16, top + 8, self.width() - 32, 72)
+        place_resize_handles(self)
+        self.update()
+
     def resizeEvent(self, event):
-        self.toolbar.setGeometry(0, 0, self.width(), 48)
-        self.error_label.setGeometry(16, 56, self.width() - 32, 72)
+        self.layout_chrome()
         super().resizeEvent(event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange and hasattr(self, 'toolbar'):
+            self.release()
+            self.layout_chrome()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.layout_chrome()
+
+    def minimize_window(self):
+        self.release()
+        self.showMinimized()
+
+    def toggle_maximized(self):
+        self.release()
+        if self.isFullScreen():
+            self.toggle_fullscreen()
+        elif self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
 
     def show_error(self, message):
         self.error_label.setText(str(message))
@@ -140,7 +169,13 @@ class Player(QWidget):
         self.update()
 
     def toggle_fullscreen(self):
-        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+        self.release()
+        if self.isFullScreen():
+            self.showMaximized() if self.was_maximized else self.showNormal()
+        else:
+            self.was_maximized = self.isMaximized()
+            self.showFullScreen()
+        self.layout_chrome()
 
     def open_quality(self):
         self.release()
@@ -217,8 +252,9 @@ class Player(QWidget):
         self.runtime.call(self.client.send, event)
 
     def capture(self):
-        self.captured = True
         self.setFocus()
+        self.captured = True
+        self.layout_chrome()
         self.runtime.call(self.client.focus, True)
         self.setCursor(Qt.CursorShape.BlankCursor)
         if self.game_mouse:
@@ -234,6 +270,7 @@ class Player(QWidget):
             for index in self.pad_indices:
                 self.xinput.rumble(index)
         self.pad_indices.clear()
+        self.layout_chrome()
 
     def tick(self):
         pixels = self.client.mailbox.take()
@@ -264,10 +301,10 @@ class Player(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#101719"))
-        viewport = self.rect().adjusted(0, 48, 0, 0)
+        viewport = self.video_viewport()
         if self.image:
             size = self.image.size().scaled(viewport.size(), Qt.AspectRatioMode.KeepAspectRatio)
-            self.rect_image = QRect((self.width() - size.width()) // 2, 48 + (viewport.height() - size.height()) // 2, size.width(), size.height())
+            self.rect_image = QRect((self.width() - size.width()) // 2, viewport.top() + (viewport.height() - size.height()) // 2, size.width(), size.height())
             painter.drawImage(self.rect_image, self.image)
             if self.new_image:
                 self.drawn += 1
@@ -283,10 +320,11 @@ class Player(QWidget):
             painter.setFont(font)
             line_height = painter.fontMetrics().height() + 2
             width = max(painter.fontMetrics().horizontalAdvance(line) for line in lines) + 14
-            painter.fillRect(4, 52, width, len(lines) * line_height + 8, QColor(0, 0, 0, 105))
+            stats_top = TITLE_HEIGHT if self.toolbar.isVisible() else 0
+            painter.fillRect(4, stats_top + 4, width, len(lines) * line_height + 8, QColor(0, 0, 0, 105))
             painter.setPen(QColor('#ffffff'))
             for index, line in enumerate(lines):
-                painter.drawText(10, 56 + painter.fontMetrics().ascent() + index * line_height, line)
+                painter.drawText(10, stats_top + 8 + painter.fontMetrics().ascent() + index * line_height, line)
         status = "输入已捕获 · Ctrl+Alt+Shift+Z 释放 · F11 全屏" if self.captured else "点击画面控制 · F8 控制中心 / 释放输入 · Ctrl+Alt+Shift+Q 断开"
         if self.client.pc is None:
             status = "会话已断开，请关闭窗口后重新连接。"
@@ -342,7 +380,7 @@ class Player(QWidget):
 
     def mousePressEvent(self, event):
         if not self.captured:
-            if self.client.pc and event.position().y() >= 48 and self.image is not None:
+            if self.client.pc and self.video_viewport().contains(event.position().toPoint()) and self.image is not None:
                 self.capture()
             return
         self.mouse_button(event, True)

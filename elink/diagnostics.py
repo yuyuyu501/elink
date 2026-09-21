@@ -70,6 +70,11 @@ def run(root: Path, desktop=False):
                       audio_output_active=bool(client.output and client.output.stream.active),
                       stream_statistics=asdict(client.stats))
         player.grab().save(str(root / "player.png"))
+        from .ui.chrome import TITLE_HEIGHT
+        assert player.video_viewport().top() == TITLE_HEIGHT
+        if app.platformName() == 'windows':
+            assert player.frameGeometry() == player.geometry()
+        result['single_titlebar'] = True
         player.open_controls()
         app.processEvents()
         player.control_menu.grab().save(str(root / "control-menu.png"))
