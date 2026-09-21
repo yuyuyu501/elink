@@ -44,8 +44,8 @@ class Player(QWidget):
         self.captured = True
         self.setFocus()
         self.runtime.call(self.client.focus, True)
+        self.setCursor(Qt.CursorShape.BlankCursor)
         if self.game_mouse:
-            self.setCursor(Qt.CursorShape.BlankCursor)
             self.grabMouse()
             QCursor.setPos(self.mapToGlobal(self.rect().center()))
 

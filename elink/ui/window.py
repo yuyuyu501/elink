@@ -17,6 +17,8 @@ from ..models import Endpoint
 from ..network import local_addresses, netcheck, tailnet_ping, tailnet_status, tailscale_path
 from ..storage import atomic_json
 from .player import Player
+from .about import AboutPage
+from .. import __version__
 
 
 def button(text, action, primary=False):
@@ -50,7 +52,7 @@ class MainWindow(QMainWindow):
         self.poll_pending = False
         self.config_path = root / "desktop-v3.json"
         self.config_error = False
-        self.setWindowTitle("Elink · 独立串流预览版 0.4")
+        self.setWindowTitle(f"Elink · 独立串流预览版 {__version__}")
         self.resize(1120, 800)
         self.setMinimumSize(900, 680)
         outer = QWidget()
@@ -60,7 +62,7 @@ class MainWindow(QMainWindow):
         title = QHBoxLayout()
         title.addWidget(text_label("Elink", "pageTitle"))
         title.addStretch()
-        title.addWidget(text_label("WINDOWS · H.264 / OPUS · 0.4 PREVIEW", "muted"))
+        title.addWidget(text_label(f"WINDOWS · H.264 / OPUS · {__version__} PREVIEW", "muted"))
         layout.addLayout(title)
         layout.addWidget(text_label("连接自己的游戏主机", "sectionTitle"))
         self.tabs = QTabWidget()
@@ -68,6 +70,8 @@ class MainWindow(QMainWindow):
         self.make_remote()
         self.make_host()
         self.make_network()
+        self.about = AboutPage(self)
+        self.tabs.addTab(self.about, "关于")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(200)
@@ -379,6 +383,7 @@ class MainWindow(QMainWindow):
         try:
             value = json.loads(self.config_path.read_text(encoding="utf-8"))
             self.address.setText(value.get("address", ""))
+            self.about.previews.setChecked(value.get("update_previews", True))
             self.port.setValue(value.get("port", 49200))
             self.bitrate.setValue(value.get("bitrate", 20))
             self.pad_backend.setCurrentIndex(max(0, self.pad_backend.findData(value.get("pad_backend", "vigem"))))
@@ -396,6 +401,7 @@ class MainWindow(QMainWindow):
             return
         value = dict(address=self.address.text(), port=self.port.value(), bitrate=self.bitrate.value())
         value["pad_backend"] = self.pad_backend.currentData()
+        value["update_previews"] = self.about.previews.isChecked()
         for name in ("resolution", "fps", "decoder"):
             value[name] = getattr(self, name).currentIndex()
         for name in ("audio", "game_mouse", "controllers"):
@@ -410,9 +416,12 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         event.ignore()
+        if self.about.installing and not self.about.handoff_complete:
+            return
         if self._closing:
             return
         self._closing = True
+        self.about.shutdown()
         self.timer.stop()
         self.save_config()
         if self.pair_future:

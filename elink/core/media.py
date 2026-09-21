@@ -25,6 +25,7 @@ class DesktopTrack(MediaStreamTrack):
         self.synthetic = synthetic
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="elink-capture")
         self.camera = None
+        self.cursor = None
         self.last = None
         self.start_time = None
         self.next_time = 0.0
@@ -41,6 +42,8 @@ class DesktopTrack(MediaStreamTrack):
                 import dxcam
                 self.com_initialized = ctypes.windll.ole32.CoInitializeEx(None, 2) in (0, 1)
                 self.camera = dxcam.create(output_color="BGR", max_buffer_len=2)
+                from .cursor import WindowsCursor
+                self.cursor = WindowsCursor()
             pixels = self.camera.grab()
             if pixels is None and self.last is None:
                 for _ in range(50):
@@ -53,6 +56,8 @@ class DesktopTrack(MediaStreamTrack):
             pixels = self.last
             if pixels is None:
                 raise RuntimeError("无法采集当前桌面，请确认屏幕处于解锁状态。")
+            output = self.camera._output.desc.DesktopCoordinates
+            pixels = self.cursor.composite(pixels, (output.left, output.top))
         frame = av.VideoFrame.from_ndarray(pixels, format="bgr24")
         frame = frame.reformat(width=self.width, height=self.height, format="yuv420p")
         metrics["capture_ms"] = (time.perf_counter() - started) * 1000

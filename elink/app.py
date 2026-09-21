@@ -4,7 +4,7 @@ import os
 import sys
 import traceback
 
-from PySide6.QtCore import QLockFile
+from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .paths import data_dir, ensure_dirs
@@ -48,6 +48,16 @@ def main() -> int:
 
     sys.excepthook = exception_hook
     window.show()
+    ready = os.environ.pop("ELINK_UPDATE_READY", "")
+    failure = os.environ.pop("ELINK_UPDATE_FAILURE", "")
+    if ready:
+        def confirm_startup():
+            from pathlib import Path
+            Path(ready).write_text(__version__, encoding="utf-8")
+        QTimer.singleShot(0, confirm_startup)
+    if failure:
+        QTimer.singleShot(0, lambda: QMessageBox.warning(
+            window, "更新未完成", f"新版未能正常启动，已恢复旧版。\n更新日志：{failure}"))
     result = app.exec()
     lock.unlock()
     return result

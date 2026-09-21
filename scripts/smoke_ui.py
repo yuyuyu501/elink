@@ -18,7 +18,7 @@ def main():
     window.show()
     for width, height in ((1120, 800), (900, 680)):
         window.resize(width, height)
-        for index, name in enumerate(("remote", "host", "network")):
+        for index, name in enumerate(("remote", "host", "network", "about")):
             window.tabs.setCurrentIndex(index)
             app.processEvents()
             window.grab().save(str(root / f"{name}-{width}.png"))
