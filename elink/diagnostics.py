@@ -43,23 +43,11 @@ def run(root: Path, desktop=False):
         client = Client(root / "client", play_audio=not desktop)
         await server.start("127.0.0.1", 0)
         address = f"127.0.0.1:{server.port}"
-        pairing = asyncio.create_task(client.pair(address, server.authority.invite(), "Elink self-test"))
-        try:
-            while not server.authority.pending:
-                if pairing.done():
-                    await pairing
-                await asyncio.sleep(0.03)
-            server.authority.approve(next(iter(server.authority.pending)))
-            await pairing
-            await client.connect(address, dict(width=1280, height=720, fps=60, audio=True))
-        finally:
-            if not pairing.done():
-                pairing.cancel()
-                await asyncio.gather(pairing, return_exceptions=True)
+        await client.connect(address, dict(width=1280, height=720, fps=60, audio=True))
 
     async def stop():
         if server and server.device_id:
-            await server.revoke(server.device_id)
+            await server.end_session()
         if client:
             await client.disconnect()
         if server:

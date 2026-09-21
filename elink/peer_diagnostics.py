@@ -35,29 +35,25 @@ async def host(config, root, log):
     backend = RecordingInput()
     server = HostServer(root / 'identity', synthetic=config.get('synthetic', True),
                         backend_factory=lambda: backend, notify=log)
+    server.scope.allows = lambda address: address == config['peer']
     result = {'role': 'host', 'ok': False}
     started = time.monotonic()
     try:
         await server.start(config['bind'], config.get('port', 49318))
-        atomic_json(root / 'ready.json', {'port': server.port, 'invitation': server.authority.invite()})
-        approved = False
+        atomic_json(root / 'ready.json', {'port': server.port, 'mode': 'automatic'})
         connected = False
         connected_at = None
         deadline = started + config.get('timeout', 180)
         while time.monotonic() < deadline:
-            for pending in server.authority.snapshot()['pending']:
-                if not approved and pending['address'] == config['peer'] and pending['name'] == config['name']:
-                    server.authority.approve(pending['id'])
-                    approved = True
             if server.pc and server.pc.connectionState == 'connected':
                 if not connected:
                     result['paths'] = selected_paths(server.pc)
                     connected_at = time.monotonic()
                 connected = True
-            revoke_due = connected_at is not None and config.get('revoke_after') is not None and time.monotonic() - connected_at >= config['revoke_after']
-            if connected and ((root / 'revoke').exists() or revoke_due) and server.device_id:
-                await server.revoke(server.device_id)
-                result['revoked'] = True
+            stop_due = connected_at is not None and config.get('stop_after') is not None and time.monotonic() - connected_at >= config['stop_after']
+            if connected and ((root / 'stop').exists() or stop_due) and server.device_id:
+                await server.end_session()
+                result['host_disconnected'] = True
             if connected and not server.pc and not server.ending:
                 break
             await asyncio.sleep(0.05)
@@ -74,8 +70,6 @@ async def host(config, root, log):
         result['ok'] = result['input_verified'] and result['pad_verified']
     finally:
         await server.stop()
-        for identifier in list(server.authority.devices):
-            server.authority.revoke(identifier)
         result['cleanup'] = server.pc is None and server.runner is None and server.input is None
         result['elapsed_seconds'] = time.monotonic() - started
         atomic_json(root / 'host-result.json', result)
@@ -85,7 +79,6 @@ async def client(config, root, log):
     receiver = Client(root / 'identity', notify=log, play_audio=False)
     result = {'role': 'client', 'ok': False, 'samples': []}
     try:
-        await receiver.pair(config['address'], config['invitation'], config['name'])
         await receiver.connect(config['address'], dict(width=config.get('width', 1920), height=config.get('height', 1080),
                                                        fps=config.get('fps', 60), audio=config.get('audio', True),
                                                        bitrate=config.get('bitrate', 20)))
@@ -122,10 +115,10 @@ async def client(config, root, log):
         result['stats'] = [{key: value.isoformat() if isinstance(value, datetime) else value
                             for key, value in asdict(stat).items()}
                            for stat in (await receiver.pc.getStats()).values()]
-        if config.get('wait_revoke'):
-            atomic_json(root / 'awaiting-revoke.json', {'ready': True})
+        if config.get('wait_stop'):
+            atomic_json(root / 'awaiting-stop.json', {'ready': True})
             await until(lambda: receiver.pc is None, 30)
-            result['revocation_disconnected'] = True
+            result['host_disconnected'] = True
         else:
             await receiver.disconnect()
         result['ok'] = result['video_frames'] > 30 and (not config.get('audio', True) or result['audio_frames'] > 10)

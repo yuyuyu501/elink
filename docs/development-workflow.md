@@ -9,7 +9,7 @@
 ```powershell
 git status --short
 git add <本次修改的具体文件>
-.venv/Scripts/python.exe -m scripts.release_windows --message "说明本次修改" --notes docs/releases/v0.4.1.md
+.venv/Scripts/python.exe -m scripts.release_windows --message "说明本次修改" --notes docs/releases/v0.4.2.md
 ```
 
 请将示例说明路径换成本次版本。该入口依次调用三个独立阶段，任一失败立即停止：

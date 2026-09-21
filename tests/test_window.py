@@ -18,7 +18,7 @@ def pump(app, predicate, timeout=10):
         time.sleep(0.01)
 
 
-def test_window_start_pair_invite_stop_and_shutdown(tmp_path):
+def test_window_automatic_host_start_stop_and_shutdown(tmp_path):
     app = QApplication.instance() or QApplication([])
     apply_theme(app)
     window = MainWindow(tmp_path, auto_refresh=False)
@@ -31,8 +31,9 @@ def test_window_start_pair_invite_stop_and_shutdown(tmp_path):
     assert window.server.runner is not None
     assert window.server.pad_backend == "elinkpad"
     assert not window.pad_backend.isEnabled()
-    window.invite()
-    pump(app, lambda: len(window.invitation.text()) == 26)
+    assert not hasattr(window, "invitation")
+    assert not hasattr(window, "devices")
+    assert not hasattr(window, "pair_button")
     window.toggle_host()
     pump(app, lambda: window.host_toggle.isEnabled())
     assert window.server.runner is None

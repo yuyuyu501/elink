@@ -1,1 +1,1 @@
-"""Elink's own pairing, session, media and input implementation."""
+"""Elink discovery, session, media and input implementation."""

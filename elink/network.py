@@ -19,6 +19,7 @@ class Peer:
     os: str
     online: bool
     dns_name: str = ""
+    addresses: tuple[str, ...] = ()
 
 
 @dataclass
@@ -58,7 +59,7 @@ def parse_tailnet(value: dict) -> TailnetStatus:
         Endpoint.parse(address)
         status.peers.append(Peer(str(raw.get("HostName") or raw.get("DNSName") or address),
                                  address, str(raw.get("OS", "")), raw.get("Online") is True,
-                                 str(raw.get("DNSName") or "").rstrip(".")))
+                                 str(raw.get("DNSName") or "").rstrip("."), tuple(addresses)))
     status.peers.sort(key=lambda peer: (not peer.online, peer.name.casefold()))
     return status
 

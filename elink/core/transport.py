@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 import secrets
 import socket
 import ssl
@@ -18,7 +17,8 @@ from ..models import Endpoint, ValidationError
 from . import codecs
 from .input import InputSession, WindowsInput, PAD_BACKENDS
 from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack
-from .security import Identity, PairingAuthority, TrustStore, pairing_proof
+from .security import Identity
+from ..discovery import NetworkScope, Responder, DISCOVERY_PORT, machine_id
 from .buffers import tune_receiver, tune_track
 
 
@@ -71,13 +71,16 @@ async def errors(request, handler):
 
 
 class HostServer:
-    def __init__(self, root: Path, *, synthetic=False, backend_factory=None, notify=lambda message: None, pad_backend="vigem"):
+    def __init__(self, root: Path, *, synthetic=False, backend_factory=None, notify=lambda message: None, pad_backend="vigem", scope=None):
         if pad_backend not in PAD_BACKENDS:
             raise ValueError("未知手柄后端。")
         self.pad_backend = pad_backend
         install()
         self.identity = Identity(root)
-        self.authority = PairingAuthority(root, self.identity.fingerprint)
+        self.scope = scope or NetworkScope()
+        self.host_id = machine_id()
+        self.discovery_transport = None
+        self.network_task = None
         self.synthetic, self.backend_factory, self.notify = synthetic, backend_factory, notify
         self.runner = None
         self.pc = None
@@ -96,9 +99,13 @@ class HostServer:
     async def start(self, bind=None, port=49200):
         if self.runner:
             raise ValidationError("本机被控已启动。")
-        app = web.Application(middlewares=[errors], client_max_size=131072)
-        app.add_routes([web.get("/v1/info", self.info), web.post("/v1/pair/start", self.pair_start),
-                        web.post("/v1/pair/poll", self.pair_poll), web.get("/v1/apps", self.apps),
+        @web.middleware
+        async def local_access(request, handler):
+            if not self.scope.allows(request.remote):
+                raise web.HTTPForbidden(reason="Only local network or known Tailscale peers may connect")
+            return await handler(request)
+        app = web.Application(middlewares=[errors, local_access], client_max_size=131072)
+        app.add_routes([web.get("/v1/info", self.info), web.get("/v1/apps", self.apps),
                         web.post("/v1/session", self.offer), web.delete("/v1/session/{id}", self.delete)])
         self.closing = False
         self.runner = web.AppRunner(app, access_log=None, shutdown_timeout=3)
@@ -108,13 +115,32 @@ class HostServer:
             await site.start()
             self.port = site._server.sockets[0].getsockname()[1]
             self.watch_task = asyncio.create_task(self.watchdog())
+            if bind not in ("127.0.0.1", "::1"):
+                await self.scope.refresh()
+                self.network_task = asyncio.create_task(self.refresh_scope())
+                try:
+                    self.discovery_transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                        lambda: Responder(self.scope, self.host_info), local_addr=("0.0.0.0", DISCOVERY_PORT))
+                except OSError as exc:
+                    self.notify(f"自动发现端口不可用，可使用主机地址直接连接：{exc}")
         except BaseException:
             await self.stop()
             raise
         return self.port
 
+    def host_info(self):
+        return {"protocol": "elink", "version": 2, "host_id": self.host_id,
+                "name": socket.gethostname()[:80], "codec": "H264", "port": self.port}
+
     async def info(self, request):
-        return web.json_response({"protocol": "elink", "version": 1, "name": socket.gethostname(), "codec": "H264"})
+        return web.json_response(self.host_info())
+
+    async def refresh_scope(self):
+        while True:
+            await asyncio.sleep(15)
+            await self.scope.refresh()
+            if self.pc and not self.scope.allows(self.device_id):
+                await self.end_session()
 
     async def body(self, request):
         data = await request.json()
@@ -122,35 +148,11 @@ class HostServer:
             raise ValidationError("请求格式无效。")
         return data
 
-    async def pair_start(self, request):
-        data = await self.body(request)
-        for key in ("nonce", "proof", "name"):
-            if not isinstance(data.get(key), str) or not data[key].isascii() and key != "name":
-                raise ValidationError("配对字段无效。")
-        identifier = self.authority.begin(data["nonce"], data["proof"], data["name"], request.remote or "unknown")
-        return web.json_response({"id": identifier})
-
-    async def pair_poll(self, request):
-        data = await self.body(request)
-        if not all(isinstance(data.get(k), str) and data[k].isascii() for k in ("id", "proof")):
-            raise ValidationError("配对字段无效。")
-        return web.json_response(self.authority.poll(data["id"], data["proof"]))
-
-    def authenticate(self, request):
-        header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer "):
-            raise web.HTTPUnauthorized()
-        try:
-            return self.authority.authenticate(header[7:])
-        except ValidationError:
-            raise web.HTTPUnauthorized() from None
-
     async def apps(self, request):
-        self.authenticate(request)
         return web.json_response({"apps": [{"id": "desktop", "name": "当前桌面"}]})
 
     async def offer(self, request):
-        device = self.authenticate(request)
+        device = request.remote
         data = await self.body(request)
         config = settings(data.get("settings", {}))
         if data.get("type") != "offer" or not isinstance(data.get("sdp"), str) or len(data["sdp"]) > 100000:
@@ -165,8 +167,8 @@ class HostServer:
         async with self.lock:
             if self.pc or self.closing or self.ending:
                 raise web.HTTPConflict(reason="主机已有会话或正在停止")
-            # Recheck after acquiring the lock, in case approval was revoked meanwhile.
-            self.authenticate(request)
+            if not self.scope.allows(device):
+                raise web.HTTPForbidden()
             pc = self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.device_id, self.session_id = device, secrets.token_hex(16)
             self.created = time.monotonic()
@@ -199,7 +201,7 @@ class HostServer:
                 @channel.on("message")
                 def on_message(raw):
                     nonlocal count, period
-                    if self.pc is not pc or self.device_id not in self.authority.devices:
+                    if self.pc is not pc:
                         return
                     now = time.monotonic()
                     if now - period > 1:
@@ -239,7 +241,8 @@ class HostServer:
                     pc.addTrack(audio)
                 video_preferences(pc)
                 await pc.setLocalDescription(await pc.createAnswer())
-                self.authenticate(request)
+                if not self.scope.allows(device):
+                    raise web.HTTPForbidden()
                 if self.pc is not pc:
                     raise ValidationError("会话已取消。")
                 return web.json_response({"id": self.session_id, "type": pc.localDescription.type, "sdp": pc.localDescription.sdp})
@@ -248,15 +251,10 @@ class HostServer:
                 raise
 
     async def delete(self, request):
-        device = self.authenticate(request)
+        device = request.remote
         if device == self.device_id and request.match_info["id"] == self.session_id:
             await self.end_session()
         return web.json_response({"ok": True})
-
-    async def revoke(self, device_id):
-        self.authority.revoke(device_id)
-        if self.device_id == device_id:
-            await self.end_session()
 
     async def watchdog(self):
         while True:
@@ -302,9 +300,13 @@ class HostServer:
 
     async def stop(self):
         self.closing = True
-        self.authority.code = ""
-        self.authority.expires = 0
-        self.authority.pending.clear()
+        if self.discovery_transport:
+            self.discovery_transport.close()
+            self.discovery_transport = None
+        if self.network_task:
+            self.network_task.cancel()
+            await asyncio.gather(self.network_task, return_exceptions=True)
+            self.network_task = None
         if self.watch_task:
             self.watch_task.cancel()
             await asyncio.gather(self.watch_task, return_exceptions=True)
@@ -318,7 +320,7 @@ class HostServer:
 
 
 async def fingerprint(endpoint):
-    # Credential-free bootstrap only. Invitation proof is bound to this fingerprint.
+    # Network-scoped automatic connection; pin the certificate for this session.
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -346,8 +348,10 @@ async def request(endpoint, fingerprint_value, method, path, *, token="", payloa
                 if len(content) > 131072:
                     raise ValidationError("主机响应过大。")
             if response.status != 200:
+                if response.status == 403:
+                    raise ValidationError("主机只接受同局域网或同 Tailscale 网络内的连接。")
                 if response.status == 401:
-                    raise ValidationError("配对授权无效，请重新配对。")
+                    raise ValidationError("主机仍是旧版配对模式，请将两端更新至 0.4.2 或更高版本。")
                 if response.status == 409:
                     raise ValidationError("主机已有串流会话。")
                 raise ValidationError(f"主机拒绝请求（{response.status}）：{content.decode('utf-8', errors='replace')[:240]}")
@@ -360,7 +364,7 @@ async def request(endpoint, fingerprint_value, method, path, *, token="", payloa
 class Client:
     def __init__(self, root, notify=lambda message: None, feedback=lambda event: None, *, play_audio=True):
         install()
-        self.trust = TrustStore(root)
+        # No persistent client authorizations or pairing records in automatic mode.
         self.notify, self.feedback = notify, feedback
         self.play_audio = play_audio
         self.pc = None
@@ -384,30 +388,16 @@ class Client:
         if self.close_task is None or self.close_task.done():
             self.close_task = asyncio.create_task(self.disconnect())
 
-    async def pair(self, address, invitation, name=None):
-        endpoint = Endpoint.parse(address)
-        code = invitation.strip().upper().replace(" ", "")
-        if not re.fullmatch(r"[A-Z2-7]{26}", code):
-            raise ValidationError("请粘贴主机显示的完整 26 位临时邀请。")
-        fp = await fingerprint(endpoint)
-        nonce, name = secrets.token_hex(32), (name or socket.gethostname())[:80]
-        result = await request(endpoint, fp, "POST", "/v1/pair/start", payload={"nonce": nonce, "name": name, "proof": pairing_proof(code, fp, nonce, name)})
-        self.notify("配对请求已发送，请在主机 Elink 中批准。")
-        for _ in range(175):
-            response = await request(endpoint, fp, "POST", "/v1/pair/poll", payload={"id": result["id"], "proof": pairing_proof(code, fp, nonce, name, "poll")})
-            if response.get("state") == "approved":
-                self.trust.save(endpoint.authority, fp, response["token"], response["device_id"])
-                return "配对成功，主机身份与设备凭据已保存。"
-            await asyncio.sleep(1)
-        raise ValidationError("等待配对批准超时。")
-
     async def connect(self, address, config, decoder="auto"):
         async with self.lock:
             if self.pc:
                 raise ValidationError("请先断开当前串流。")
             config = settings(config)
             self.endpoint = Endpoint.parse(address)
-            self.fp, self.token = self.trust.get(self.endpoint.authority)
+            self.fp, self.token = await fingerprint(self.endpoint), ""
+            info = await request(self.endpoint, self.fp, "GET", "/v1/info")
+            if info.get("protocol") != "elink" or info.get("version") != 2:
+                raise ValidationError("主机不支持自动连接，请将两端更新至 0.4.2 或更高版本。")
             codecs.decode_policy = codecs.CodecPolicy(decoder=decoder)
             self.pc = pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.mailbox = FrameMailbox()

@@ -6,34 +6,9 @@ import aiohttp
 import pytest
 
 from elink.core.input import InputSession, RecordingInput
-from elink.core.security import Identity, PairingAuthority, pairing_proof
+from elink.core.security import Identity
 from elink.core.transport import Client, HostServer, request, settings
 from elink.models import Endpoint, ValidationError
-
-
-def test_pairing_identity_binding_expiry_and_revocation(tmp_path):
-    authority = PairingAuthority(tmp_path, "a" * 64)
-    code = authority.invite()
-    assert len(code) == 26
-    nonce, name = "b" * 64, "controller"
-    with pytest.raises(ValidationError):
-        authority.begin(nonce, pairing_proof(code, "c" * 64, nonce, name), name, "local")
-    proof = pairing_proof(code, authority.fingerprint, nonce, name)
-    authority.begin(nonce, proof, name, "local")
-    poll = pairing_proof(code, authority.fingerprint, nonce, name, "poll")
-    assert authority.poll(nonce, poll)["state"] == "pending"
-    with pytest.raises(ValidationError):
-        authority.poll(nonce, proof)
-    authority.approve(nonce)
-    result = authority.poll(nonce, poll)
-    assert authority.authenticate(result["token"]) == result["device_id"]
-    assert result["token"] not in authority.path.read_text()
-    authority.revoke(result["device_id"])
-    with pytest.raises(ValidationError):
-        authority.authenticate(result["token"])
-    authority.expires = 0
-    with pytest.raises(ValidationError):
-        authority.begin(nonce, proof, name, "local")
 
 
 def test_input_replay_focus_and_watchdog():
@@ -72,22 +47,13 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
     messages = []
     host = HostServer(root / "host", synthetic=synthetic, backend_factory=lambda: backend, notify=messages.append)
     client = Client(root / "client", messages.append, play_audio=False)
-    pairing = None
     try:
         port = await host.start("127.0.0.1", 0)
         address = f"127.0.0.1:{port}"
-        invitation = host.authority.invite()
-        pairing = asyncio.create_task(client.pair(address, invitation, "test-controller"))
-        await until(lambda: bool(host.authority.snapshot()["pending"]))
-        host.authority.approve(host.authority.snapshot()["pending"][0]["id"])
-        await pairing
-        fp, token = client.trust.get(address)
-        assert token not in client.trust.path.read_text()
-        assert (await request(Endpoint.parse(address), fp, "GET", "/v1/apps", token=token))["apps"][0]["id"] == "desktop"
+        fp = host.identity.fingerprint
+        assert (await request(Endpoint.parse(address), fp, "GET", "/v1/apps"))["apps"][0]["id"] == "desktop"
         with pytest.raises(aiohttp.ServerFingerprintMismatch):
             await request(Endpoint.parse(address), "0" * 64, "GET", "/v1/info")
-        with pytest.raises(ValidationError):
-            await request(Endpoint.parse(address), fp, "GET", "/v1/apps")
         await client.connect(address, {"width": width, "height": height, "fps": fps, "audio": True})
         await until(lambda: client.mailbox.received >= 10 and client.audio_frames >= 5)
         first = client.mailbox.take()
@@ -110,21 +76,20 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         from elink.core.codecs import metrics
         report = {"video_frames": client.mailbox.received, "audio_frames": client.audio_frames,
                   "rtt_ms": round(client.rtt_ms, 2), "metrics": dict(metrics), "messages": messages}
-        await host.revoke(host.device_id)
+        await host.end_session()
         await until(lambda: client.pc is None)
         assert backend.events[-1]["values"] == [0] * 7
-        with pytest.raises(ValidationError):
-            await request(Endpoint.parse(address), fp, "GET", "/v1/apps", token=token)
+        await client.connect(address, {"width": width, "height": height, "fps": fps, "audio": False})
+        await until(lambda: client.mailbox.received >= 3)
+        assert not (root / "host/authorized-devices.json").exists()
+        assert not (root / "client/trusted-hosts.json").exists()
         return report
     finally:
-        if pairing and not pairing.done():
-            pairing.cancel()
-            await asyncio.gather(pairing, return_exceptions=True)
         await client.disconnect()
         await host.stop()
 
 
-def test_real_tls_webrtc_video_audio_input_and_revoke(tmp_path):
+def test_automatic_tls_webrtc_input_host_disconnect_and_reconnect(tmp_path):
     print(asyncio.run(roundtrip(tmp_path)))
 
 
@@ -159,19 +124,6 @@ def test_receive_queues_drop_stale_frames_and_recover_idr():
 def test_address_rejects_non_endpoints(address):
     with pytest.raises(ValidationError):
         Endpoint.parse(address)
-
-
-def test_pairing_rate_and_corrupt_auth(tmp_path):
-    authority = PairingAuthority(tmp_path, "a" * 64)
-    authority.invite()
-    for _ in range(10):
-        with pytest.raises(ValidationError):
-            authority.begin("b" * 64, "bad", "name", "local")
-    with pytest.raises(ValidationError, match="频繁"):
-        authority.begin("b" * 64, "bad", "name", "local")
-    authority.path.write_text('{"device": {"token_hash": 42}}')
-    with pytest.raises(ValidationError):
-        PairingAuthority(tmp_path, "a" * 64)
 
 
 def test_https_fragmented_response(tmp_path):

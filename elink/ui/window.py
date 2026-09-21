@@ -6,15 +6,16 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
-                               QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget,
                                QVBoxLayout, QWidget)
 
 from ..core.runtime import Runtime
 from ..core.transport import Client, HostServer
 from ..models import Endpoint
-from ..network import local_addresses, netcheck, tailnet_ping, tailnet_status, tailscale_path
+from ..network import netcheck, tailnet_ping, tailscale_path
+from ..discovery import NetworkScope, discover, machine_id
 from ..storage import atomic_json
 from .player import Player
 from .about import AboutPage
@@ -46,7 +47,10 @@ class MainWindow(QMainWindow):
         self.server = None
         self.client = Client(root, self.runtime.message.emit, self.runtime.feedback.emit)
         self.player = None
-        self.pair_future = None
+        self.scope = NetworkScope()
+        self.local_id = machine_id()
+        self.discovery_future = None
+        self.discovery_pending = False
         self.busy = False
         self._closing = self._closed = False
         self.poll_pending = False
@@ -82,7 +86,10 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_host)
         self.timer.start(1000)
+        self.discovery_timer = QTimer(self)
+        self.discovery_timer.timeout.connect(self.refresh_network)
         if auto_refresh:
+            self.discovery_timer.start(10000)
             QTimer.singleShot(100, self.refresh_network)
 
     def page(self, name):
@@ -94,10 +101,20 @@ class MainWindow(QMainWindow):
 
     def make_remote(self):
         layout = self.page("远程连接")
-        layout.addWidget(text_label("两端运行 Elink。跨网络时，先让两台电脑加入同一个 Tailscale 网络。", "notice"))
+        layout.addWidget(text_label("两端使用 Elink 0.4.2 或更新版本。主机开启被控后，这里自动发现并直接连接。", "notice"))
+        row = QHBoxLayout()
+        self.hosts = QComboBox()
+        self.hosts.addItem("选择发现的主机…", None)
+        self.hosts.activated.connect(self.select_host)
+        row.addWidget(self.hosts, 1)
+        self.refresh_button = button("刷新主机", self.refresh_network)
+        row.addWidget(self.refresh_button)
+        layout.addLayout(row)
+        self.discovery_state = text_label("自动发现同局域网 / 同 Tailscale 下已开启被控的主机。", "muted")
+        layout.addWidget(self.discovery_state)
         form = QFormLayout()
         self.address = QLineEdit()
-        self.address.setPlaceholderText("主机 IP 或 Tailscale 地址，默认端口 49200")
+        self.address.setPlaceholderText("自动填入，也可手动填写 IP / 主机名，默认端口 49200")
         form.addRow("主机地址", self.address)
         self.resolution = QComboBox()
         for label, size in [("1920 × 1080", (1920, 1080)), ("1600 × 900", (1600, 900)), ("1280 × 720", (1280, 720))]:
@@ -127,14 +144,10 @@ class MainWindow(QMainWindow):
         for item in (self.audio, self.game_mouse, self.controllers):
             row.addWidget(item)
         layout.addLayout(row)
-        layout.addWidget(text_label("首次连接：在主机开启被控并生成邀请 → 此处配对 → 主机批准。配对后直接开始串流。", "muted"))
         row = QHBoxLayout()
-        self.pair_button = button("配对主机", self.pair)
-        self.cancel_pair = button("取消配对", self.cancel_pairing)
-        self.cancel_pair.setEnabled(False)
         self.connect_button = button("开始串流", self.connect_remote, True)
         self.disconnect_button = button("断开", self.disconnect_remote)
-        for item in (self.pair_button, self.cancel_pair, self.connect_button, self.disconnect_button):
+        for item in (self.connect_button, self.disconnect_button):
             row.addWidget(item)
         row.addStretch()
         layout.addLayout(row)
@@ -143,7 +156,7 @@ class MainWindow(QMainWindow):
 
     def make_host(self):
         layout = self.page("本机被控")
-        layout.addWidget(text_label("只向已配对设备提供画面、系统声音及输入控制。每次启动 Elink 后，需要手动开启被控。", "notice"))
+        layout.addWidget(text_label("开启后，同局域网或同 Tailscale 下的设备可直接控制本机，无需邀请、配对或批准。关闭被控即停止接入。", "notice"))
         row = QHBoxLayout()
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
@@ -162,28 +175,12 @@ class MainWindow(QMainWindow):
         pad_form = QFormLayout()
         pad_form.addRow("主机手柄后端", self.pad_backend)
         layout.addLayout(pad_form)
-        self.invitation = QLineEdit()
-        self.invitation.setReadOnly(True)
-        self.invitation.setPlaceholderText("开启被控后生成 3 分钟有效的临时邀请")
-        row = QHBoxLayout()
-        self.invite_button = button("生成邀请", self.invite)
-        self.invite_button.setEnabled(False)
-        row.addWidget(self.invitation, 1)
-        row.addWidget(self.invite_button)
-        row.addWidget(button("复制", lambda: QApplication.clipboard().setText(self.invitation.text())))
-        layout.addLayout(row)
-        self.invite_status = text_label("邀请仅用于首次配对，请发给你自己的控制端。", "muted")
-        layout.addWidget(self.invite_status)
-        lists = QHBoxLayout()
-        for caption, attribute, action, action_text in [("待批准的设备", "pending", self.approve, "批准所选设备"), ("已授权的设备", "devices", self.revoke, "撤销所选授权")]:
-            column = QVBoxLayout()
-            column.addWidget(text_label(caption, "sectionTitle"))
-            widget = QListWidget()
-            setattr(self, attribute, widget)
-            column.addWidget(widget)
-            column.addWidget(button(action_text, action))
-            lists.addLayout(column, 1)
-        layout.addLayout(lists, 1)
+        self.session_status = text_label("当前无串流连接", "sectionTitle")
+        layout.addWidget(self.session_status)
+        self.end_session_button = button("断开当前控制端", self.end_host_session)
+        self.end_session_button.setEnabled(False)
+        layout.addWidget(self.end_session_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch()
         layout.addWidget(text_label("ElinkPad 尚未签名或完成实机游戏验证，需在独立测试系统加载。手柄后端失败不会自动切换；键鼠控制暂不支持锁屏和 UAC 安全桌面。", "muted"))
 
     def make_network(self):
@@ -200,7 +197,7 @@ class MainWindow(QMainWindow):
         self.peers = QListWidget()
         self.peers.itemDoubleClicked.connect(self.select_peer)
         layout.addWidget(self.peers)
-        layout.addWidget(text_label("双击设备填入连接地址。Tailscale 在线不等于 Elink 被控已开启；路径探测才能确认走直连还是中继。HTTPS 使用所设 TCP 端口，媒体使用 ICE 动态 UDP 端口；防火墙需允许 Elink 应用入站。", "muted"))
+        layout.addWidget(text_label("远程连接页会合并同一台主机的局域网 / Tailscale 地址。Tailscale 在线不等于 Elink 被控已开启；路径探测才能确认网络路径。HTTPS 使用 TCP 49200，自动发现使用 UDP 49201，媒体使用 ICE 动态 UDP 端口；防火墙需允许 Elink 应用入站。", "muted"))
 
     def append_log(self, message):
         self.log.appendPlainText(f"{time.strftime('%H:%M:%S')}  {message}")
@@ -212,27 +209,6 @@ class MainWindow(QMainWindow):
     def set_busy(self, busy):
         self.busy = busy
         self.connect_button.setEnabled(not busy)
-        self.pair_button.setEnabled(not busy)
-
-    def pair(self):
-        invitation, ok = QInputDialog.getText(self, "配对主机", "粘贴主机 Elink 显示的 26 位临时邀请：")
-        if not ok:
-            return
-        self.set_busy(True)
-        self.cancel_pair.setEnabled(True)
-        self.pair_future = self.runtime.submit(self.client.pair(self.address.text(), invitation), self.pair_done, self.pair_done)
-
-    def pair_done(self, message):
-        self.pair_future = None
-        self.set_busy(False)
-        self.cancel_pair.setEnabled(False)
-        self.report_error(message)
-        self.save_config()
-
-    def cancel_pairing(self):
-        if self.pair_future:
-            self.pair_future.cancel()
-        self.pair_done("已取消等待配对。")
 
     def connect_remote(self):
         if self.player:
@@ -247,7 +223,20 @@ class MainWindow(QMainWindow):
         self.set_busy(True)
         width, height = self.resolution.currentData()
         config = dict(width=width, height=height, fps=self.fps.currentData(), bitrate=self.bitrate.value(), audio=self.audio.isChecked())
-        self.runtime.submit(self.client.connect(address, config, self.decoder.currentData()), self.connected, self.connect_failed)
+        host = self.hosts.currentData()
+        addresses = [address]
+        if host and address in host.routes:
+            addresses += [route for route in host.routes if route != address]
+        decoder = self.decoder.currentData()
+        async def connect():
+            import aiohttp
+            for index, route in enumerate(addresses):
+                try:
+                    return await self.client.connect(route, config, decoder)
+                except (OSError, asyncio.TimeoutError, aiohttp.ClientError):
+                    if index == len(addresses) - 1:
+                        raise
+        self.runtime.submit(connect(), self.connected, self.connect_failed)
 
     def connected(self, result):
         if self._closing:
@@ -281,7 +270,7 @@ class MainWindow(QMainWindow):
             self.pad_backend.setEnabled(False)
             async def start():
                 if self.server is None:
-                    self.server = HostServer(self.root, notify=self.runtime.message.emit, pad_backend=pad_backend)
+                    self.server = HostServer(self.root, notify=self.runtime.message.emit, pad_backend=pad_backend, scope=self.scope)
                 self.server.pad_backend = pad_backend
                 return await self.server.start(port=port)
             self.runtime.submit(start(), lambda _: self.host_changed(True), self.host_failed)
@@ -291,10 +280,10 @@ class MainWindow(QMainWindow):
         self.host_toggle.setText("关闭被控" if active else "开启被控")
         self.port.setEnabled(not active)
         self.pad_backend.setEnabled(not active)
-        self.invite_button.setEnabled(active)
         self.host_status.setText(f"已开启 · TCP {self.port.value()}" if active else "已关闭")
         if not active:
-            self.invitation.clear()
+            self.session_status.setText("当前无串流连接")
+            self.end_session_button.setEnabled(False)
         self.append_log("本机被控已开启。" if active else "本机被控已关闭，已释放输入。")
 
     def host_failed(self, message):
@@ -302,62 +291,78 @@ class MainWindow(QMainWindow):
         self.pad_backend.setEnabled(not (self.server and self.server.runner))
         self.report_error(message)
 
-    def invite(self):
-        async def generate():
-            return self.server.authority.invite()
-        self.runtime.submit(generate(), self.invitation.setText)
-
-    def approve(self):
-        item = self.pending.currentItem()
-        if item and self.server:
-            identifier = item.data(Qt.ItemDataRole.UserRole)
-            async def approve():
-                self.server.authority.approve(identifier)
-            self.runtime.submit(approve(), lambda _: self.append_log("已批准配对。"))
-
-    def revoke(self):
-        item = self.devices.currentItem()
-        if item and self.server:
-            self.runtime.submit(self.server.revoke(item.data(Qt.ItemDataRole.UserRole)), lambda _: self.append_log("授权已撤销，对应会话已断开。"))
+    def end_host_session(self):
+        if self.server:
+            self.runtime.submit(self.server.end_session(), lambda _: self.append_log("已断开当前控制端。"))
 
     def refresh_host(self):
         if not self.server or self.poll_pending or self._closing:
             return
         self.poll_pending = True
         async def snapshot():
-            result = self.server.authority.snapshot()
-            result["remaining"] = max(0, int(self.server.authority.expires - time.monotonic())) if self.server.runner else 0
-            return result
+            return self.server.device_id, self.server.pc is not None
         def display(result):
             self.poll_pending = False
-            for name in ("pending", "devices"):
-                widget = getattr(self, name)
-                current = widget.currentItem()
-                selected = current.data(Qt.ItemDataRole.UserRole) if current else None
-                widget.clear()
-                for entry in result[name]:
-                    item = QListWidgetItem(entry["name"] + (" · " + entry["address"] if "address" in entry else ""))
-                    item.setData(Qt.ItemDataRole.UserRole, entry["id"])
-                    widget.addItem(item)
-                    if entry["id"] == selected:
-                        widget.setCurrentItem(item)
-            self.invite_status.setText(f"邀请剩余 {result['remaining']} 秒" if result["remaining"] else "邀请已失效，可重新生成。")
-            if not result["remaining"]:
-                self.invitation.clear()
-        self.runtime.submit(snapshot(), display, lambda message: setattr(self, "poll_pending", False))
+            address, active = result
+            self.session_status.setText(f"当前控制端：{address}" if active else "当前无串流连接")
+            self.end_session_button.setEnabled(active)
+        self.runtime.submit(snapshot(), display, lambda _: setattr(self, "poll_pending", False))
+
+    def select_host(self, index):
+        host = self.hosts.itemData(index)
+        if host:
+            self.address.setText(host.address)
+
+    def display_hosts(self, hosts):
+        previous = self.hosts.currentData()
+        selected = previous.id if previous else None
+        follow = not self.address.text() or previous and self.address.text() in previous.routes
+        self.hosts.blockSignals(True)
+        self.hosts.clear()
+        self.hosts.addItem("选择发现的主机…", None)
+        for host in hosts:
+            routes = " / ".join(dict.fromkeys(host.routes.values()))
+            self.hosts.addItem(f"{host.name} · {routes} · {host.address}", host)
+        index = next((i for i in range(1, self.hosts.count()) if self.hosts.itemData(i).id == selected), 0)
+        if not index and follow and hosts:
+            index = 1
+        self.hosts.setCurrentIndex(index)
+        self.hosts.blockSignals(False)
+        if follow and index:
+            self.select_host(index)
+        self.discovery_state.setText(f"发现 {len(hosts)} 台主机 · 选择后点击开始串流 · 每 10 秒刷新" if hosts else
+                                    "暂未发现主机：请确认对端已开启被控，或直接填写地址连接。")
 
     def refresh_network(self):
+        if self.discovery_pending or self._closing:
+            return
+        self.discovery_pending = True
+        self.refresh_button.setEnabled(False)
+        address = self.address.text()
         async def probe():
-            return await asyncio.to_thread(tailnet_status, tailscale_path()), await asyncio.to_thread(local_addresses)
+            hosts = await discover(self.scope, self.local_id, address)
+            return hosts, self.scope.tailnet, [str(i.ip) for i in self.scope.interfaces]
+        def done():
+            self.discovery_pending = False
+            self.discovery_future = None
+            self.refresh_button.setEnabled(True)
         def display(result):
-            status, addresses = result
-            self.network_state.setText("本机地址：" + (" / ".join(addresses) or "无") + "\nTailscale：" + status.state + "  " + " / ".join(status.addresses) + "\n" + "\n".join(status.health))
+            done()
+            if self._closing:
+                return
+            hosts, status, addresses = result
+            self.display_hosts(hosts)
+            self.network_state.setText("本机局域网地址：" + (" / ".join(addresses) or "无") + "\nTailscale：" + status.state + "  " + " / ".join(status.addresses) + "\n" + "\n".join(status.health))
             self.peers.clear()
             for peer in status.peers:
                 item = QListWidgetItem(f"{peer.name}  ·  {peer.address}  ·  {'在线' if peer.online else '离线'}")
                 item.setData(Qt.ItemDataRole.UserRole, peer.address)
                 self.peers.addItem(item)
-        self.runtime.submit(probe(), display)
+        def failed(message):
+            done()
+            if not self._closing:
+                self.discovery_state.setText(f"发现暂不可用：{message}，可直接填写主机地址。")
+        self.discovery_future = self.runtime.submit(probe(), display, failed)
 
     def select_peer(self, item):
         self.address.setText(item.data(Qt.ItemDataRole.UserRole))
@@ -424,8 +429,9 @@ class MainWindow(QMainWindow):
         self.about.shutdown()
         self.timer.stop()
         self.save_config()
-        if self.pair_future:
-            self.pair_future.cancel()
+        self.discovery_timer.stop()
+        if self.discovery_future:
+            self.discovery_future.cancel()
         if self.player:
             self.player.ended.disconnect(self.disconnect_remote)
             self.player.close()
