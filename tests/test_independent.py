@@ -73,6 +73,18 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         client.send({"type": "pad", "index": 0, "values": [4096, 0, 0, 100, 0, 0, 0]})
         await until(lambda: any(e["type"] == "pad" for e in backend.events))
         await until(lambda: client.rtt_ms > 0)
+        assert client.cursor_supported
+        from elink.core.media import DesktopTrack
+        video = next(t for t in host.tracks if isinstance(t, DesktopTrack))
+        for mode in ('local', 'remote', 'smart'):
+            client.set_cursor_mode(mode)
+            await until(lambda: client.cursor_applied == mode)
+            assert video.cursor_mode == mode
+        if synthetic:
+            video.cursor_visible = False
+            await until(lambda: client.cursor_visible is False)
+            video.cursor_visible = True
+            await until(lambda: client.cursor_visible is True)
         await until(lambda: client.stats.rx_kbps is not None and client.stats.loss_percent is not None)
         assert client.stats.rx_kbps > 0
         assert client.stats.decode_ms is not None
@@ -84,6 +96,7 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         assert backend.events[-1]["values"] == [0] * 7
         await client.connect(address, {"width": width, "height": height, "fps": fps, "audio": False})
         await until(lambda: client.mailbox.received >= 3)
+        await until(lambda: client.cursor_applied == 'smart')
         assert not (root / "host/authorized-devices.json").exists()
         assert not (root / "client/trusted-hosts.json").exists()
         return report

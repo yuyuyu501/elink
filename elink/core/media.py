@@ -28,6 +28,8 @@ class DesktopTrack(MediaStreamTrack):
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="elink-capture")
         self.camera = None
         self.cursor = None
+        self.cursor_mode = 'remote'
+        self.cursor_visible = None
         self.last = None
         self.start_time = None
         self.next_time = 0.0
@@ -61,7 +63,9 @@ class DesktopTrack(MediaStreamTrack):
             if pixels is None:
                 raise RuntimeError("无法采集当前桌面，请确认屏幕处于解锁状态。")
             output = self.camera._output.desc.DesktopCoordinates
-            pixels = self.cursor.composite(pixels, (output.left, output.top))
+            self.cursor_visible = self.cursor.visible() if hasattr(self.cursor, 'visible') else None
+            if self.cursor_mode != 'local':
+                pixels = self.cursor.composite(pixels, (output.left, output.top))
         frame = av.VideoFrame.from_ndarray(pixels, format="bgr24")
         if self.follow_display and not self.synthetic:
             from .display import stream_size

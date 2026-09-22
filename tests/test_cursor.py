@@ -39,11 +39,12 @@ def test_hidden_cursor_preserves_game_frame():
     cursor.user = SimpleNamespace(GetCursorInfo=hidden)
     background = np.zeros((20, 20, 3), dtype=np.uint8)
     assert cursor.composite(background) is background
+    assert cursor.visible() is False
 
 
 def test_desktop_redraws_cursor_without_a_new_desktop_frame():
     pixels = np.zeros((16, 16, 3), dtype=np.uint8)
-    frames = iter([pixels, None])
+    frames = iter([pixels, None, None, None])
     calls = []
     track = DesktopTrack(16, 16, 60)
     track.camera = SimpleNamespace(grab=lambda: next(frames), release=lambda: None,
@@ -60,6 +61,12 @@ def test_desktop_redraws_cursor_without_a_new_desktop_frame():
         assert len(calls) == 2 and calls[0] == (-1920, 0)
         assert not np.array_equal(first.to_ndarray(), second.to_ndarray())
         assert np.all(track.last == 0)
+        track.cursor_mode = 'local'
+        local = track.capture()
+        assert len(calls) == 2 and not local.to_ndarray(format='bgr24').any()
+        track.cursor_mode = 'smart'
+        track.capture()
+        assert len(calls) == 3
     finally:
         track.stop()
         track.release_future.result(timeout=5)

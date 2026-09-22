@@ -76,7 +76,7 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
     port = future.result()
     window.controllers.setChecked(False)
     window.audio.setChecked(False)
-    window.game_mouse.setChecked(False)
+    window.mouse_mode.setCurrentIndex(window.mouse_mode.findData('smart'))
     window.show()
     try:
         window.display_hosts([DiscoveredHost('b' * 64, '测试主机', {f'127.0.0.1:{port}': '局域网'})])
@@ -87,8 +87,10 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         player.open_controls()
         assert not player.captured
         player.control_menu.close()
-        player.set_mouse_mode(True)
-        assert window.game_mouse.isChecked()
+        player.set_mouse_mode('local')
+        assert window.mouse_mode.currentData() == 'local'
+        pump(app, lambda: window.client.cursor_applied == 'local')
+        assert host.tracks[0].cursor_mode == 'local'
         player.set_muted(True)
         pump(app, lambda: window.client.muted)
         player.set_statistics(False)

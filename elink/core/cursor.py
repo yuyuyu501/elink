@@ -62,6 +62,12 @@ class WindowsCursor:
         for function, args, result in signatures:
             function.argtypes, function.restype = args, result
 
+    def visible(self):
+        info = CursorInfo(cbSize=C.sizeof(CursorInfo))
+        if not self.user.GetCursorInfo(C.byref(info)):
+            return None
+        return bool(info.flags & 1)
+
     def composite(self, pixels, origin=(0, 0)):
         info = CursorInfo(cbSize=C.sizeof(CursorInfo))
         if not self.user.GetCursorInfo(C.byref(info)) or not info.flags & 1:

@@ -136,7 +136,7 @@ class HostServer:
     def host_info(self):
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
-                "busy": self.pc is not None or self.ending, "features": ["display-settings-v1"]}
+                "busy": self.pc is not None or self.ending, "features": ["display-settings-v1", "cursor-modes-v1"]}
 
     async def info(self, request):
         return web.json_response(self.host_info())
@@ -219,10 +219,20 @@ class HostServer:
                         return
                     try:
                         event = json.loads(raw)
+                        if reliable and isinstance(event, dict) and event.get('type') == 'cursor-mode':
+                            mode = event.get('mode')
+                            if mode in ('smart', 'remote', 'local'):
+                                for track in self.tracks:
+                                    if isinstance(track, DesktopTrack):
+                                        track.cursor_mode = mode
+                            return
                         if reliable and isinstance(event, dict) and event.get("type") == "ping":
                             stamp = event.get("time")
                             if type(stamp) in (int, float):
-                                feedback({"type": "pong", "time": stamp})
+                                video = next((t for t in self.tracks if isinstance(t, DesktopTrack)), None)
+                                feedback({"type": "pong", "time": stamp,
+                                          'cursor_mode': video.cursor_mode if video else 'remote',
+                                          'cursor_visible': video.cursor_visible if video else None})
                             return
                         input_session.receive(raw, reliable)
                     except Exception as exc:
@@ -428,6 +438,11 @@ class Client:
         self.close_task = None
         self.stats = StreamStats()
         self.display_supported = False
+        self.cursor_supported = False
+        self.cursor_mode = 'smart'
+        self.cursor_applied = 'remote'
+        self.cursor_visible = None
+        self.cursor_updated = 0.0
 
     def schedule_disconnect(self):
         if self.close_task is None or self.close_task.done():
@@ -444,6 +459,8 @@ class Client:
             if info.get("protocol") != "elink" or info.get("version") != 2:
                 raise ValidationError("主机不支持自动连接，请将两端更新至 0.4.2 或更高版本。")
             self.display_supported = "display-settings-v1" in info.get("features", [])
+            self.cursor_supported = 'cursor-modes-v1' in info.get('features', [])
+            self.cursor_applied, self.cursor_visible, self.cursor_updated = 'remote', None, 0.0
             if info.get("busy") is True:
                 raise ValidationError("主机正在被其他设备控制或连接中，请等待当前会话结束。")
             codecs.decode_policy = codecs.CodecPolicy(decoder=decoder)
@@ -475,6 +492,11 @@ class Client:
                     if event.get("type") == "pong" and type(event.get("time")) in (int, float):
                         self.rtt_ms = max(0, (time.monotonic() - event["time"]) * 1000)
                         self.last_pong = time.monotonic()
+                        if event.get('cursor_mode') in ('smart', 'remote', 'local'):
+                            self.cursor_applied = event['cursor_mode']
+                            visible = event.get('cursor_visible')
+                            self.cursor_visible = visible if type(visible) is bool else None
+                            self.cursor_updated = time.monotonic()
                     elif event.get("type") == "ended":
                         self.schedule_disconnect()
                     elif event.get("type") == "warning":
@@ -613,6 +635,12 @@ class Client:
         self.sequence += 1
         channel.send(json.dumps(dict(event, epoch=self.epoch, seq=self.sequence)))
 
+    def set_cursor_mode(self, mode):
+        from .mouse import mouse_mode
+        self.cursor_mode = mouse_mode(mode)
+        if self.cursor_supported:
+            self.send({'type': 'cursor-mode', 'mode': self.cursor_mode})
+
     def focus(self, active):
         self.active = active
         self.epoch += 1
@@ -622,6 +650,8 @@ class Client:
 
     async def heartbeat(self):
         while self.pc:
+            if self.cursor_supported:
+                self.send({'type': 'cursor-mode', 'mode': self.cursor_mode})
             self.send({"type": "heartbeat", "active": self.active})
             self.send({"type": "ping", "time": time.monotonic()})
             now = time.monotonic()

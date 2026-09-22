@@ -11,6 +11,7 @@ from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_res
 
 from ..core.statistics import StreamStats, overlay_lines
 from ..core.input import XInput
+from ..core.mouse import MOUSE_MODES, mouse_mode, relative_mouse
 
 
 class Player(QWidget):
@@ -18,13 +19,18 @@ class Player(QWidget):
     reconfigure = Signal(dict)
     settings_changed = Signal(dict)
 
-    def __init__(self, runtime, client, *, game_mouse=True, controllers=True, preferences=None):
+    def __init__(self, runtime, client, *, game_mouse=None, controllers=True, preferences=None):
         super().__init__()
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.was_maximized = False
         self.runtime, self.client = runtime, client
-        self.game_mouse, self.controllers = game_mouse, controllers
+        self.controllers = controllers
         self.preferences = dict(preferences or {})
+        self.mouse_mode = mouse_mode(self.preferences.get('mouse_mode', 'remote' if game_mouse else 'smart'))
+        self.game_mouse = False  # Effective input mapping; independent of cursor rendering.
+        self.local_cursor = False
+        if hasattr(client, 'set_cursor_mode'):
+            self.runtime.call(client.set_cursor_mode, self.mouse_mode)
         self.muted = False
         self.control_menu = None
         self.settings_dialog = None
@@ -120,14 +126,18 @@ class Player(QWidget):
         quality = menu.addAction("画质与传输设置…")
         quality.triggered.connect(self.open_quality)
         quality.setEnabled(self.client.pc is not None)
-        mouse = menu.addMenu("鼠标模式")
+        mouse = self.mouse_menu = menu.addMenu("鼠标模式")
         group = QActionGroup(mouse)
-        for label, relative in [("桌面鼠标", False), ("游戏相对鼠标", True)]:
+        mouse.setToolTipsVisible(True)
+        for label, mode, hint in MOUSE_MODES:
             action = mouse.addAction(label)
             action.setCheckable(True)
-            action.setChecked(self.game_mouse == relative)
+            action.setChecked(self.mouse_mode == mode)
+            supported = getattr(self.client, 'cursor_supported', False)
+            action.setEnabled(supported or mode == 'remote')
+            action.setToolTip(hint if supported else '请将被控端更新至 0.4.7 或更高版本以使用完整鼠标模式。')
             group.addAction(action)
-            action.triggered.connect(lambda checked=False, relative=relative: self.set_mouse_mode(relative))
+            action.triggered.connect(lambda checked=False, mode=mode: self.set_mouse_mode(mode))
         pad = menu.addAction("转发手柄与震动")
         pad.setCheckable(True)
         pad.setChecked(self.controllers)
@@ -147,11 +157,13 @@ class Player(QWidget):
         menu.addAction("断开连接").triggered.connect(self.close)
         menu.popup(self.controls_button.mapToGlobal(QPoint(0, self.controls_button.height())))
 
-    def set_mouse_mode(self, relative):
+    def set_mouse_mode(self, mode):
         self.release()
-        self.game_mouse = relative
-        self.preferences['game_mouse'] = relative
-        self.settings_changed.emit({'game_mouse': relative})
+        self.mouse_mode = mouse_mode(mode)
+        self.preferences['mouse_mode'] = self.mouse_mode
+        if hasattr(self.client, 'set_cursor_mode'):
+            self.runtime.call(self.client.set_cursor_mode, self.mouse_mode)
+        self.settings_changed.emit({'mouse_mode': self.mouse_mode})
 
     def set_controllers(self, enabled):
         self.release()  # Release remote buttons and local rumble before changing backends.
@@ -256,10 +268,29 @@ class Player(QWidget):
         self.captured = True
         self.layout_chrome()
         self.runtime.call(self.client.focus, True)
-        self.setCursor(Qt.CursorShape.BlankCursor)
-        if self.game_mouse:
-            self.grabMouse()
-            QCursor.setPos(self.mapToGlobal(self.rect().center()))
+        self.update_mouse(force=True)
+
+    def update_mouse(self, force=False):
+        if not self.captured:
+            return
+        fresh = time.monotonic() - getattr(self.client, 'cursor_updated', 0) < 2
+        visible = getattr(self.client, 'cursor_visible', None) if fresh else None
+        supported = getattr(self.client, 'cursor_supported', False)
+        relative = relative_mouse(self.mouse_mode, visible)
+        if not supported and self.mouse_mode == 'smart':
+            relative = False  # Older hosts cannot report whether games hide their cursor.
+        local = (supported and self.mouse_mode == 'local'
+                 and getattr(self.client, 'cursor_applied', 'remote') == 'local' and fresh)
+        if force or relative != self.game_mouse:
+            if relative:
+                self.grabMouse()
+                QCursor.setPos(self.mapToGlobal(self.rect().center()))
+            else:
+                self.releaseMouse()
+            self.game_mouse = relative
+        if force or local != self.local_cursor:
+            self.setCursor(Qt.CursorShape.ArrowCursor if local else Qt.CursorShape.BlankCursor)
+            self.local_cursor = local
 
     def release(self):
         self.captured = False
@@ -273,6 +304,7 @@ class Player(QWidget):
         self.layout_chrome()
 
     def tick(self):
+        self.update_mouse()
         pixels = self.client.mailbox.take()
         if pixels is not None:
             self.image = QImage(pixels.data, pixels.shape[1], pixels.shape[0], pixels.strides[0], QImage.Format.Format_RGB888).copy()

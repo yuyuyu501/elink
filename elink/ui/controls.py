@@ -4,10 +4,11 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
                                QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget)
 from ..paths import resource_dir
+from ..core.mouse import MOUSE_MODES, mouse_mode
 
 
 class StreamOptions(QWidget):
-    fields = ('fps', 'decoder', 'bitrate', 'audio', 'game_mouse', 'controllers')
+    fields = ('fps', 'decoder', 'bitrate', 'audio', 'mouse_mode', 'controllers')
 
     def __init__(self, parent=None, *, remote_display=False):
         super().__init__(parent)
@@ -42,9 +43,15 @@ class StreamOptions(QWidget):
                               ('码率上限', self.bitrate), ('解码器', self.decoder)]:
             form.addRow(label, widget)
         self.audio = QCheckBox('传输远端系统声音')
-        self.game_mouse = QCheckBox('游戏相对鼠标（取消后使用桌面绝对鼠标）')
+        self.mouse_mode = QComboBox()
+        for label, mode, hint in MOUSE_MODES:
+            self.mouse_mode.addItem(label, mode)
+            self.mouse_mode.setItemData(self.mouse_mode.count() - 1, hint, Qt.ItemDataRole.ToolTipRole)
+        # Mouse settings are available only from the session's dedicated menu.
+        self.mouse_mode.setParent(self)
+        self.mouse_mode.hide()
         self.controllers = QCheckBox('转发 XInput 手柄与震动')
-        for widget in (self.audio, self.game_mouse, self.controllers):
+        for widget in (self.audio, self.controllers):
             widget.setChecked(True)
             form.addRow(widget)
 
@@ -90,7 +97,7 @@ class StreamOptions(QWidget):
         return dict(device=snapshot['device'], resolution=resolution, scale=scale)
 
     def values(self):
-        return {name: (widget.currentIndex() if isinstance(widget, QComboBox) else
+        return {name: (widget.currentData() if name == 'mouse_mode' else widget.currentIndex() if isinstance(widget, QComboBox) else
                        widget.isChecked() if isinstance(widget, QCheckBox) else widget.value())
                 for name in self.fields for widget in (getattr(self, name),)}
 
@@ -99,7 +106,9 @@ class StreamOptions(QWidget):
             if name not in values:
                 continue
             widget, value = getattr(self, name), values[name]
-            if isinstance(widget, QComboBox):
+            if name == 'mouse_mode':
+                widget.setCurrentIndex(widget.findData(mouse_mode(value)))
+            elif isinstance(widget, QComboBox):
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value)))
             elif isinstance(widget, QCheckBox):
                 widget.setChecked(value)

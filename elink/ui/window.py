@@ -288,7 +288,7 @@ class MainWindow(QMainWindow):
             return
         self.session_address = result[0]
         self.notice.hide()
-        self.player = Player(self.runtime, self.client, game_mouse=self.game_mouse.isChecked(), controllers=self.controllers.isChecked(), preferences=self.options.values())
+        self.player = Player(self.runtime, self.client, controllers=self.controllers.isChecked(), preferences=self.options.values())
         self.player.settings_changed.connect(self.update_session_preferences)
         self.player.reconfigure.connect(self.reconfigure_session)
         self.player.ended.connect(self.disconnect_remote)
@@ -518,7 +518,8 @@ class MainWindow(QMainWindow):
             for name in ("fps", "decoder"):
                 widget = getattr(self, name)
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value.get(name, 0))))
-            for name in ("audio", "game_mouse", "controllers"):
+            self.options.restore({'mouse_mode': value.get('mouse_mode', 'smart')})
+            for name in ("audio", "controllers"):
                 getattr(self, name).setChecked(value.get(name, True))
         except (ValueError, TypeError, OSError, AttributeError) as exc:
             self.config_error = True
@@ -532,7 +533,8 @@ class MainWindow(QMainWindow):
         value["update_previews"] = self.about.previews.isChecked()
         for name in ("fps", "decoder"):
             value[name] = getattr(self, name).currentIndex()
-        for name in ("audio", "game_mouse", "controllers"):
+        value['mouse_mode'] = self.mouse_mode.currentData()
+        for name in ("audio", "controllers"):
             value[name] = getattr(self, name).isChecked()
         try:
             atomic_json(self.config_path, value)
