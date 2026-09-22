@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elink-desktop"
-version = "0.4.8"
+version = "0.4.9"
 description = "Independent Windows desktop streaming with DXGI, hardware H.264 and WebRTC"
 requires-python = ">=3.11,<3.14"
 dependencies = ["PySide6==6.10.2", "cryptography==46.0.5", "aiortc==1.14.0", "av==16.1.0",

@@ -2,7 +2,7 @@ import asyncio
 import concurrent.futures
 import threading
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Qt
 
 
 class Runtime(QObject):
@@ -14,7 +14,10 @@ class Runtime(QObject):
         super().__init__(parent)
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.run, name="elink-network", daemon=True)
-        self.completed.connect(self.deliver)
+        # A future may finish before add_done_callback, which then calls done
+        # on the UI thread. Always queue delivery so callers can first save the
+        # returned future; inline callbacks could clear it before assignment.
+        self.completed.connect(self.deliver, Qt.ConnectionType.QueuedConnection)
         self.thread.start()
 
     def run(self):

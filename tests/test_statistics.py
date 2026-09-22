@@ -32,9 +32,11 @@ def test_overlay_units_unknown_values_stale_and_disconnect():
     snapshot = StreamStats(9300, 0.08, 1.2, 3.5, 'D3D11VA', 'UDP · P2P', 30, 20)
     lines = overlay_lines(snapshot, 60, 13)
     assert lines == ['UDP · P2P', '60 fps', '9.3 Mbps', '13.0 ms RTT',
-                     '16.7 ms / frame', '0.08 % loss']
-    assert '-- ms / frame' in overlay_lines(snapshot, 0, None)
+                     '3.5 ms decode', '0.08 % loss']
+    assert '3.5 ms decode' in overlay_lines(snapshot, 30, 13)
+    assert '-- ms decode' in overlay_lines(StreamStats(), 0, None)
+    assert '-- ms decode' in overlay_lines(snapshot, 60, 13, fresh=False)
     assert '-- Mbps' in overlay_lines(StreamStats(), 0, None)
     assert '-- Mbps' in overlay_lines(snapshot, 60, 0, fresh=False)
     assert overlay_lines(snapshot, 60, 13, connected=False) == [
-        '已断开', '-- fps', '-- Mbps', '-- ms RTT', '-- ms / frame', '-- % loss']
+        '已断开', '-- fps', '-- Mbps', '-- ms RTT', '-- ms decode', '-- % loss']
