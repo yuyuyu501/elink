@@ -28,7 +28,7 @@ encode_policy = CodecPolicy()
 decode_policy = CodecPolicy()
 metrics = {"encoder": "未启动", "decoder": "未启动", "encode_ms": 0.0, "decode_ms": 0.0,
            "encoded": 0, "decoded": 0, "decode_errors": 0, "capture_ms": 0.0, "bitrate": 0,
-           "last_decode_error": ""}
+           "convert_ms": 0.0, "present_ms": 0.0, "last_decode_error": ""}
 
 
 def make_encoder(name: str, width: int, height: int, policy: CodecPolicy):

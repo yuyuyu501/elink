@@ -12,7 +12,7 @@ Elink Qt 界面 / 本机批准 / Elink 播放器
   -> Elink HTTPS 配对 + SDP 信令 (TCP 49200)
   -> aiortc ICE + DTLS/SRTP + SCTP
      视频: DXcam DXGI -> PyAV NVENC/AMF/QSV/x264 -> H.264 RTP
-           -> D3D11VA/软件解码 -> 有界最新帧 -> Qt 图像绘制
+           -> D3D11VA/软件解码 -> RGB 转换 -> 有界最新帧 -> Qt 图像绘制
      音频: WASAPI loopback -> PCM -> Opus -> 本机音频输出
      输入: 有序可靠键鼠控制 + 无序不重传鼠标/手柄状态
            -> SendInput / ViGEmClient -> 震动反馈 -> XInput
@@ -33,11 +33,13 @@ Elink 不再导入 GameStream 适配模块，不使用 Sunshine/Moonlight 可执
 
 发送端不排队捕获帧；音频采集保留至多 3 帧。解码输入最多 4 帧，视频溢出丢弃旧队列并请求 IDR；解码后视频至多 1 帧，GUI 至多 1 帧；音频输出队列至多 5 帧。aiortc 版本固定为 1.14.0，编解码工厂及接收队列适配依赖其内部接口，升级必须重测。
 
-视频协商 H.264 level 5.2，当前设置限制 1080p / 120 FPS / 80 Mbps。编码码率响应 RTCP REMB 上限。DXGI 数据经过 CPU 色彩转换与 GPU 编解码拷贝，Qt 仍绘制 RGB 图像，未实现全链路零拷贝。UI 显示的通道 RTT、显示 FPS、解码器来自实际状态；没有端到端延迟承诺。
+视频协商 H.264 level 5.2，当前设置限制 1080p / 120 FPS / 80 Mbps。编码码率响应 RTCP REMB 上限。当前接收端仍执行 RGB 转换并把 RGB 缓冲交给 Qt；已移除 `QImage.copy()` 的第二次像素复制，但还没有实现 D3D11 纹理到 Qt 的全链路零拷贝。`decode_ms` 只代表解码调用，`convert_ms` 代表帧到 RGB 的转换，`present_ms` 代表 Qt 绘制调用，三者不能相加为端到端延迟。UI 显示的通道 RTT、显示 FPS、解码器来自实际状态；没有端到端延迟承诺。
+
+后续媒体优化采用 Python 控制平面加原生媒体平面：Python 保留 WebRTC、网络、输入、设备发现、配置、更新和 UI；D3D11/NVDEC/NVENC 纹理路径逐步下沉到 Windows 原生 DLL，通过窄接口把 GPU surface 交给 Qt RHI 或 Direct3D 渲染。PyInstaller 只会携带 Python 运行时，Nuitka 可把部分 Python 编译为 C/C++ 产物，Cython 适合局部热点；这些工具都不会自动把现有程序转换成完整的 D3D11/C++ 零拷贝实现。D3D11 作为当前 Windows 首选后端，因为 FFmpeg D3D11VA、NVENC 和 Qt/Direct3D 互操作更成熟；D3D12 暂作为实验后端，不能假定它天然降低延迟。Android 后续使用 MediaCodec + Surface，不复用 Windows D3D11 模块。
 
 ## 验证
 
-`python -m pytest -q` 包含真实 HTTPS + WebRTC 回环：本地批准、证书固定与错误证书拒绝、视频像素变化、音频帧、可靠按键释放、手柄状态消息、撤销立即断开；输入使用记录后端，不操纵测试机桌面。另测非法设置、输入重放、失焦、心跳释放及 Qt 开启/停止/退出。
+`python -m pytest -q` 包含真实 HTTPS + WebRTC 回环：本地批准、证书固定与错误证书拒绝、视频像素变化、音频帧、可靠按键释放、手柄状态消息、撤销立即断开；输入使用记录后端，不操纵测试机桌面。另测非法设置、输入重放、失焦、心跳释放及 Qt 开启/停止/退出，并验证 RGB 缓冲可以直接被 QImage 包装而不发生第二次复制。
 
 `python -m scripts.smoke_ui` 保存三个真实 Qt 页面在 1120×800、900×680 下的布局图。Windows Qt 后端实图已检查，文本和控件没有重叠。
 

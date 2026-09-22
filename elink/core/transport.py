@@ -602,7 +602,9 @@ class Client:
             while True:
                 frame = await track.recv()
                 if track.kind == "video":
+                    started = time.perf_counter()
                     pixels = await asyncio.to_thread(frame.to_ndarray, format="rgb24")
+                    codecs.metrics["convert_ms"] = (time.perf_counter() - started) * 1000
                     self.mailbox.put(pixels)
                 else:
                     self.audio_frames += 1

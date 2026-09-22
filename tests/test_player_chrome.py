@@ -2,6 +2,7 @@ import os
 import time
 from types import SimpleNamespace
 
+import numpy as np
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QObject, QPoint, Qt, Signal
@@ -70,6 +71,20 @@ def test_titlebar_buttons_and_double_click_stay_local():
         assert not any(kind == 'input' for kind, _ in events)
         player.toolbar.close_button.click()
         assert ended == [True] and player._closed
+    finally:
+        player.close()
+
+
+def test_rgb_frame_is_presented_without_a_second_qimage_copy():
+    app, player, events = make_player()
+    pixels = np.zeros((8, 12, 3), dtype=np.uint8)
+    pixels[2, 3] = [10, 20, 30]
+    try:
+        player.set_frame_pixels(pixels)
+        assert player.image_pixels is pixels
+        assert player.image.pixelColor(3, 2).getRgb()[:3] == (10, 20, 30)
+        pixels[2, 3] = [40, 50, 60]
+        assert player.image.pixelColor(3, 2).getRgb()[:3] == (40, 50, 60)
     finally:
         player.close()
 

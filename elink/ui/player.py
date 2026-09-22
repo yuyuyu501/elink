@@ -11,6 +11,7 @@ from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_res
 
 from ..core.statistics import StreamStats, overlay_lines
 from ..core.input import XInput
+from ..core import codecs
 from ..core.mouse import MOUSE_MODES, mouse_mode, relative_mouse
 
 
@@ -36,6 +37,9 @@ class Player(QWidget):
         self.settings_dialog = None
         self.captured = False
         self.image = None
+        # QImage wraps this buffer without copying. Keep the numpy owner alive
+        # until the next frame replaces it; all access happens on the GUI thread.
+        self.image_pixels = None
         self.rect_image = QRect()
         self.drawn = 0
         self.fps = 0
@@ -305,8 +309,7 @@ class Player(QWidget):
         self.update_mouse()
         pixels = self.client.mailbox.take()
         if pixels is not None:
-            self.image = QImage(pixels.data, pixels.shape[1], pixels.shape[0], pixels.strides[0], QImage.Format.Format_RGB888).copy()
-            self.new_image = True
+            self.set_frame_pixels(pixels)
         now = time.monotonic()
         if now - self.stats_at >= 1:
             self.fps = self.drawn / (now - self.stats_at)
@@ -322,6 +325,13 @@ class Player(QWidget):
                     self.pad_indices.discard(index)
         self.update()
 
+    def set_frame_pixels(self, pixels):
+        """Present an RGB ndarray while retaining its owner for QImage."""
+        self.image_pixels = pixels
+        self.image = QImage(pixels.data, pixels.shape[1], pixels.shape[0],
+                            pixels.strides[0], QImage.Format.Format_RGB888)
+        self.new_image = True
+
     def rumble(self, event):
         if self.captured and self.xinput and not self._closed:
             self.xinput.rumble(event["index"], event["left"], event["right"])
@@ -333,7 +343,9 @@ class Player(QWidget):
         if self.image:
             size = self.image.size().scaled(viewport.size(), Qt.AspectRatioMode.KeepAspectRatio)
             self.rect_image = QRect((self.width() - size.width()) // 2, viewport.top() + (viewport.height() - size.height()) // 2, size.width(), size.height())
+            started = time.perf_counter()
             painter.drawImage(self.rect_image, self.image)
+            codecs.metrics["present_ms"] = (time.perf_counter() - started) * 1000
             if self.new_image:
                 self.drawn += 1
                 self.new_image = False
