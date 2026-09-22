@@ -1,8 +1,9 @@
 import json
 import time
 
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtTest import QTest
+from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication
 
 from test_player_chrome import make_player
 from test_device_ui import close
@@ -35,7 +36,12 @@ def test_smart_switch_local_ack_and_stale_state():
         client.cursor_applied = 'local'
         player.update_mouse()
         assert player.cursor().shape() == Qt.CursorShape.ArrowCursor
-        QTest.mouseMove(player, player.rect_image.topLeft() + QPoint(5, 5))
+        # Offscreen runners do not reliably translate OS pointer warps into Qt
+        # move events. Deliver the same widget event without moving the OS cursor.
+        point = player.rect_image.topLeft() + QPoint(5, 5)
+        QApplication.sendEvent(player, QMouseEvent(
+            QEvent.Type.MouseMove, QPointF(point), QPointF(player.mapToGlobal(point)),
+            Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
         assert any(e[0] == 'input' and e[1].get('absolute') is True for e in events)
         client.cursor_updated = time.monotonic() - 3
         player.update_mouse()
