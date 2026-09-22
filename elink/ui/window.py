@@ -345,7 +345,7 @@ class MainWindow(QMainWindow):
             if not self._closing:
                 self.address.setText(address)
                 self.connect_remote()
-        self.runtime.submit(self.client.disconnect(), reconnect, self.connect_failed)
+        self.runtime.submit(self.client.disconnect(restore_display=False), reconnect, self.connect_failed)
 
     def start_host(self):
         if self._closing or self.host_starting or self.server and self.server.runner:

@@ -215,7 +215,7 @@ class Player(QWidget):
         apply = QPushButton("应用并重新连接")
         apply.setObjectName('primary')
         apply.setEnabled(False)
-        hint = ('分辨率与缩放会实际修改被控电脑，断开后保留；部分程序需重新打开才适应新缩放。'
+        hint = ('分辨率与缩放会实际修改被控电脑，退出远控时会尝试恢复进入前的设置；部分程序需重新打开才适应新缩放。'
                 '\n传输画面跟随被控端比例，当前最高 1080p。应用后短暂断开并自动重连。')
         def loaded(snapshot):
             if self._closed or self.settings_dialog is not dialog:

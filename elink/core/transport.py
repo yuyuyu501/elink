@@ -15,6 +15,7 @@ from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, R
 
 from ..models import Endpoint, ValidationError
 from . import codecs
+from .clipboard import MAX_CLIPBOARD_CHARS, read_text, write_text
 from .input import InputSession, WindowsInput, PAD_BACKENDS
 from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack
 from .qos import mark_rtc_sockets
@@ -99,6 +100,10 @@ class HostServer:
         self.control_channel = None
         self.display_backend = display_backend
         self.display_lock = asyncio.Lock()
+        self.display_original = None
+        self.restore_display_on_end = True
+        self.clipboard_task = None
+        self.clipboard_seen = None
 
     async def start(self, bind=None, port=49200):
         if self.runner:
@@ -180,6 +185,8 @@ class HostServer:
                 raise web.HTTPForbidden()
             pc = self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.device_id, self.session_id = device, secrets.token_hex(16)
+            self.display_original = None
+            self.restore_display_on_end = True
             self.created = time.monotonic()
             self.input_errors.clear()
             codecs.encode_policy = codecs.CodecPolicy(config["fps"], config["bitrate"] * 1_000_000)
@@ -216,10 +223,18 @@ class HostServer:
                     if now - period > 1:
                         count, period = 0, now
                     count += 1
-                    if count > 2000 or not isinstance(raw, str) or len(raw) > 2048:
+                    if count > 2000 or not isinstance(raw, str):
                         return
                     try:
                         event = json.loads(raw)
+                        if (reliable and isinstance(event, dict) and event.get("type") == "clipboard"
+                                and isinstance(event.get("text"), str)
+                                and len(event["text"]) <= MAX_CLIPBOARD_CHARS):
+                            if write_text(event["text"]):
+                                self.clipboard_seen = event["text"]
+                            return
+                        if len(raw) > 2048:
+                            return
                         if reliable and isinstance(event, dict) and event.get('type') == 'cursor-mode':
                             mode = event.get('mode')
                             if mode in ('smart', 'remote', 'local'):
@@ -261,6 +276,8 @@ class HostServer:
                 video_preferences(pc)
                 await pc.setLocalDescription(await pc.createAnswer())
                 mark_rtc_sockets(pc)
+                self.clipboard_seen = await asyncio.to_thread(read_text)
+                self.clipboard_task = asyncio.create_task(self.watch_clipboard(pc, feedback))
                 if not self.scope.allows(device):
                     raise web.HTTPForbidden()
                 if self.pc is not pc:
@@ -297,12 +314,17 @@ class HostServer:
             if self.input:
                 self.input.active = False
                 self.input.release()
+            before = await asyncio.to_thread(self.display_backend.snapshot, video.display_name)
             result = await video.change_display(lambda: self.display_backend.apply(change, video.display_name))
+            if self.display_original is None and (
+                    result.get('current') != before.get('current') or result.get('scale') != before.get('scale')):
+                self.display_original = dict(device=before['device'], resolution=before['current'], scale=before['scale'])
             return web.json_response(result)
 
     async def delete(self, request):
         device = request.remote
         if device == self.device_id and request.match_info["id"] == self.session_id:
+            self.restore_display_on_end = request.query.get('restore_display', '1') != '0'
             await self.end_session()
         return web.json_response({"ok": True})
 
@@ -333,8 +355,31 @@ class HostServer:
             # Cancelling a watchdog/request must not interrupt native transport teardown.
             await asyncio.shield(self.end_task)
 
+    async def watch_clipboard(self, pc, send):
+        while self.pc is pc and not self.ending:
+            await asyncio.sleep(0.35)
+            value = await asyncio.to_thread(read_text)
+            if value is None or value == self.clipboard_seen:
+                continue
+            self.clipboard_seen = value
+            send({"type": "clipboard", "text": value})
+
     async def finish_session(self, pc, input_session, tracks):
         try:
+            if self.clipboard_task:
+                self.clipboard_task.cancel()
+                await asyncio.gather(self.clipboard_task, return_exceptions=True)
+                self.clipboard_task = None
+            original = self.display_original if self.restore_display_on_end else None
+            self.display_original = None
+            self.restore_display_on_end = True
+            video = next((track for track in tracks if isinstance(track, DesktopTrack)), None)
+            if original and video and self.display_backend:
+                try:
+                    change = dict(device=original['device'], resolution=original['resolution'], scale=original['scale'])
+                    await video.change_display(lambda: self.display_backend.apply(change, video.display_name))
+                except Exception as exc:
+                    self.notify(f'断开时恢复原显示设置失败：{exc}')
             if input_session:
                 input_session.close()
             for track in tracks:
@@ -445,6 +490,7 @@ class Client:
         self.cursor_applied = 'remote'
         self.cursor_visible = None
         self.cursor_updated = 0.0
+        self.clipboard_seen = None
 
     def schedule_disconnect(self):
         if self.close_task is None or self.close_task.done():
@@ -486,12 +532,18 @@ class Client:
             @self.control.on("message")
             def message(raw):
                 try:
-                    if not isinstance(raw, str) or len(raw) > 2048:
+                    if not isinstance(raw, str):
                         return
                     event = json.loads(raw)
                     if not isinstance(event, dict):
                         return
-                    if event.get("type") == "pong" and type(event.get("time")) in (int, float):
+                    if (event.get("type") == "clipboard" and isinstance(event.get("text"), str)
+                            and len(event["text"]) <= MAX_CLIPBOARD_CHARS):
+                        if write_text(event["text"]):
+                            self.clipboard_seen = event["text"]
+                    elif len(raw) > 2048:
+                        return
+                    elif event.get("type") == "pong" and type(event.get("time")) in (int, float):
                         self.rtt_ms = max(0, (time.monotonic() - event["time"]) * 1000)
                         self.last_pong = time.monotonic()
                         if event.get('cursor_mode') in ('smart', 'remote', 'local'):
@@ -534,6 +586,8 @@ class Client:
                 self.session_id = response["id"]
                 await pc.setRemoteDescription(RTCSessionDescription(response["sdp"], response["type"]))
                 mark_rtc_sockets(pc)
+                self.clipboard_seen = await asyncio.to_thread(read_text)
+                self.task(self.watch_clipboard(pc))
                 self.task(self.heartbeat())
                 self.task(self.sample_statistics(pc, config["bitrate"]))
                 self.task(self.probe_statistics_route(pc))
@@ -555,6 +609,15 @@ class Client:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
+
+    async def watch_clipboard(self, pc):
+        while self.pc is pc:
+            await asyncio.sleep(0.35)
+            value = await asyncio.to_thread(read_text)
+            if value is None or value == self.clipboard_seen:
+                continue
+            self.clipboard_seen = value
+            self.send({"type": "clipboard", "text": value})
 
     async def probe_statistics_route(self, pc):
         from ..network import tailscale_path, tailnet_ping
@@ -670,11 +733,11 @@ class Client:
                 return
             await asyncio.sleep(0.5)
 
-    async def disconnect(self):
+    async def disconnect(self, restore_display=True):
         async with self.lock:
-            await self._disconnect()
+            await self._disconnect(restore_display)
 
-    async def _disconnect(self):
+    async def _disconnect(self, restore_display=True):
         self.focus(False)
         pc, self.pc = self.pc, None
         current = asyncio.current_task()
@@ -685,12 +748,25 @@ class Client:
         if self.output:
             self.output.close()
             self.output = None
+        # A temporary reconnect after display settings must tell the host to
+        # keep the newly selected mode before closing the ICE connection. If
+        # the socket closes first, the host may tear down from its state event
+        # before it receives the DELETE request.
+        if self.session_id and not restore_display:
+            identifier, self.session_id = self.session_id, ""
+            try:
+                await asyncio.wait_for(request(self.endpoint, self.fp, "DELETE",
+                                               f"/v1/session/{identifier}?restore_display=0",
+                                               token=self.token), 4)
+            except Exception:
+                pass
         if pc:
             await pc.close()
         if self.session_id:
             identifier, self.session_id = self.session_id, ""
             try:
-                await asyncio.wait_for(request(self.endpoint, self.fp, "DELETE", f"/v1/session/{identifier}", token=self.token), 4)
+                suffix = '' if restore_display else '?restore_display=0'
+                await asyncio.wait_for(request(self.endpoint, self.fp, "DELETE", f"/v1/session/{identifier}{suffix}", token=self.token), 4)
             except Exception:
                 pass
         self.control = self.motion = None

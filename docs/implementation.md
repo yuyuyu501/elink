@@ -15,6 +15,7 @@ Elink Qt 界面 / 本机批准 / Elink 播放器
            -> D3D11VA/软件解码 -> RGB 转换 -> 有界最新帧 -> Qt 图像绘制
      音频: WASAPI loopback -> PCM -> Opus -> 本机音频输出
      输入: 有序可靠键鼠控制 + 无序不重传鼠标/手柄状态
+           双向 Unicode 文本剪贴板（会话内轮询与回写）
            -> SendInput / ViGEmClient -> 震动反馈 -> XInput
   -> 外部 Tailscale CLI (可选，网络层)
 ```
@@ -36,6 +37,8 @@ Elink 不再导入 GameStream 适配模块，不使用 Sunshine/Moonlight 可执
 视频协商 H.264 level 5.2，当前设置限制 1080p / 120 FPS / 80 Mbps。编码码率响应 RTCP REMB 上限。当前接收端仍执行 RGB 转换并把 RGB 缓冲交给 Qt；已移除 `QImage.copy()` 的第二次像素复制，但还没有实现 D3D11 纹理到 Qt 的全链路零拷贝。`decode_ms` 只代表解码调用，`convert_ms` 代表帧到 RGB 的转换，`present_ms` 代表 Qt 绘制调用，三者不能相加为端到端延迟。UI 显示的通道 RTT、显示 FPS、解码器来自实际状态；没有端到端延迟承诺。
 
 后续媒体优化采用 Python 控制平面加原生媒体平面：Python 保留 WebRTC、网络、输入、设备发现、配置、更新和 UI；D3D11/NVDEC/NVENC 纹理路径逐步下沉到 Windows 原生 DLL，通过窄接口把 GPU surface 交给 Qt RHI 或 Direct3D 渲染。PyInstaller 只会携带 Python 运行时，Nuitka 可把部分 Python 编译为 C/C++ 产物，Cython 适合局部热点；这些工具都不会自动把现有程序转换成完整的 D3D11/C++ 零拷贝实现。D3D11 作为当前 Windows 首选后端，因为 FFmpeg D3D11VA、NVENC 和 Qt/Direct3D 互操作更成熟；D3D12 暂作为实验后端，不能假定它天然降低延迟。Android 后续使用 MediaCodec + Surface，不复用 Windows D3D11 模块。
+
+会话内剪贴板同步目前覆盖 Unicode 文本，单次最多 64,000 个字符；控制端和被控端各自轮询本机剪贴板，通过可靠数据通道发送变化并抑制回写回环。图片、文件和富文本格式暂不在同步范围内。
 
 码率设置表示目标码率。编码器使用 CBR、`maxrate` 和 VBV 缓冲，帧级 pacing 负责减少突发；WebRTC 拥塞反馈可以在链路不足时降低目标，网络恢复后再逐步升回设置值。视频目标不等于加密传输总流量，音频、控制、RTP/DTLS/UDP 和 Tailscale 开销仍需预留空间。控制端和被控端会尽力把 WebRTC ICE socket 标记为 AF41 DSCP，但网络设备或 Tailscale/DERP 可能忽略该标记，它不能替代拥塞控制或带宽预留。
 

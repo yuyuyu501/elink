@@ -116,8 +116,26 @@ def test_display_api_bound_to_active_session_and_old_host_rejected(tmp_path):
             with pytest.raises(ValidationError, match='升级'):
                 await client.display_settings()
             await client.disconnect()
+            assert display.current == [1920, 1080] and display.scale == 100
             with pytest.raises(ValidationError, match='断开'):
                 await client.display_settings()
+        finally:
+            await client.disconnect()
+            await host.stop()
+    asyncio.run(run())
+
+
+def test_display_reconfigure_can_keep_new_mode(tmp_path):
+    async def run():
+        display = FakeDisplay()
+        host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput, display_backend=display)
+        client = Client(tmp_path / 'client', play_audio=False)
+        try:
+            port = await host.start('127.0.0.1', 0)
+            await client.connect(f'127.0.0.1:{port}', dict(width=640, height=360, audio=False))
+            await client.display_settings(dict(device='test-display', resolution=[1280, 720], scale=125))
+            await client.disconnect(restore_display=False)
+            assert display.current == [1280, 720] and display.scale == 125
         finally:
             await client.disconnect()
             await host.stop()
