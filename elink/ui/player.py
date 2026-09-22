@@ -41,8 +41,6 @@ class Player(QWidget):
         self.fps = 0
         self.stats_at = time.monotonic()
         self.new_image = False
-        self.started_at = self.stats_at
-        self.elapsed = 0.0
         self.show_statistics = True
         self.pad_indices = set()
         self.xinput = XInput() if controllers else None
@@ -310,8 +308,6 @@ class Player(QWidget):
             self.image = QImage(pixels.data, pixels.shape[1], pixels.shape[0], pixels.strides[0], QImage.Format.Format_RGB888).copy()
             self.new_image = True
         now = time.monotonic()
-        if self.client.pc is not None:
-            self.elapsed = now - self.started_at
         if now - self.stats_at >= 1:
             self.fps = self.drawn / (now - self.stats_at)
             self.drawn, self.stats_at = 0, now
@@ -346,7 +342,7 @@ class Player(QWidget):
             now = time.monotonic()
             fresh = now - snapshot.sampled_at < 3
             rtt = self.client.rtt_ms if self.client.rtt_ms > 0 and now - self.client.last_pong < 3 else None
-            lines = overlay_lines(snapshot, self.fps, self.elapsed, rtt, self.client.pc is not None, fresh)
+            lines = overlay_lines(snapshot, self.fps, rtt, self.client.pc is not None, fresh)
             font = QFont('Consolas')
             font.setPixelSize(12)
             painter.setFont(font)

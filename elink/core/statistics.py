@@ -76,16 +76,13 @@ class ReceiveSampler:
         return rx, loss, max(jitters) if jitters else None
 
 
-def overlay_lines(snapshot, fps, elapsed, rtt_ms, connected=True, fresh=True):
-    elapsed = max(0, int(elapsed))
-    lines = [f'{elapsed // 3600:02}:{elapsed // 60 % 60:02}:{elapsed % 60:02}',
-             snapshot.route if connected else '已断开',
+def overlay_lines(snapshot, fps, rtt_ms, connected=True, fresh=True):
+    lines = [snapshot.route if connected else '已断开',
              f'{fps:.0f} fps' if connected else '-- fps']
     def number(value, suffix, digits=1):
         return f'{value:.{digits}f} {suffix}' if connected and fresh and value is not None else f'-- {suffix}'
-    lines += [number(snapshot.rx_kbps, 'Kbps RX'), number(rtt_ms, 'ms RTT'),
+    rx_mbps = snapshot.rx_kbps / 1000 if snapshot.rx_kbps is not None else None
+    lines += [number(rx_mbps, 'Mbps'), number(rtt_ms, 'ms RTT'),
               number(1000 / fps if fps > 0 else None, 'ms / frame'),
-              number(snapshot.loss_percent, '% loss', 2), number(snapshot.jitter_ms, 'ms jitter'),
-              number(snapshot.decode_ms, 'ms decode'), f'{snapshot.target_mbps} Mbps 目标',
-              snapshot.decoder if connected and fresh else '-- 解码器']
+              number(snapshot.loss_percent, '% loss', 2)]
     return lines
