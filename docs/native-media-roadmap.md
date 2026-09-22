@@ -28,3 +28,7 @@ Android 阶段再单独实现 MediaCodec 的 `Surface` 输出和 Android 图形�
 ## 不采用的方案
 
 不把画面切成 16×9 的 144 路独立编码任务。这样会增加码流、同步、丢包恢复和合成开销，无法保证每块独立到达就能立即显示；现代 GPU 解码器已经在帧内和帧间使用并行硬件。
+
+## 带宽与 QoS
+
+码率设置是目标值。编码器尽量使用该值，CBR/VBV 和帧级 pacing 控制突发；WebRTC 的 REMB 拥塞反馈在带宽不足时降低目标，恢复后缓慢升回。控制端和被控端都会尝试给 ICE UDP socket 设置 AF41 DSCP。该标记只影响支持 QoS 的本机网卡、交换机或路由器，不能跨 Tailscale/DERP 保证优先级，也不会保留 30 Mbps 的专用通道。需要本机 Windows 策略时，可由管理员在两台电脑分别运行 `scripts/windows_qos.ps1`；应用不会自动创建持久策略。

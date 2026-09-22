@@ -37,6 +37,8 @@ Elink 不再导入 GameStream 适配模块，不使用 Sunshine/Moonlight 可执
 
 后续媒体优化采用 Python 控制平面加原生媒体平面：Python 保留 WebRTC、网络、输入、设备发现、配置、更新和 UI；D3D11/NVDEC/NVENC 纹理路径逐步下沉到 Windows 原生 DLL，通过窄接口把 GPU surface 交给 Qt RHI 或 Direct3D 渲染。PyInstaller 只会携带 Python 运行时，Nuitka 可把部分 Python 编译为 C/C++ 产物，Cython 适合局部热点；这些工具都不会自动把现有程序转换成完整的 D3D11/C++ 零拷贝实现。D3D11 作为当前 Windows 首选后端，因为 FFmpeg D3D11VA、NVENC 和 Qt/Direct3D 互操作更成熟；D3D12 暂作为实验后端，不能假定它天然降低延迟。Android 后续使用 MediaCodec + Surface，不复用 Windows D3D11 模块。
 
+码率设置表示目标码率。编码器使用 CBR、`maxrate` 和 VBV 缓冲，帧级 pacing 负责减少突发；WebRTC 拥塞反馈可以在链路不足时降低目标，网络恢复后再逐步升回设置值。视频目标不等于加密传输总流量，音频、控制、RTP/DTLS/UDP 和 Tailscale 开销仍需预留空间。控制端和被控端会尽力把 WebRTC ICE socket 标记为 AF41 DSCP，但网络设备或 Tailscale/DERP 可能忽略该标记，它不能替代拥塞控制或带宽预留。
+
 ## 验证
 
 `python -m pytest -q` 包含真实 HTTPS + WebRTC 回环：本地批准、证书固定与错误证书拒绝、视频像素变化、音频帧、可靠按键释放、手柄状态消息、撤销立即断开；输入使用记录后端，不操纵测试机桌面。另测非法设置、输入重放、失焦、心跳释放及 Qt 开启/停止/退出，并验证 RGB 缓冲可以直接被 QImage 包装而不发生第二次复制。

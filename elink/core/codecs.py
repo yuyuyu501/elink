@@ -31,6 +31,14 @@ metrics = {"encoder": "未启动", "decoder": "未启动", "encode_ms": 0.0, "de
            "convert_ms": 0.0, "present_ms": 0.0, "last_decode_error": ""}
 
 
+def rate_control_options(policy: CodecPolicy) -> dict[str, str]:
+    """Return a low-latency CBR/VBV budget shared by supported encoders."""
+    return {
+        "maxrate": str(policy.bitrate),
+        "bufsize": str(max(policy.bitrate // 2, 300_000)),
+    }
+
+
 def make_encoder(name: str, width: int, height: int, policy: CodecPolicy):
     codec = av.CodecContext.create(name, "w")
     codec.width, codec.height = width, height
@@ -41,15 +49,16 @@ def make_encoder(name: str, width: int, height: int, policy: CodecPolicy):
     codec.gop_size = policy.fps
     codec.max_b_frames = 0
     codec.thread_count = 2
+    common = rate_control_options(policy)
     if name == "h264_nvenc":
-        codec.options = {"preset": "p1", "tune": "ull", "zerolatency": "1", "delay": "0",
+        codec.options = {**common, "preset": "p1", "tune": "ull", "zerolatency": "1", "delay": "0",
                          "rc": "cbr", "rc-lookahead": "0", "forced-idr": "1", "profile": "baseline"}
     elif name == "h264_amf":
-        codec.options = {"usage": "ultralowlatency", "quality": "speed", "rc": "cbr", "profile": "baseline"}
+        codec.options = {**common, "usage": "ultralowlatency", "quality": "speed", "rc": "cbr", "profile": "baseline"}
     elif name == "h264_qsv":
-        codec.options = {"preset": "veryfast", "async_depth": "1", "look_ahead": "0", "profile": "baseline"}
+        codec.options = {**common, "preset": "veryfast", "async_depth": "1", "look_ahead": "0", "profile": "baseline"}
     else:
-        codec.options = {"preset": "ultrafast", "tune": "zerolatency", "profile": "baseline",
+        codec.options = {**common, "preset": "ultrafast", "tune": "zerolatency", "profile": "baseline",
                          "x264-params": "scenecut=0:repeat-headers=1"}
     codec.open()
     return codec
@@ -60,6 +69,7 @@ class DesktopEncoder(H264Encoder):
         self.policy = CodecPolicy(**vars(policy))
         self._rate = self.policy.bitrate
         self.name = ""
+        self._pacer_next = 0.0
         super().__init__()
 
     @property
@@ -72,6 +82,12 @@ class DesktopEncoder(H264Encoder):
         self._rate = max(300_000, min(int(value), self.policy.bitrate))
 
     def _encode_frame(self, frame, force_keyframe):
+        # aiortc invokes encoders sequentially. Delaying the next frame in this
+        # worker thread smooths frame-sized bursts while keeping the event loop
+        # responsive. Congestion feedback may lower _rate; recovery is gradual.
+        now = time.perf_counter()
+        if self._pacer_next > now:
+            time.sleep(self._pacer_next - now)
         started = time.perf_counter()
         changed = self.codec and (self.codec.width != frame.width or self.codec.height != frame.height
                                   or abs(self._rate - self.codec.bit_rate) / self.codec.bit_rate > 0.25)
@@ -96,6 +112,12 @@ class DesktopEncoder(H264Encoder):
         metrics.update(encoder=self.name, encode_ms=(time.perf_counter() - started) * 1000,
                        encoded=metrics["encoded"] + 1, bitrate=self._rate)
         if data:
+            # Account for RTP/DTLS/UDP overhead so the media target is not a
+            # wire-rate underestimate. The next frame is paced from this one.
+            wire_bytes = len(data) * 1.05
+            self._pacer_next = max(self._pacer_next, time.perf_counter()) + (
+                wire_bytes * 8 / max(self._rate, 300_000)
+            )
             yield from self._split_bitstream(data)
 
 

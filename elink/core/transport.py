@@ -17,6 +17,7 @@ from ..models import Endpoint, ValidationError
 from . import codecs
 from .input import InputSession, WindowsInput, PAD_BACKENDS
 from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack
+from .qos import mark_rtc_sockets
 from .security import Identity
 from ..discovery import NetworkScope, Responder, DISCOVERY_PORT, machine_id
 from .buffers import tune_receiver, tune_track
@@ -259,6 +260,7 @@ class HostServer:
                     pc.addTrack(audio)
                 video_preferences(pc)
                 await pc.setLocalDescription(await pc.createAnswer())
+                mark_rtc_sockets(pc)
                 if not self.scope.allows(device):
                     raise web.HTTPForbidden()
                 if self.pc is not pc:
@@ -531,6 +533,7 @@ class Client:
                                          payload={"type": pc.localDescription.type, "sdp": pc.localDescription.sdp, "settings": config})
                 self.session_id = response["id"]
                 await pc.setRemoteDescription(RTCSessionDescription(response["sdp"], response["type"]))
+                mark_rtc_sockets(pc)
                 self.task(self.heartbeat())
                 self.task(self.sample_statistics(pc, config["bitrate"]))
                 self.task(self.probe_statistics_route(pc))

@@ -40,7 +40,7 @@ class StreamOptions(QWidget):
         self.bitrate.setValue(20)
         self.bitrate.setSuffix(' Mbps')
         for label, widget in [('目标帧率', self.fps),
-                              ('码率上限', self.bitrate), ('解码器', self.decoder)]:
+                              ('目标码率', self.bitrate), ('解码器', self.decoder)]:
             form.addRow(label, widget)
         self.audio = QCheckBox('传输远端系统声音')
         self.mouse_mode = QComboBox()
