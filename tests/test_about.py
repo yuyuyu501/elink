@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -113,6 +114,17 @@ def test_download_can_be_cancelled_without_exiting(tmp_path, monkeypatch):
         assert window.about.check_button.isEnabled()
         assert "已取消" in window.about.status.text()
         assert not window._closing
+    finally:
+        close(window, app)
+
+
+def test_download_progress_displays_speed(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
+    try:
+        window.about._download_started = time.monotonic() - 2
+        window.about.show_progress(window.about.generation, 8 * 1048576, 16 * 1048576)
+        assert "MiB/s" in window.about.status.text()
     finally:
         close(window, app)
 

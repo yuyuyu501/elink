@@ -10,9 +10,37 @@ from .controls import StreamOptions
 from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_resize_handles
 
 from ..core.statistics import StreamStats, overlay_lines
-from ..core.input import XInput
+from ..core.input import RemoteKeyboardHook, XInput
 from ..core import codecs
 from ..core.mouse import MOUSE_MODES, mouse_mode, relative_mouse
+
+
+_DIRECTION_KEYS = {
+    Qt.Key.Key_Up: (0x26, 0x48),
+    Qt.Key.Key_Down: (0x28, 0x50),
+    Qt.Key.Key_Left: (0x25, 0x4B),
+    Qt.Key.Key_Right: (0x27, 0x4D),
+}
+
+
+def remote_key_event(event, down):
+    """Convert Qt's key event into a stable Windows keyboard identity.
+
+    Qt reports NumLock-off keypad arrows as the same semantic arrow keys as
+    the navigation cluster. Conversely, NumLock-on keypad digits retain their
+    VK_NUMPAD identity. Prefer those semantics over the destination machine's
+    NumLock state so a remote keypad does not turn into 2/4/6/8 arrows.
+    """
+    key = event.key()
+    if key in _DIRECTION_KEYS:
+        vk, scan = _DIRECTION_KEYS[key]
+        return {"type": "key", "vk": vk, "scan": scan, "extended": True, "down": down}
+    native_vk = int(event.nativeVirtualKey() or 0)
+    if 0x60 <= native_vk <= 0x69 and key not in _DIRECTION_KEYS:
+        return {"type": "key", "vk": native_vk, "scan": 0, "extended": False, "down": down}
+    scan = int(event.nativeScanCode() or 0)
+    return {"type": "key", "vk": native_vk, "scan": scan & 255,
+            "extended": bool(scan & 0x100), "down": down}
 
 
 class Player(QWidget):
@@ -48,6 +76,7 @@ class Player(QWidget):
         self.show_statistics = True
         self.pad_indices = set()
         self.xinput = XInput() if controllers else None
+        self.keyboard_hook = RemoteKeyboardHook(self.send, lambda: self.captured)
         self.setWindowTitle("Elink · 远程桌面")
         self.setMinimumSize(640, 400)
         self.make_toolbar()
@@ -270,6 +299,12 @@ class Player(QWidget):
         self.captured = True
         self.layout_chrome()
         self.runtime.call(self.client.focus, True)
+        try:
+            self.keyboard_hook.start()
+        except OSError as exc:
+            # Qt input remains usable if another process prevents a low-level
+            # hook. The notice makes the limitation visible during testing.
+            self.show_error(f"无法拦截 Windows 系统快捷键：{exc}")
         self.update_mouse(force=True)
 
     def update_mouse(self, force=False):
@@ -281,8 +316,11 @@ class Player(QWidget):
         relative = relative_mouse(self.mouse_mode, visible)
         if not supported and self.mouse_mode == 'smart':
             relative = False  # Older hosts cannot report whether games hide their cursor.
-        local = (supported and self.mouse_mode == 'local'
-                 and getattr(self.client, 'cursor_applied', 'remote') == 'local' and fresh)
+        # The remote frame may contain a game-drawn pointer. Keeping the
+        # controller's Windows cursor visible in local mode would therefore
+        # produce two pointers. The pointer is injected into the host and the
+        # game renders the single visible cursor in the stream.
+        local = False
         if force or relative != self.game_mouse:
             if relative:
                 self.grabMouse()
@@ -296,6 +334,7 @@ class Player(QWidget):
 
     def release(self):
         self.captured = False
+        self.keyboard_hook.stop()
         self.runtime.call(self.client.focus, False)
         self.releaseMouse()
         self.unsetCursor()
@@ -399,9 +438,7 @@ class Player(QWidget):
         event.accept()
 
     def key(self, event, down):
-        scan = event.nativeScanCode()
-        self.send({"type": "key", "vk": event.nativeVirtualKey(), "scan": scan & 255,
-                   "extended": bool(scan & 0x100), "down": down})
+        self.send(remote_key_event(event, down))
 
     def mouseMoveEvent(self, event):
         if not self.captured:

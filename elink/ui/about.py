@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import threading
+import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QLabel, QMessageBox, QProgressBar,
@@ -25,6 +26,8 @@ class AboutPage(QWidget):
         self.installing = False
         self.handoff_complete = False
         self.generation = 0
+        self._download_started = None
+        self._download_speed = 0.0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 20, 12, 10)
         title = QLabel(f"Elink {__version__} · Windows x64 预览版")
@@ -69,6 +72,8 @@ class AboutPage(QWidget):
             self.future = None
             self.cancel_button.hide()
             self.bar.hide()
+            self._download_started = None
+            self._download_speed = 0.0
 
     def check(self):
         if self.future or self.installing or self.window._closing:
@@ -112,6 +117,8 @@ class AboutPage(QWidget):
         self.bar.setValue(0)
         self.bar.show()
         self.cancel_button.show()
+        self._download_started = time.monotonic()
+        self._download_speed = 0.0
         self.status.setText("正在下载更新…")
         self.future = self.window.runtime.submit(
             updates.prepare_update(release, self.target, self.cancelled,
@@ -123,8 +130,16 @@ class AboutPage(QWidget):
         if job != self.generation or self.window._closing or self.cancelled.is_set():
             return
         self.bar.setValue(int(received * 100 / max(1, total)))
-        self.status.setText("正在校验并解压…" if received == total else
-                            f"正在下载：{received / 1048576:.1f} / {total / 1048576:.1f} MiB")
+        if received == total:
+            self.status.setText("正在校验并解压…")
+            return
+        if self._download_started is None:
+            self._download_started = time.monotonic()
+        elapsed = max(0.001, time.monotonic() - self._download_started)
+        self._download_speed = max(0.0, received / elapsed / 1048576)
+        self.status.setText(
+            f"正在下载：{received / 1048576:.1f} / {total / 1048576:.1f} MiB · "
+            f"{self._download_speed:.1f} MiB/s")
 
     def prepared(self, workspace, job):
         if job != self.generation or self.window._closing or self.cancelled.is_set():

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 from test_player_chrome import make_player
 from test_device_ui import close
 from elink.ui.window import MainWindow
+from elink.ui.player import remote_key_event
 
 
 def test_smart_switch_local_ack_and_stale_state():
@@ -35,7 +36,7 @@ def test_smart_switch_local_ack_and_stale_state():
         assert not player.game_mouse and player.cursor().shape() == Qt.CursorShape.BlankCursor
         client.cursor_applied = 'local'
         player.update_mouse()
-        assert player.cursor().shape() == Qt.CursorShape.ArrowCursor
+        assert player.cursor().shape() == Qt.CursorShape.BlankCursor
         # Offscreen runners do not reliably translate OS pointer warps into Qt
         # move events. Deliver the same widget event without moving the OS cursor.
         point = player.rect_image.topLeft() + QPoint(5, 5)
@@ -75,3 +76,31 @@ def test_old_preference_migrates_and_new_mode_persists(tmp_path):
         assert window.mouse_mode.currentData() == 'local'
     finally:
         close(window, app)
+
+
+class FakeKey:
+    def __init__(self, key, native_vk, scan=0, modifiers=Qt.KeyboardModifier.NoModifier):
+        self._key, self._native_vk, self._scan, self._modifiers = key, native_vk, scan, modifiers
+
+    def key(self):
+        return self._key
+
+    def nativeVirtualKey(self):
+        return self._native_vk
+
+    def nativeScanCode(self):
+        return self._scan
+
+    def modifiers(self):
+        return self._modifiers
+
+
+def test_remote_key_event_separates_navigation_and_keypad_digits():
+    assert remote_key_event(FakeKey(Qt.Key.Key_Up, 0x26, 0x48), True) == {
+        'type': 'key', 'vk': 0x26, 'scan': 0x48, 'extended': True, 'down': True}
+    assert remote_key_event(FakeKey(Qt.Key.Key_2, 0x62, 0x50,
+                                    Qt.KeyboardModifier.KeypadModifier), True) == {
+        'type': 'key', 'vk': 0x62, 'scan': 0, 'extended': False, 'down': True}
+    assert remote_key_event(FakeKey(Qt.Key.Key_Down, 0x28, 0x50,
+                                    Qt.KeyboardModifier.KeypadModifier), True) == {
+        'type': 'key', 'vk': 0x28, 'scan': 0x50, 'extended': True, 'down': True}

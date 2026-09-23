@@ -1,8 +1,9 @@
-"""Validated session input. No global hooks, background key capture or driver installer."""
+"""Validated session input and the small Windows hook used by captured sessions."""
 from __future__ import annotations
 
 import ctypes as c
 import json
+import os
 import time
 from ctypes import wintypes as w
 
@@ -26,6 +27,106 @@ class Union(c.Union):
 class Input(c.Structure):
     _anonymous_ = ("u",)
     _fields_ = [("type", w.DWORD), ("u", Union)]
+
+
+class _KeyboardHookData(c.Structure):
+    _fields_ = [("vkCode", w.DWORD), ("scanCode", w.DWORD), ("flags", w.DWORD),
+                ("time", w.DWORD), ("extra", c.c_void_p)]
+
+
+class RemoteKeyboardHook:
+    """Suppress Windows shell shortcuts while a Player owns keyboard input.
+
+    The hook is deliberately limited to the Windows key and Alt+Tab. Normal
+    keys continue through Qt so the existing focused-widget path remains the
+    source of truth. It is a no-op on other platforms and never installs a
+    driver or global input backend.
+    """
+
+    _WH_KEYBOARD_LL = 13
+    _WM_KEYDOWN = 0x0100
+    _WM_KEYUP = 0x0101
+    _WM_SYSKEYDOWN = 0x0104
+    _WM_SYSKEYUP = 0x0105
+    _LLKHF_EXTENDED = 0x01
+    _LLKHF_INJECTED = 0x10
+    _VK_TAB = 0x09
+    _VK_LMENU = 0xA4
+    _VK_RMENU = 0xA5
+    _VK_LWIN = 0x5B
+    _VK_RWIN = 0x5C
+
+    def __init__(self, send, active=lambda: True):
+        self.send = send
+        self.active = active
+        self._user32 = None
+        self._kernel32 = None
+        self._hook = None
+        self._proc = None
+        self._alt_down = False
+
+    @property
+    def installed(self):
+        return self._hook is not None
+
+    def start(self):
+        if os.name != "nt" or self._hook is not None:
+            return False
+        callback_type = c.WINFUNCTYPE(c.c_ssize_t, c.c_int, w.WPARAM, w.LPARAM)
+        self._user32 = c.WinDLL("user32", use_last_error=True)
+        self._kernel32 = c.WinDLL("kernel32", use_last_error=True)
+        self._user32.SetWindowsHookExW.argtypes = [c.c_int, callback_type, c.c_void_p, w.DWORD]
+        self._user32.SetWindowsHookExW.restype = c.c_void_p
+        self._user32.CallNextHookEx.argtypes = [c.c_void_p, c.c_int, w.WPARAM, w.LPARAM]
+        self._user32.CallNextHookEx.restype = c.c_ssize_t
+        self._user32.UnhookWindowsHookEx.argtypes = [c.c_void_p]
+        self._user32.UnhookWindowsHookEx.restype = w.BOOL
+        self._kernel32.GetModuleHandleW.argtypes = [w.LPCWSTR]
+        self._kernel32.GetModuleHandleW.restype = c.c_void_p
+        self._proc = callback_type(self._callback)
+        module = self._kernel32.GetModuleHandleW(None)
+        self._hook = self._user32.SetWindowsHookExW(self._WH_KEYBOARD_LL, self._proc, module, 0)
+        if not self._hook:
+            self._proc = None
+            raise c.WinError(c.get_last_error())
+        return True
+
+    def stop(self):
+        if self._hook is not None and self._user32 is not None:
+            self._user32.UnhookWindowsHookEx(self._hook)
+        self._hook = None
+        self._proc = None
+        self._alt_down = False
+
+    def _callback(self, code, message, lparam):
+        if code < 0 or not self.active():
+            return self._user32.CallNextHookEx(None, code, message, lparam)
+        data = c.cast(lparam, c.POINTER(_KeyboardHookData)).contents
+        if data.flags & self._LLKHF_INJECTED:
+            return self._user32.CallNextHookEx(None, code, message, lparam)
+        down = message in (self._WM_KEYDOWN, self._WM_SYSKEYDOWN)
+        up = message in (self._WM_KEYUP, self._WM_SYSKEYUP)
+        if not (down or up):
+            return self._user32.CallNextHookEx(None, code, message, lparam)
+        vk = int(data.vkCode)
+        if vk in (self._VK_LMENU, self._VK_RMENU):
+            self._alt_down = down
+        intercept = vk in (self._VK_LWIN, self._VK_RWIN) or (vk == self._VK_TAB and self._alt_down)
+        if intercept:
+            event = {"type": "key", "vk": vk, "scan": int(data.scanCode) & 255,
+                     "extended": bool(data.flags & self._LLKHF_EXTENDED), "down": down}
+            try:
+                self.send(event)
+            except Exception:
+                pass
+            return 1
+        return self._user32.CallNextHookEx(None, code, message, lparam)
+
+    def __del__(self):
+        try:
+            self.stop()
+        except Exception:
+            pass
 
 
 class Pad(c.Structure):

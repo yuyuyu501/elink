@@ -84,5 +84,6 @@ def overlay_lines(snapshot, fps, rtt_ms, connected=True, fresh=True):
     rx_mbps = snapshot.rx_kbps / 1000 if snapshot.rx_kbps is not None else None
     lines += [number(rx_mbps, 'Mbps'), number(rtt_ms, 'ms RTT'),
               number(snapshot.decode_ms, 'ms decode'),
+              snapshot.decoder if connected and fresh and snapshot.decoder else '--',
               number(snapshot.loss_percent, '% loss', 2)]
     return lines
