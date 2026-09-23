@@ -18,7 +18,7 @@ from . import codecs
 from .clipboard import MAX_CLIPBOARD_CHARS, read_text, write_text
 from .input import InputSession, WindowsInput, PAD_BACKENDS
 from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack
-from .qos import mark_rtc_sockets
+from .qos import install_rtp_pacer, mark_rtc_sockets
 from .security import Identity
 from ..discovery import NetworkScope, Responder, DISCOVERY_PORT, machine_id
 from .buffers import tune_receiver, tune_track
@@ -26,11 +26,12 @@ from .statistics import StreamStats, ReceiveSampler, selected_route
 
 
 def video_preferences(pc):
-    # Both Elink peers advertise level 5.2, sufficient for the 1080p120 ceiling.
+    # High profile keeps CABAC enabled at the same bitrate, which is important
+    # for fine game foliage and text. Level 5.2 covers the 1080p120 ceiling.
     import copy
     preferences = copy.deepcopy([c for c in RTCRtpSender.getCapabilities("video").codecs if c.mimeType.lower() == "video/h264"])
     for codec in preferences:
-        codec.parameters["profile-level-id"] = "42e034"
+        codec.parameters["profile-level-id"] = "640034"
     for transceiver in pc.getTransceivers():
         if transceiver.kind == "video":
             transceiver.setCodecPreferences(preferences)
@@ -49,7 +50,7 @@ def install():
     from aiortc.codecs import CODECS
     for codec in CODECS["video"]:
         if codec.mimeType.lower() == "video/h264":
-            codec.parameters["profile-level-id"] = "42e034"
+            codec.parameters["profile-level-id"] = "640034"
 
 
 def settings(value):
@@ -275,6 +276,7 @@ class HostServer:
                     pc.addTrack(audio)
                 video_preferences(pc)
                 await pc.setLocalDescription(await pc.createAnswer())
+                install_rtp_pacer(pc, config["bitrate"])
                 mark_rtc_sockets(pc)
                 self.clipboard_seen = await asyncio.to_thread(read_text)
                 self.clipboard_task = asyncio.create_task(self.watch_clipboard(pc, feedback))

@@ -1,4 +1,5 @@
 import socket
+import asyncio
 from types import SimpleNamespace
 
 
@@ -40,3 +41,20 @@ def test_mark_rtc_sockets_sets_ipv4_dscp():
 
     assert mark_rtc_sockets(pc) == 1
     assert sock.values == [(socket.IPPROTO_IP, socket.IP_TOS, 34 << 2)]
+
+
+def test_rtp_pacer_wraps_each_sender_transport_once():
+    from elink.core.qos import install_rtp_pacer
+
+    sent = []
+
+    class Transport:
+        async def _send_rtp(self, data):
+            sent.append(data)
+
+    transport = Transport()
+    pc = SimpleNamespace(getTransceivers=lambda: [SimpleNamespace(sender=SimpleNamespace(transport=transport))])
+    assert install_rtp_pacer(pc, 20) == 1
+    assert install_rtp_pacer(pc, 20) == 0
+    asyncio.run(transport._send_rtp(b'packet'))
+    assert sent == [b'packet']

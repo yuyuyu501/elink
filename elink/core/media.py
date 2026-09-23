@@ -48,9 +48,17 @@ class DesktopTrack(MediaStreamTrack):
                     self.com_initialized = ctypes.windll.ole32.CoInitializeEx(None, 2) in (0, 1)
                 self.camera = dxcam.create(output_color="BGR", max_buffer_len=2)
                 self.display_name = self.camera._output.devicename
+                # Let DXGI capture run continuously so a slow encode or color
+                # conversion cannot stall the desktop producer. The sender
+                # consumes the newest frame at the configured stream cadence.
+                self.camera.start(target_fps=self.fps, video_mode=True)
                 from .cursor import WindowsCursor
                 self.cursor = WindowsCursor()
-            pixels = self.camera.grab()
+            if hasattr(self.camera, "get_latest_frame"):
+                pixels = self.camera.get_latest_frame()
+            else:
+                # Keep lightweight fake cameras and older DXCam builds usable.
+                pixels = self.camera.grab()
             if pixels is None and self.last is None:
                 for _ in range(50):
                     time.sleep(0.01)

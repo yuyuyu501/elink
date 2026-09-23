@@ -54,14 +54,14 @@ def make_encoder(name: str, width: int, height: int, policy: CodecPolicy):
     if name == "h264_nvenc":
         codec.options = {**common, "preset": "p1", "tune": "ull", "zerolatency": "1", "delay": "0",
                          "rc": "cbr", "rc-lookahead": "0", "forced-idr": "1", "strict_gop": "1",
-                         "profile": "baseline"}
+                         "profile": "high"}
     elif name == "h264_amf":
-        codec.options = {**common, "usage": "ultralowlatency", "quality": "speed", "rc": "cbr", "profile": "baseline"}
+        codec.options = {**common, "usage": "ultralowlatency", "quality": "speed", "rc": "cbr", "profile": "high"}
     elif name == "h264_qsv":
-        codec.options = {**common, "preset": "veryfast", "async_depth": "1", "look_ahead": "0", "profile": "baseline"}
+        codec.options = {**common, "preset": "veryfast", "async_depth": "1", "look_ahead": "0", "profile": "high"}
     else:
-        codec.options = {**common, "preset": "ultrafast", "tune": "zerolatency", "profile": "baseline",
-                         "x264-params": "scenecut=0:repeat-headers=1"}
+        codec.options = {**common, "preset": "ultrafast", "tune": "zerolatency", "profile": "high",
+                         "x264-params": "scenecut=0:repeat-headers=1:cabac=1"}
     codec.open()
     return codec
 
@@ -71,7 +71,6 @@ class DesktopEncoder(H264Encoder):
         self.policy = CodecPolicy(**vars(policy))
         self._rate = self.policy.bitrate
         self.name = ""
-        self._pacer_next = 0.0
         super().__init__()
 
     @property
@@ -93,12 +92,9 @@ class DesktopEncoder(H264Encoder):
         self._rate = max(300_000, min(int(value), self.policy.bitrate))
 
     def _encode_frame(self, frame, force_keyframe):
-        # aiortc invokes encoders sequentially. Delaying the next frame in this
-        # worker thread smooths frame-sized bursts while keeping the event loop
-        # responsive. In fixed-priority mode _rate remains the user's target.
-        now = time.perf_counter()
-        if self._pacer_next > now:
-            time.sleep(self._pacer_next - now)
+        # aiortc invokes encoders sequentially. Network pacing is applied at
+        # the RTP transport, so the encoder must return promptly and avoid a
+        # second frame-level delay that would halve the effective frame rate.
         started = time.perf_counter()
         changed = self.codec and (self.codec.width != frame.width or self.codec.height != frame.height
                                   or abs(self._rate - self.codec.bit_rate) / self.codec.bit_rate > 0.25)
@@ -113,7 +109,7 @@ class DesktopEncoder(H264Encoder):
                     self.codec = make_encoder(name, frame.width, frame.height, policy)
                     self.name = name
                     break
-                except av.FFmpegError:
+                except (av.FFmpegError, ValueError):
                     log.info("Encoder unavailable: %s", name)
             if self.codec is None:
                 raise RuntimeError("没有可用的 H.264 编码器。")
@@ -123,12 +119,6 @@ class DesktopEncoder(H264Encoder):
         metrics.update(encoder=self.name, encode_ms=(time.perf_counter() - started) * 1000,
                        encoded=metrics["encoded"] + 1, bitrate=self._rate)
         if data:
-            # Account for RTP/DTLS/UDP overhead so the media target is not a
-            # wire-rate underestimate. The next frame is paced from this one.
-            wire_bytes = len(data) * 1.05
-            self._pacer_next = max(self._pacer_next, time.perf_counter()) + (
-                wire_bytes * 8 / max(self._rate, 300_000)
-            )
             yield from self._split_bitstream(data)
 
 

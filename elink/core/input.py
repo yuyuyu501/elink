@@ -34,6 +34,100 @@ class _KeyboardHookData(c.Structure):
                 ("time", w.DWORD), ("extra", c.c_void_p)]
 
 
+class _RawInputDevice(c.Structure):
+    _fields_ = [("usUsagePage", w.USHORT), ("usUsage", w.USHORT),
+                ("dwFlags", w.DWORD), ("hwndTarget", w.HWND)]
+
+
+class _RawInputHeader(c.Structure):
+    _fields_ = [("dwType", w.DWORD), ("dwSize", w.DWORD), ("hDevice", w.HANDLE),
+                ("wParam", w.WPARAM)]
+
+
+class _RawMouse(c.Structure):
+    _fields_ = [("usFlags", w.USHORT), ("usButtonFlags", w.USHORT),
+                ("usButtonData", w.USHORT), ("usReserved", w.USHORT),
+                ("ulRawButtons", w.ULONG), ("lLastX", w.LONG), ("lLastY", w.LONG),
+                ("ulExtraInformation", w.ULONG)]
+
+
+class _RawInput(c.Structure):
+    _anonymous_ = ("data",)
+    _fields_ = [("header", _RawInputHeader), ("data", _RawMouse)]
+
+
+class _WindowsMessage(c.Structure):
+    _fields_ = [("hwnd", w.HWND), ("message", w.UINT), ("wParam", w.WPARAM), ("lParam", w.LPARAM),
+                ("time", w.DWORD), ("pt_x", w.LONG), ("pt_y", w.LONG)]
+
+
+class RawMouseInput:
+    """Read hardware mouse deltas without Windows pointer acceleration."""
+
+    _WM_INPUT = 0x00FF
+    _RID_INPUT = 0x10000003
+    _RIM_TYPEMOUSE = 0
+    _RIDEV_INPUTSINK = 0x00000100
+    _MOUSE_MOVE_ABSOLUTE = 0x0001
+
+    def __init__(self):
+        self._user32 = None
+        self._hwnd = None
+        self._active = False
+
+    @property
+    def active(self):
+        return self._active
+
+    def start(self, hwnd):
+        if os.name != "nt" or not hwnd or self._active:
+            return False
+        user32 = c.WinDLL("user32", use_last_error=True)
+        user32.RegisterRawInputDevices.argtypes = [c.POINTER(_RawInputDevice), w.UINT, w.UINT]
+        user32.RegisterRawInputDevices.restype = w.BOOL
+        user32.GetRawInputData.argtypes = [c.c_void_p, w.UINT, c.c_void_p, c.POINTER(w.UINT), w.UINT]
+        user32.GetRawInputData.restype = w.UINT
+        device = _RawInputDevice(0x01, 0x02, self._RIDEV_INPUTSINK, w.HWND(hwnd))
+        if not user32.RegisterRawInputDevices(c.byref(device), 1, c.sizeof(device)):
+            raise c.WinError(c.get_last_error())
+        self._user32, self._hwnd, self._active = user32, hwnd, True
+        return True
+
+    def stop(self):
+        if self._active and self._user32 is not None:
+            device = _RawInputDevice(0x01, 0x02, 0x00000001, None)
+            self._user32.RegisterRawInputDevices(c.byref(device), 1, c.sizeof(device))
+        self._active = False
+        self._hwnd = None
+
+    def delta(self, message):
+        if not self._active or message is None:
+            return None
+        msg = c.cast(int(message), c.POINTER(_WindowsMessage)).contents
+        if msg.message != self._WM_INPUT:
+            return None
+        size = w.UINT(0)
+        header_size = c.sizeof(_RawInputHeader)
+        if self._user32.GetRawInputData(c.c_void_p(msg.lParam), self._RID_INPUT, None,
+                                        c.byref(size), header_size) == 0xffffffff or size.value < c.sizeof(_RawInput):
+            return None
+        buffer = (c.c_ubyte * size.value)()
+        result = self._user32.GetRawInputData(c.c_void_p(msg.lParam), self._RID_INPUT, buffer,
+                                               c.byref(size), header_size)
+        if result == 0xffffffff:
+            return None
+        raw = c.cast(buffer, c.POINTER(_RawInput)).contents
+        if raw.header.dwType != self._RIM_TYPEMOUSE or raw.mouse.usFlags & self._MOUSE_MOVE_ABSOLUTE:
+            return None
+        return int(raw.mouse.lLastX), int(raw.mouse.lLastY)
+
+    def __del__(self):
+        try:
+            self.stop()
+        except Exception:
+            pass
+
+
 class RemoteKeyboardHook:
     """Suppress Windows shell shortcuts while a Player owns keyboard input.
 
