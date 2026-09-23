@@ -38,9 +38,19 @@ def test_smart_switch_local_ack_and_stale_state():
         client.cursor_applied = 'local'
         player.update_mouse()
         assert player.cursor().shape() == Qt.CursorShape.BlankCursor
+        client.cursor_visible = False
+        client.cursor_updated = time.monotonic()
+        player.update_mouse()
+        assert player.game_mouse and not player.software_cursor
         # Offscreen runners do not reliably translate OS pointer warps into Qt
         # move events. Deliver the same widget event without moving the OS cursor.
         point = player.rect_image.topLeft() + QPoint(5, 5)
+        QApplication.sendEvent(player, QMouseEvent(
+            QEvent.Type.MouseMove, QPointF(point), QPointF(player.mapToGlobal(point)),
+            Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        assert any(e[0] == 'input' and e[1].get('absolute') is False for e in events)
+        client.cursor_visible = True
+        player.update_mouse()
         QApplication.sendEvent(player, QMouseEvent(
             QEvent.Type.MouseMove, QPointF(point), QPointF(player.mapToGlobal(point)),
             Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))

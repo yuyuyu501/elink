@@ -246,7 +246,7 @@ class Player(QWidget):
         apply = QPushButton("应用并重新连接")
         apply.setObjectName('primary')
         apply.setEnabled(False)
-        hint = ('分辨率与缩放会实际修改被控电脑，退出远控时会尝试恢复进入前的设置；部分程序需重新打开才适应新缩放。'
+        hint = ('分辨率、显示刷新率与缩放会实际修改被控电脑，退出远控时会尝试恢复进入前的设置；部分程序需重新打开才适应新缩放。'
                 '\n传输画面跟随被控端比例，当前最高 1080p。应用后短暂断开并自动重连。')
         def loaded(snapshot):
             if self._closed or self.settings_dialog is not dialog:
@@ -258,7 +258,7 @@ class Player(QWidget):
             if self._closed or self.settings_dialog is not dialog:
                 return
             options.display_unavailable(message)
-            note.setText(str(message) + '\n仍可调整帧率、码率等传输设置。')
+            note.setText(str(message) + '\n仍可调整码率等传输设置。')
             apply.setEnabled(True)
         self.runtime.submit(self.client.display_settings(), loaded, failed)
         def accept():
@@ -325,7 +325,7 @@ class Player(QWidget):
         # OS cursor hidden and paint a software arrow over the received frame;
         # this avoids a duplicate cursor while still making the pointer visible.
         local = False
-        software = self.captured and self.mouse_mode == 'local'
+        software = self.captured and self.mouse_mode == 'local' and not relative
         if force or software != self.software_cursor:
             self.software_cursor = software
             self.update()
@@ -416,14 +416,6 @@ class Player(QWidget):
             painter.setPen(QColor('#ffffff'))
             for index, line in enumerate(lines):
                 painter.drawText(10, stats_top + 8 + painter.fontMetrics().ascent() + index * line_height, line)
-        status = "输入已捕获 · Ctrl+Alt+Shift+Z 释放 · F11 全屏" if self.captured else "点击画面控制 · F8 控制中心 / 释放输入 · Ctrl+Alt+Shift+Q 断开"
-        if self.client.pc is None:
-            status = "会话已断开，请关闭窗口后重新连接。"
-        if not self.captured or self.client.pc is None:
-            painter.fillRect(8, self.height() - 36, min(630, self.width() - 16), 28, QColor(0, 0, 0, 160))
-            painter.setPen(QColor('#ffffff'))
-            painter.drawText(18, self.height() - 17, status)
-
     def draw_software_cursor(self, painter):
         point = self.software_cursor_pos
         if not self.rect_image.contains(point):
@@ -463,6 +455,13 @@ class Player(QWidget):
         if self.captured and not event.isAutoRepeat() and event.key() not in (Qt.Key.Key_F8, Qt.Key.Key_F10, Qt.Key.Key_F11):
             self.key(event, False)
         event.accept()
+
+    def focusNextPrevChild(self, next_child):
+        # Qt normally consumes Tab for widget focus traversal before it reaches
+        # keyPressEvent. A captured session must forward it to the host game.
+        if self.captured:
+            return False
+        return super().focusNextPrevChild(next_child)
 
     def key(self, event, down):
         self.send(remote_key_event(event, down))
@@ -506,6 +505,11 @@ class Player(QWidget):
             self.send({"type": "wheel", "delta": event.angleDelta().y()})
 
     def event(self, event):
+        if getattr(self, 'captured', False) and event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            if event.key() == Qt.Key.Key_Tab and not event.isAutoRepeat():
+                self.key(event, event.type() == QEvent.Type.KeyPress)
+                event.accept()
+                return True
         if event.type() in (QEvent.Type.WindowDeactivate, QEvent.Type.FocusOut) and getattr(self, "captured", False):
             self.release()
         return super().event(event)

@@ -16,22 +16,30 @@ class StreamOptions(QWidget):
         form.setSpacing(14)
         self.display_snapshot = None
         self.display_resolution = QComboBox()
+        self.display_refresh = QComboBox()
         self.scale = QComboBox()
         if remote_display:
             self.display_resolution.addItem('正在读取被控端…')
+            self.display_refresh.addItem('正在读取被控端…')
             self.scale.addItem('正在读取被控端…')
             self.display_resolution.setEnabled(False)
+            self.display_refresh.setEnabled(False)
             self.scale.setEnabled(False)
             form.addRow('被控端分辨率', self.display_resolution)
+            form.addRow('被控端显示刷新率', self.display_refresh)
             form.addRow('被控端系统缩放', self.scale)
         else:
             self.display_resolution.setParent(self)
+            self.display_refresh.setParent(self)
             self.scale.setParent(self)
             self.display_resolution.hide()
+            self.display_refresh.hide()
             self.scale.hide()
         self.fps = QComboBox()
-        for fps in (60, 90, 120, 30):
+        for fps in (60, 90, 120, 144, 165, 240, 30):
             self.fps.addItem(f'{fps} FPS', fps)
+        if remote_display:
+            self.fps.hide()
         self.decoder = QComboBox()
         for label, value in [('自动（优先硬件）', 'auto'), ('软件 H.264', 'software'), ('D3D11VA', 'hardware')]:
             self.decoder.addItem(label, value)
@@ -39,7 +47,7 @@ class StreamOptions(QWidget):
         self.bitrate.setRange(1, 80)
         self.bitrate.setValue(20)
         self.bitrate.setSuffix(' Mbps')
-        for label, widget in [('目标帧率', self.fps),
+        for label, widget in ([('目标帧率', self.fps)] if not remote_display else []) + [
                               ('目标码率', self.bitrate), ('解码器', self.decoder)]:
             form.addRow(label, widget)
         self.audio = QCheckBox('传输远端系统声音')
@@ -65,6 +73,7 @@ class StreamOptions(QWidget):
             self.display_resolution.addItem(label, size)
         self.display_resolution.setCurrentIndex(self.display_resolution.findData(snapshot['current']))
         self.display_resolution.setEnabled(True)
+        self._populate_refresh(snapshot['current'])
         self.scale.clear()
         for value in snapshot['scales']:
             label = f'{value}%'
@@ -79,8 +88,40 @@ class StreamOptions(QWidget):
             self.scale.setToolTip(snapshot.get('scale_error', ''))
             self.scale.setEnabled(False)
 
+    def _display_resolution_changed(self):
+        if self.display_snapshot:
+            self._populate_refresh(self.display_resolution.currentData())
+
+    def _populate_refresh(self, resolution):
+        snapshot = self.display_snapshot
+        if not snapshot or not isinstance(resolution, list):
+            return
+        modes = snapshot.get('display_modes', [])
+        rates = sorted({int(mode[2]) for mode in modes
+                        if len(mode) == 3 and mode[:2] == resolution and int(mode[2]) > 0})
+        if not rates:
+            rates = list(snapshot.get('refresh_rates', []))
+        current = snapshot.get('current_refresh', 60)
+        self.display_refresh.blockSignals(True)
+        self.display_refresh.clear()
+        for rate in rates:
+            self.display_refresh.addItem(f'{rate} Hz', rate)
+        selected = current if current in rates else (rates[0] if rates else None)
+        if selected is not None:
+            self.display_refresh.setCurrentIndex(self.display_refresh.findData(selected))
+            self._sync_fps(selected)
+        self.display_refresh.setEnabled(bool(rates))
+        self.display_refresh.blockSignals(False)
+
+    def _sync_fps(self, value):
+        index = self.fps.findData(value)
+        if index < 0:
+            self.fps.addItem(f'{value} FPS', value)
+            index = self.fps.findData(value)
+        self.fps.setCurrentIndex(index)
+
     def display_unavailable(self, message):
-        for widget in (self.display_resolution, self.scale):
+        for widget in (self.display_resolution, self.display_refresh, self.scale):
             widget.clear()
             widget.addItem('不可用，请查看下方提示')
             widget.setToolTip(message)
@@ -91,10 +132,12 @@ class StreamOptions(QWidget):
         if not snapshot:
             return None
         resolution = self.display_resolution.currentData()
+        refresh = self.display_refresh.currentData() if self.display_refresh.isEnabled() else snapshot.get('current_refresh', 60)
         scale = self.scale.currentData() if self.scale.isEnabled() else snapshot['scale']
-        if resolution == snapshot['current'] and scale == snapshot['scale']:
+        if (resolution == snapshot['current'] and refresh == snapshot.get('current_refresh', refresh)
+                and scale == snapshot['scale']):
             return None
-        return dict(device=snapshot['device'], resolution=resolution, scale=scale)
+        return dict(device=snapshot['device'], resolution=resolution, refresh=refresh, scale=scale)
 
     def values(self):
         return {name: (widget.currentData() if name == 'mouse_mode' else widget.currentIndex() if isinstance(widget, QComboBox) else

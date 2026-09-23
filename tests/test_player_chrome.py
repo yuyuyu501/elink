@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import numpy as np
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
+from PySide6.QtGui import QImage, QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -102,6 +102,11 @@ def test_fullscreen_uses_entire_video_area_and_f8_remains_accessible():
         app.processEvents()
         assert not player.toolbar.isVisible()
         assert all(not handle.isVisible() for handle in player.resize_handles)
+        QApplication.sendEvent(player, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier))
+        QApplication.sendEvent(player, QKeyEvent(QEvent.Type.KeyRelease, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier))
+        tab_events = [value for kind, value in events if kind == 'input' and value.get('type') == 'key']
+        assert [event['down'] for event in tab_events] == [True, False]
+        events.clear()
         QTest.keyClick(player, Qt.Key.Key_F8)
         app.processEvents()
         assert not player.captured and player.toolbar.isVisible()

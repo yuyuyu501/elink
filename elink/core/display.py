@@ -156,10 +156,19 @@ class WindowsDisplay:
         current = self.mode(device)
         if current is None:
             raise ValidationError('显示器已断开或无法读取当前分辨率。')
-        resolutions = {(m.width, m.height) for m in self.modes(device)}
+        modes = self.modes(device)
+        resolutions = {(m.width, m.height) for m in modes}
         resolutions.add((current.width, current.height))
+        display_modes = sorted({(m.width, m.height, int(m.frequency)) for m in modes
+                                if m.frequency > 0})
+        if (current.width, current.height, int(current.frequency)) not in display_modes:
+            display_modes.append((current.width, current.height, int(current.frequency)))
+        refresh_rates = sorted({rate for width, height, rate in display_modes
+                                if [width, height] == [current.width, current.height]})
         result = dict(device=device, current=[current.width, current.height],
                       resolutions=[list(size) for size in sorted(resolutions, key=lambda x: (-x[0] * x[1], -x[0]))],
+                      display_modes=[list(mode) for mode in display_modes],
+                      current_refresh=int(current.frequency), refresh_rates=refresh_rates,
                       scales=[], scale=None, recommended_scale=None, scale_error='')
         try:
             _, result['scales'], result['scale'], result['recommended_scale'] = self.dpi(device)
@@ -182,10 +191,13 @@ class WindowsDisplay:
         if not isinstance(change, dict) or change.get('device') != before['device']:
             raise ValidationError('显示器已变化，请重新打开画质设置。')
         resolution = change.get('resolution', before['current'])
+        refresh = change.get('refresh', before.get('current_refresh'))
         scale = change.get('scale', before['scale'])
         if (not isinstance(resolution, list) or len(resolution) != 2
                 or any(type(x) is not int for x in resolution) or resolution not in before['resolutions']):
             raise ValidationError('该显示器不支持所选分辨率，请重新读取设置。')
+        if type(refresh) is not int or refresh <= 0:
+            raise ValidationError('该显示器不支持所选刷新率，请重新读取设置。')
         if scale != before['scale'] and (type(scale) is not int or scale not in before['scales']):
             raise ValidationError('该显示器不支持所选系统缩放。')
         device = before['device']
@@ -193,35 +205,40 @@ class WindowsDisplay:
         if original is None:
             raise ValidationError('显示器已断开，请重新读取显示设置。')
         changed_mode = resolution != before['current']
+        changed_refresh = refresh != before.get('current_refresh')
         changed_scale = scale != before['scale']
-        if not changed_mode and not changed_scale:
+        if not changed_mode and not changed_refresh and not changed_scale:
             return before
         # Windows may adjust DPI when a mode changes; retain the explicitly
         # selected percentage even when it matched the old current value.
         apply_scale = changed_scale or (changed_mode and type(scale) is int)
         selected = None
-        if changed_mode:
+        if changed_mode or changed_refresh:
             candidates = [m for m in self.modes(device) if [m.width, m.height] == resolution]
             if not candidates:
                 raise ValidationError('分辨率已不可用，请重新读取设置。')
-            selected = min(candidates, key=lambda m: (m.orientation != original.orientation,
-                                                     abs(m.frequency - original.frequency)))
+            exact = [m for m in candidates if int(m.frequency) == refresh]
+            if not exact:
+                raise ValidationError('该分辨率不支持所选刷新率，请重新读取设置。')
+            selected = min(exact, key=lambda m: (m.orientation != original.orientation,
+                                                  abs(m.frequency - original.frequency)))
             if self.user.ChangeDisplaySettingsExW(device, C.byref(selected), None, 2, None):
-                raise ValidationError('显卡拒绝此分辨率。原显示设置未改变。')
+                raise ValidationError('显卡拒绝此显示模式。原显示设置未改变。')
         try:
-            if changed_mode:
+            if changed_mode or changed_refresh:
                 code = self.user.ChangeDisplaySettingsExW(device, C.byref(selected), None, 0, None)
                 if code:
                     raise ValidationError(f'Windows 修改分辨率失败（{code}）。')
             if apply_scale:
                 self.set_scale(device, scale)
             after = self.snapshot(device)
-            if after['current'] != resolution or (apply_scale and after['scale'] != scale):
+            if (after['current'] != resolution or after.get('current_refresh') != refresh
+                    or (apply_scale and after['scale'] != scale)):
                 raise ValidationError('Windows 未应用所选显示设置。')
             return after
         except Exception as exc:
             failures = []
-            if changed_mode and self.user.ChangeDisplaySettingsExW(device, C.byref(original), None, 0, None):
+            if (changed_mode or changed_refresh) and self.user.ChangeDisplaySettingsExW(device, C.byref(original), None, 0, None):
                 failures.append('分辨率')
             if apply_scale:
                 try:
@@ -232,6 +249,8 @@ class WindowsDisplay:
                 restored = self.snapshot(device)
                 if restored['current'] != before['current'] and '分辨率' not in failures:
                     failures.append('分辨率')
+                if restored.get('current_refresh') != before.get('current_refresh') and '刷新率' not in failures:
+                    failures.append('刷新率')
                 if apply_scale and restored['scale'] != before['scale'] and '缩放' not in failures:
                     failures.append('缩放')
             except Exception:

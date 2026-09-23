@@ -13,17 +13,21 @@ from elink.models import ValidationError
 class FakeDisplay:
     def __init__(self):
         self.current = [1920, 1080]
+        self.refresh = 60
         self.scale = 100
         self.changes = []
 
     def snapshot(self, device=None):
         return dict(device='test-display', current=list(self.current),
                     resolutions=[[2560, 1440], [1920, 1080], [1280, 720]],
+                    display_modes=[[2560, 1440, 60], [1920, 1080, 60], [1920, 1080, 144], [1280, 720, 60]],
+                    current_refresh=self.refresh, refresh_rates=[60, 144],
                     scale=self.scale, scales=[100, 125, 150], recommended_scale=100, scale_error='')
 
     def apply(self, change, device=None):
         self.changes.append(change)
         self.current = change['resolution']
+        self.refresh = change.get('refresh', 60)
         self.scale = change['scale']
         return self.snapshot()
 
@@ -61,7 +65,10 @@ class NativeHarness(WindowsDisplay):
 
     def snapshot(self, device=None):
         return dict(device='test-display', current=list(self.current),
-                    resolutions=[[1920, 1080], [1280, 720]], scale=self.scale, scales=[100, 125])
+                    resolutions=[[1920, 1080], [1280, 720]],
+                    display_modes=[[1920, 1080, 60], [1280, 720, 60]],
+                    current_refresh=60, refresh_rates=[60],
+                    scale=self.scale, scales=[100, 125])
 
     def mode(self, device, index=0xffffffff):
         return DevMode(width=self.current[0], height=self.current[1], frequency=60)

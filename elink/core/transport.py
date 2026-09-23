@@ -57,7 +57,7 @@ def settings(value):
         raise ValidationError("串流设置无效。")
     result = {"width": 1920, "height": 1080, "fps": 60, "bitrate": 20, "audio": True, "follow_display": False}
     result.update({k: v for k, v in value.items() if k in result})
-    for key, low, high in [("width", 640, 1920), ("height", 360, 1080), ("fps", 10, 120), ("bitrate", 1, 80)]:
+    for key, low, high in [("width", 640, 1920), ("height", 360, 1080), ("fps", 10, 360), ("bitrate", 1, 80)]:
         if type(result[key]) is not int or not low <= result[key] <= high:
             raise ValidationError(f"{key} 超出当前版本范围（{low}–{high}）。")
     if result["width"] % 2 or result["height"] % 2 or type(result["audio"]) is not bool or type(result["follow_display"]) is not bool:
@@ -317,8 +317,11 @@ class HostServer:
             before = await asyncio.to_thread(self.display_backend.snapshot, video.display_name)
             result = await video.change_display(lambda: self.display_backend.apply(change, video.display_name))
             if self.display_original is None and (
-                    result.get('current') != before.get('current') or result.get('scale') != before.get('scale')):
-                self.display_original = dict(device=before['device'], resolution=before['current'], scale=before['scale'])
+                    result.get('current') != before.get('current')
+                    or result.get('current_refresh') != before.get('current_refresh')
+                    or result.get('scale') != before.get('scale')):
+                self.display_original = dict(device=before['device'], resolution=before['current'],
+                                             refresh=before.get('current_refresh'), scale=before['scale'])
             return web.json_response(result)
 
     async def delete(self, request):
@@ -376,7 +379,8 @@ class HostServer:
             video = next((track for track in tracks if isinstance(track, DesktopTrack)), None)
             if original and video and self.display_backend:
                 try:
-                    change = dict(device=original['device'], resolution=original['resolution'], scale=original['scale'])
+                    change = dict(device=original['device'], resolution=original['resolution'],
+                                  refresh=original.get('refresh'), scale=original['scale'])
                     await video.change_display(lambda: self.display_backend.apply(change, video.display_name))
                 except Exception as exc:
                     self.notify(f'断开时恢复原显示设置失败：{exc}')

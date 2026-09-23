@@ -111,8 +111,8 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         pump(app, lambda: any(b.isEnabled() and b.text() == '应用并重新连接' for b in dialog.findChildren(QPushButton)))
         options.bitrate.setValue(12)
         options.display_resolution.setCurrentIndex(options.display_resolution.findData([1280, 720]))
+        options.display_refresh.setCurrentIndex(options.display_refresh.findData(60))
         options.scale.setCurrentIndex(options.scale.findData(125))
-        options.fps.setCurrentIndex(options.fps.findData(30))
         session = window.client.session_id
         next(b for b in dialog.findChildren(QPushButton) if b.text() == '应用并重新连接').click()
         pump(app, lambda: window.player is not None and window.player is not player
@@ -120,7 +120,7 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         assert window.client.session_id != session
         assert display.current == [1280, 720] and display.scale == 125
         assert window.client.stats.target_mbps == 12
-        assert window.fps.currentData() == 30
+        assert window.fps.currentData() == 60
         assert window.player.preferences['bitrate'] == 12
         assert window.player.muted and window.client.muted
         assert not window.player.show_statistics
@@ -130,6 +130,7 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         options = dialog.findChild(StreamOptions)
         pump(app, lambda: options.display_snapshot is not None)
         assert options.display_resolution.currentData() == [1280, 720]
+        assert options.display_refresh.currentData() == 60
         assert options.scale.currentData() == 125
         dialog.reject()
         window.player.close()

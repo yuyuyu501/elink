@@ -146,7 +146,7 @@ def test_simultaneous_clients_only_one_enters_negotiation(tmp_path, monkeypatch)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("value", [{"fps": True}, {"fps": 121}, {"width": 1919}, {"audio": 1}, {"bitrate": 81}])
+@pytest.mark.parametrize("value", [{"fps": True}, {"fps": 361}, {"width": 1919}, {"audio": 1}, {"bitrate": 81}])
 def test_invalid_settings(value):
     with pytest.raises(ValidationError):
         settings(value)
