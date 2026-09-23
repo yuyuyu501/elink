@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QScrollArea, QFrame,
                                QVBoxLayout, QWidget)
@@ -127,6 +127,8 @@ class MainWindow(QMainWindow):
         heading.addWidget(self.refresh_button)
         self.manual_button = button("通过地址连接", self.manual_connect)
         heading.addWidget(self.manual_button)
+        self.network_button = button("网络诊断", self.show_network_diagnostics)
+        heading.addWidget(self.network_button)
         layout.addLayout(heading)
         self.discovery_state = text_label("正在寻找同局域网 / Tailscale 中的设备…", "muted")
         layout.addWidget(self.discovery_state)
@@ -194,7 +196,11 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def make_network(self):
-        layout = self.page("网络诊断")
+        self.network_dialog = QDialog(self)
+        self.network_dialog.setWindowTitle("网络诊断")
+        self.network_dialog.setMinimumSize(720, 560)
+        layout = QVBoxLayout(self.network_dialog)
+        layout.setContentsMargins(20, 18, 20, 18)
         layout.addWidget(text_label("无需自建服务器。有可达地址时直接连接；没有直连路径时使用外部 Tailscale。当前未提供独立的公网打洞或中继服务。", "notice"))
         row = QHBoxLayout()
         row.addWidget(button("刷新设备与地址", self.refresh_network))
@@ -217,6 +223,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(button("查看诊断记录 / 收起", lambda: self.log.setVisible(not self.log.isVisible())),
                          alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.log)
+
+    def show_network_diagnostics(self):
+        if self._closing:
+            return
+        self.network_dialog.show()
+        self.network_dialog.raise_()
+        self.network_dialog.activateWindow()
 
     def show_notice(self, message, error=True):
         self.notice.setObjectName("errorNotice" if error else "notice")

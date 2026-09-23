@@ -22,6 +22,7 @@ class CodecPolicy:
     bitrate: int = 20_000_000
     encoder: str = "auto"
     decoder: str = "auto"
+    fixed_priority: bool = True
 
 
 encode_policy = CodecPolicy()
@@ -52,7 +53,8 @@ def make_encoder(name: str, width: int, height: int, policy: CodecPolicy):
     common = rate_control_options(policy)
     if name == "h264_nvenc":
         codec.options = {**common, "preset": "p1", "tune": "ull", "zerolatency": "1", "delay": "0",
-                         "rc": "cbr", "rc-lookahead": "0", "forced-idr": "1", "profile": "baseline"}
+                         "rc": "cbr", "rc-lookahead": "0", "forced-idr": "1", "strict_gop": "1",
+                         "profile": "baseline"}
     elif name == "h264_amf":
         codec.options = {**common, "usage": "ultralowlatency", "quality": "speed", "rc": "cbr", "profile": "baseline"}
     elif name == "h264_qsv":
@@ -78,13 +80,22 @@ class DesktopEncoder(H264Encoder):
 
     @target_bitrate.setter
     def target_bitrate(self, value):
-        # Respect REMB congestion feedback, bounded by the user's requested ceiling.
+        # aiortc's REMB is an estimate of *observed media throughput*. On a
+        # mostly static desktop that estimate can be a few hundred kbps even
+        # when the path has ample capacity. Treating it as the encoder target
+        # creates a feedback loop: REMB lowers the codec, then the pacer lowers
+        # the frame rate, making the next estimate even smaller. Fixed priority
+        # keeps the user's configured target; the encoder's CBR settings keep
+        # quality anchored to that budget.
+        if self.policy.fixed_priority:
+            self._rate = self.policy.bitrate
+            return
         self._rate = max(300_000, min(int(value), self.policy.bitrate))
 
     def _encode_frame(self, frame, force_keyframe):
         # aiortc invokes encoders sequentially. Delaying the next frame in this
         # worker thread smooths frame-sized bursts while keeping the event loop
-        # responsive. Congestion feedback may lower _rate; recovery is gradual.
+        # responsive. In fixed-priority mode _rate remains the user's target.
         now = time.perf_counter()
         if self._pacer_next > now:
             time.sleep(self._pacer_next - now)

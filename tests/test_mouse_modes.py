@@ -34,6 +34,7 @@ def test_smart_switch_local_ack_and_stale_state():
         player.set_mouse_mode('local')
         player.capture()
         assert not player.game_mouse and player.cursor().shape() == Qt.CursorShape.BlankCursor
+        assert player.software_cursor
         client.cursor_applied = 'local'
         player.update_mouse()
         assert player.cursor().shape() == Qt.CursorShape.BlankCursor
@@ -48,7 +49,7 @@ def test_smart_switch_local_ack_and_stale_state():
         player.update_mouse()
         assert player.cursor().shape() == Qt.CursorShape.BlankCursor
         player.release()
-        assert player.cursor().shape() != Qt.CursorShape.BlankCursor
+        assert player.cursor().shape() != Qt.CursorShape.BlankCursor and not player.software_cursor
         client.cursor_supported = False
         player.open_controls()
         actions = player.control_menu.actions()

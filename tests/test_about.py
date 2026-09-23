@@ -33,7 +33,7 @@ def test_about_check_channel_error_and_no_network_at_start(tmp_path, monkeypatch
     monkeypatch.setattr(updates, "check_release", check)
     window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
     try:
-        assert window.tabs.tabText(3) == "关于"
+        assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["设备", "设置", "关于"]
         app.processEvents()
         assert not calls
         window.about.previews.setChecked(False)

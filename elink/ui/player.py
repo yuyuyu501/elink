@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QActionGroup
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPolygon, QActionGroup
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QMenu, QDialog
 
 from .controls import StreamOptions
@@ -58,6 +58,8 @@ class Player(QWidget):
         self.mouse_mode = mouse_mode(self.preferences.get('mouse_mode', 'remote' if game_mouse else 'smart'))
         self.game_mouse = False  # Effective input mapping; independent of cursor rendering.
         self.local_cursor = False
+        self.software_cursor = False
+        self.software_cursor_pos = QPoint()
         if hasattr(client, 'set_cursor_mode'):
             self.runtime.call(client.set_cursor_mode, self.mouse_mode)
         self.muted = False
@@ -305,6 +307,9 @@ class Player(QWidget):
             # Qt input remains usable if another process prevents a low-level
             # hook. The notice makes the limitation visible during testing.
             self.show_error(f"无法拦截 Windows 系统快捷键：{exc}")
+        self.software_cursor_pos = self.mapFromGlobal(QCursor.pos())
+        if not self.rect_image.contains(self.software_cursor_pos):
+            self.software_cursor_pos = self.rect_image.center()
         self.update_mouse(force=True)
 
     def update_mouse(self, force=False):
@@ -316,11 +321,14 @@ class Player(QWidget):
         relative = relative_mouse(self.mouse_mode, visible)
         if not supported and self.mouse_mode == 'smart':
             relative = False  # Older hosts cannot report whether games hide their cursor.
-        # The remote frame may contain a game-drawn pointer. Keeping the
-        # controller's Windows cursor visible in local mode would therefore
-        # produce two pointers. The pointer is injected into the host and the
-        # game renders the single visible cursor in the stream.
+        # The host omits its system cursor in local mode. Keep the controller's
+        # OS cursor hidden and paint a software arrow over the received frame;
+        # this avoids a duplicate cursor while still making the pointer visible.
         local = False
+        software = self.captured and self.mouse_mode == 'local'
+        if force or software != self.software_cursor:
+            self.software_cursor = software
+            self.update()
         if force or relative != self.game_mouse:
             if relative:
                 self.grabMouse()
@@ -338,6 +346,8 @@ class Player(QWidget):
         self.runtime.call(self.client.focus, False)
         self.releaseMouse()
         self.unsetCursor()
+        self.software_cursor = False
+        self.update()
         if self.xinput:
             for index in self.pad_indices:
                 self.xinput.rumble(index)
@@ -388,6 +398,8 @@ class Player(QWidget):
             if self.new_image:
                 self.drawn += 1
                 self.new_image = False
+        if self.software_cursor and not self.rect_image.isEmpty():
+            self.draw_software_cursor(painter)
         if self.show_statistics:
             snapshot = getattr(self.client, "stats", StreamStats())
             now = time.monotonic()
@@ -411,6 +423,21 @@ class Player(QWidget):
             painter.fillRect(8, self.height() - 36, min(630, self.width() - 16), 28, QColor(0, 0, 0, 160))
             painter.setPen(QColor('#ffffff'))
             painter.drawText(18, self.height() - 17, status)
+
+    def draw_software_cursor(self, painter):
+        point = self.software_cursor_pos
+        if not self.rect_image.contains(point):
+            return
+        x, y = point.x(), point.y()
+        arrow = QPolygon([QPoint(x, y), QPoint(x + 2, y + 20),
+                          QPoint(x + 7, y + 15), QPoint(x + 14, y + 24),
+                          QPoint(x + 18, y + 21), QPoint(x + 11, y + 12),
+                          QPoint(x + 19, y + 11)])
+        painter.save()
+        painter.setPen(QColor('#000000'))
+        painter.setBrush(QColor('#ffffff'))
+        painter.drawPolygon(arrow)
+        painter.restore()
 
     def keyPressEvent(self, event):
         if event.isAutoRepeat():
@@ -450,6 +477,9 @@ class Player(QWidget):
                 self.send({"type": "move", "absolute": False, "x": delta.x(), "y": delta.y()})
                 QCursor.setPos(self.mapToGlobal(center))
         elif not self.rect_image.isEmpty():
+            self.software_cursor_pos = event.position().toPoint()
+            if self.software_cursor:
+                self.update()
             rect = self.rect_image
             x = max(0, min(65535, int((event.position().x() - rect.x()) * 65535 / max(1, rect.width() - 1))))
             y = max(0, min(65535, int((event.position().y() - rect.y()) * 65535 / max(1, rect.height() - 1))))

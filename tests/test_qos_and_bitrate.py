@@ -10,6 +10,17 @@ def test_rate_control_options_include_cbr_budget():
     }
 
 
+def test_fixed_priority_encoder_ignores_low_remb_feedback():
+    from elink.core.codecs import CodecPolicy, DesktopEncoder
+
+    encoder = DesktopEncoder(CodecPolicy(bitrate=30_000_000))
+    encoder.target_bitrate = 400_000
+    assert encoder.target_bitrate == 30_000_000
+    adaptive = DesktopEncoder(CodecPolicy(bitrate=30_000_000, fixed_priority=False))
+    adaptive.target_bitrate = 400_000
+    assert adaptive.target_bitrate == 400_000
+
+
 def test_mark_rtc_sockets_sets_ipv4_dscp():
     from elink.core.qos import mark_rtc_sockets
 
