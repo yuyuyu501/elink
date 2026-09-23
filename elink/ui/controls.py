@@ -17,6 +17,7 @@ class StreamOptions(QWidget):
         self.display_snapshot = None
         self.display_resolution = QComboBox()
         self.display_refresh = QComboBox()
+        self.display_refresh.currentIndexChanged.connect(self._display_refresh_changed)
         self.scale = QComboBox()
         if remote_display:
             self.display_resolution.addItem('正在读取被控端…')
@@ -91,6 +92,11 @@ class StreamOptions(QWidget):
     def _display_resolution_changed(self):
         if self.display_snapshot:
             self._populate_refresh(self.display_resolution.currentData())
+
+    def _display_refresh_changed(self):
+        value = self.display_refresh.currentData()
+        if isinstance(value, int) and value > 0:
+            self._sync_fps(value)
 
     def _populate_refresh(self, resolution):
         snapshot = self.display_snapshot

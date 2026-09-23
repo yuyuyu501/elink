@@ -110,6 +110,9 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         options = dialog.findChild(StreamOptions)
         pump(app, lambda: any(b.isEnabled() and b.text() == '应用并重新连接' for b in dialog.findChildren(QPushButton)))
         options.bitrate.setValue(12)
+        options.display_refresh.setCurrentIndex(options.display_refresh.findData(144))
+        assert options.fps.currentData() == 144
+        options.display_refresh.setCurrentIndex(options.display_refresh.findData(60))
         options.display_resolution.setCurrentIndex(options.display_resolution.findData([1280, 720]))
         options.display_refresh.setCurrentIndex(options.display_refresh.findData(60))
         options.scale.setCurrentIndex(options.scale.findData(125))
