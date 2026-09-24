@@ -75,16 +75,18 @@ def test_titlebar_buttons_and_double_click_stay_local():
         player.close()
 
 
-def test_rgb_frame_is_presented_without_a_second_qimage_copy():
+def test_bgr_frame_is_presented_without_a_second_qimage_copy():
     app, player, events = make_player()
     pixels = np.zeros((8, 12, 3), dtype=np.uint8)
-    pixels[2, 3] = [10, 20, 30]
+    # The receive path now keeps decoder output in BGR888 so QImage can wrap
+    # it directly without a channel-shuffling copy.
+    pixels[2, 3] = [30, 20, 10]
     try:
         player.set_frame_pixels(pixels)
         assert player.image_pixels is pixels
         assert player.image.pixelColor(3, 2).getRgb()[:3] == (10, 20, 30)
         pixels[2, 3] = [40, 50, 60]
-        assert player.image.pixelColor(3, 2).getRgb()[:3] == (40, 50, 60)
+        assert player.image.pixelColor(3, 2).getRgb()[:3] == (60, 50, 40)
     finally:
         player.close()
 

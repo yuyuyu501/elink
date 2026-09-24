@@ -13,6 +13,7 @@ class StreamStats:
     route: str = "连接中"
     target_mbps: int = 0
     sampled_at: float = 0.0
+    encoder: str = "--"
 
 
 def is_tailnet(address):
@@ -82,8 +83,9 @@ def overlay_lines(snapshot, fps, rtt_ms, connected=True, fresh=True):
     def number(value, suffix, digits=1):
         return f'{value:.{digits}f} {suffix}' if connected and fresh and value is not None else f'-- {suffix}'
     rx_mbps = snapshot.rx_kbps / 1000 if snapshot.rx_kbps is not None else None
+    encoder = snapshot.encoder if connected and fresh and snapshot.encoder else '--'
+    decoder = snapshot.decoder if connected and fresh and snapshot.decoder else '--'
     lines += [number(rx_mbps, 'Mbps'), number(rtt_ms, 'ms RTT'),
-              number(snapshot.decode_ms, 'ms decode'),
-              snapshot.decoder if connected and fresh and snapshot.decoder else '--',
+              number(snapshot.decode_ms, 'ms decode'), f'编码 {encoder}', f'解码 {decoder}',
               number(snapshot.loss_percent, '% loss', 2)]
     return lines

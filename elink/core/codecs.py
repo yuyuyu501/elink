@@ -49,7 +49,11 @@ def make_encoder(name: str, width: int, height: int, policy: CodecPolicy):
     codec.bit_rate = policy.bitrate
     codec.gop_size = policy.fps
     codec.max_b_frames = 0
-    codec.thread_count = 2
+    # Software H.264 benefits from a small amount of frame/slice parallelism.
+    # Hardware encoders have their own scheduler and should keep the driver
+    # default rather than receiving a software thread hint.
+    if name not in ("h264_nvenc", "h264_amf", "h264_qsv"):
+        codec.thread_count = 4
     common = rate_control_options(policy)
     if name == "h264_nvenc":
         codec.options = {**common, "preset": "p1", "tune": "ull", "zerolatency": "1", "delay": "0",
@@ -136,7 +140,10 @@ class DesktopDecoder(H264Decoder):
                 self.codec = av.CodecContext.create("h264", "r")
         else:
             self.codec = av.CodecContext.create("h264", "r")
-        self.codec.thread_count = 1
+        # Software decoding can use four worker threads. D3D11VA keeps its
+        # driver-managed scheduling and must not receive this hint.
+        if not self.hardware:
+            self.codec.thread_count = 4
         self.codec.flags |= 0x80000  # AV_CODEC_FLAG_LOW_DELAY
 
     def decode(self, encoded_frame):
@@ -152,7 +159,7 @@ class DesktopDecoder(H264Decoder):
             if self.hardware and self.mode == "auto":
                 self.hardware = False
                 self.codec = av.CodecContext.create("h264", "r")
-                self.codec.thread_count = 1
+                self.codec.thread_count = 4
                 try:
                     frames = self.codec.decode(packet)
                 except av.FFmpegError:

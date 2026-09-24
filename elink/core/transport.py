@@ -249,7 +249,8 @@ class HostServer:
                                 video = next((t for t in self.tracks if isinstance(t, DesktopTrack)), None)
                                 feedback({"type": "pong", "time": stamp,
                                           'cursor_mode': video.cursor_mode if video else 'remote',
-                                          'cursor_visible': video.cursor_visible if video else None})
+                                          'cursor_visible': video.cursor_visible if video else None,
+                                          'encoder': codecs.metrics.get('encoder', '未启动')})
                             return
                         input_session.receive(raw, reliable)
                     except Exception as exc:
@@ -490,6 +491,7 @@ class Client:
         self.lock = asyncio.Lock()
         self.close_task = None
         self.stats = StreamStats()
+        self.encoder = "--"
         self.display_supported = False
         self.cursor_supported = False
         self.cursor_mode = 'smart'
@@ -525,6 +527,7 @@ class Client:
             self.stats = StreamStats(target_mbps=config["bitrate"])
             self.route_probe = None
             codecs.metrics.update(decoder="未启动", decode_ms=0.0)
+            self.encoder = "--"
             self.connected_at = time.monotonic()
             self.last_pong = self.connected_at
             self.control = pc.createDataChannel("control", ordered=True)
@@ -557,6 +560,9 @@ class Client:
                             visible = event.get('cursor_visible')
                             self.cursor_visible = visible if type(visible) is bool else None
                             self.cursor_updated = time.monotonic()
+                        encoder = event.get('encoder')
+                        if isinstance(encoder, str) and encoder in ('h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'):
+                            self.encoder = encoder
                     elif event.get("type") == "ended":
                         self.schedule_disconnect()
                     elif event.get("type") == "warning":
@@ -657,7 +663,8 @@ class Client:
                 recent = self.mailbox.received and now - self.mailbox.updated < 2
                 self.stats = StreamStats(rx, loss, jitter,
                                          codecs.metrics['decode_ms'] if recent else None,
-                                         codecs.metrics['decoder'] if recent else '--', route, target, now)
+                                         codecs.metrics['decoder'] if recent else '--', route, target, now,
+                                         self.encoder if recent else '--')
             except Exception:
                 # Telemetry failure must never interrupt input or media; UI expires it.
                 pass
@@ -675,7 +682,10 @@ class Client:
                 frame = await track.recv()
                 if track.kind == "video":
                     started = time.perf_counter()
-                    pixels = await asyncio.to_thread(frame.to_ndarray, format="rgb24")
+                    # QImage can wrap BGR888 directly. This avoids the RGB
+                    # channel shuffle and keeps the ndarray owner alive until
+                    # the next frame replaces it.
+                    pixels = await asyncio.to_thread(frame.to_ndarray, format="bgr24")
                     codecs.metrics["convert_ms"] = (time.perf_counter() - started) * 1000
                     self.mailbox.put(pixels)
                 else:
