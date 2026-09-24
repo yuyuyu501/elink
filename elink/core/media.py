@@ -34,6 +34,7 @@ class DesktopTrack(MediaStreamTrack):
         self.start_time = None
         self.next_time = 0.0
         self.frame_count = 0
+        self.capture_future = None
 
     def capture(self):
         started = time.perf_counter()
@@ -107,7 +108,18 @@ class DesktopTrack(MediaStreamTrack):
             raise MediaStreamError
         now = time.perf_counter()
         self.next_time = max(self.next_time + 1 / self.fps, now)
-        frame = await asyncio.get_running_loop().run_in_executor(self.executor, self.capture)
+        loop = asyncio.get_running_loop()
+        # Capture and color conversion can overlap the sender's H.264 encode:
+        # while aiortc encodes the current frame, the single capture worker
+        # prepares the next one. This removes the previous capture -> encode
+        # bubble without allowing multiple capture calls to pile up.
+        future = self.capture_future
+        if future is None:
+            future = loop.run_in_executor(self.executor, self.capture)
+        self.capture_future = None
+        frame = await future
+        if self.readyState == "live":
+            self.capture_future = loop.run_in_executor(self.executor, self.capture)
         frame.pts = int((now - self.start_time) * 90000)
         frame.time_base = fractions.Fraction(1, 90000)
         self.frame_count += 1
@@ -117,6 +129,9 @@ class DesktopTrack(MediaStreamTrack):
         if self.readyState != "live":
             return
         super().stop()
+        if self.capture_future is not None:
+            self.capture_future.cancel()
+            self.capture_future = None
         def release():
             if self.camera:
                 self.camera.release()
