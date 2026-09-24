@@ -5,7 +5,7 @@ import time
 import aiohttp
 import pytest
 
-from elink.core.input import InputSession, RecordingInput
+from elink.core.input import InputSession, RawMouseInput, RecordingInput, _RawInput
 from elink.core.security import Identity
 from elink.core.transport import Client, HostServer, request, settings
 from elink.models import Endpoint, ValidationError
@@ -32,6 +32,20 @@ def test_input_replay_focus_and_watchdog():
     assert not send(dict(move, seq=3), False)
     assert not session.receive("[]")
     assert not session.receive("x" * 3000)
+
+
+def test_raw_mouse_input_decodes_relative_payload_without_mouse_attribute():
+    raw = _RawInput()
+    raw.header.dwType = RawMouseInput._RIM_TYPEMOUSE
+    raw.data.usFlags = 0
+    raw.data.lLastX = -17
+    raw.data.lLastY = 23
+    assert RawMouseInput._relative_delta(raw) == (-17, 23)
+
+    raw.data.usFlags = RawMouseInput._MOUSE_MOVE_ABSOLUTE
+    assert RawMouseInput._relative_delta(raw) is None
+    raw.header.dwType = 1
+    assert RawMouseInput._relative_delta(raw) is None
 
 
 async def until(predicate, timeout=15):

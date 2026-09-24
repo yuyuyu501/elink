@@ -70,6 +70,20 @@ class RawMouseInput:
     _RIDEV_INPUTSINK = 0x00000100
     _MOUSE_MOVE_ABSOLUTE = 0x0001
 
+    @classmethod
+    def _relative_delta(cls, raw):
+        """Return a relative mouse delta from a decoded RAWINPUT value.
+
+        ``_RawInput`` exposes its payload as ``data`` (and anonymously exposes
+        the mouse fields themselves).  Keeping this access in one small helper
+        prevents the Windows hook from accidentally using the unrelated
+        high-level ``Input`` union, which has a ``mouse`` member but RAWINPUT
+        does not.
+        """
+        if raw.header.dwType != cls._RIM_TYPEMOUSE or raw.data.usFlags & cls._MOUSE_MOVE_ABSOLUTE:
+            return None
+        return int(raw.data.lLastX), int(raw.data.lLastY)
+
     def __init__(self):
         self._user32 = None
         self._hwnd = None
@@ -117,9 +131,7 @@ class RawMouseInput:
         if result == 0xffffffff:
             return None
         raw = c.cast(buffer, c.POINTER(_RawInput)).contents
-        if raw.header.dwType != self._RIM_TYPEMOUSE or raw.mouse.usFlags & self._MOUSE_MOVE_ABSOLUTE:
-            return None
-        return int(raw.mouse.lLastX), int(raw.mouse.lLastY)
+        return self._relative_delta(raw)
 
     def __del__(self):
         try:

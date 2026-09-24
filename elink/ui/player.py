@@ -416,8 +416,11 @@ class Player(QWidget):
                     or self._scaled_viewport_size != viewport_size):
                 # Scale once per received frame/viewport change. Previously
                 # QPainter repeated the conversion on every 8 ms repaint.
-                self._scaled_image = self.image.scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
-                                                       Qt.TransformationMode.SmoothTransformation)
+                # A 1:1 frame needs no resampling; reusing the original QImage
+                # saves a full-frame CPU pass and keeps desktop text pixel sharp.
+                self._scaled_image = (self.image if self.image.size() == size else
+                                      self.image.scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
+                                                        Qt.TransformationMode.SmoothTransformation))
                 self._scaled_image_size = size
                 self._scaled_viewport_size = viewport_size
             started = time.perf_counter()
