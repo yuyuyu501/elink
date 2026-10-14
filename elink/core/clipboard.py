@@ -5,11 +5,16 @@ import ctypes as C
 from ctypes import wintypes as W
 import os
 import time
+import threading
 
 
 MAX_CLIPBOARD_CHARS = 64_000
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
+
+# The host and client may both poll in this process. Serialize complete native
+# clipboard transactions, including reads which can trigger format conversion.
+_clipboard_lock = threading.Lock()
 
 
 if os.name == "nt":
@@ -33,6 +38,8 @@ if os.name == "nt":
     _kernel32.GlobalAlloc.restype = W.HGLOBAL
     _kernel32.GlobalFree.argtypes = [W.HGLOBAL]
     _kernel32.GlobalFree.restype = W.HGLOBAL
+    _kernel32.GlobalSize.argtypes = [W.HGLOBAL]
+    _kernel32.GlobalSize.restype = C.c_size_t
 
 
 def _open_clipboard():
@@ -47,6 +54,11 @@ def _open_clipboard():
 
 def read_text() -> str | None:
     """Read Unicode text, or return None when the clipboard is unavailable."""
+    with _clipboard_lock:
+        return _read_text_locked()
+
+
+def _read_text_locked():
     if not _open_clipboard():
         return None
     try:
@@ -57,7 +69,12 @@ def read_text() -> str | None:
         if not pointer:
             return None
         try:
-            return C.wstring_at(pointer)[:MAX_CLIPBOARD_CHARS]
+            size = min(_kernel32.GlobalSize(handle), (MAX_CLIPBOARD_CHARS + 1) * 2)
+            if size < 2:
+                return None
+            # Bound the read by the actual allocation, even for malformed text
+            # without a terminating NUL. Decode only complete UTF-16 units.
+            return C.string_at(pointer, size // 2 * 2).decode('utf-16-le', errors='replace').split('\x00', 1)[0][:MAX_CLIPBOARD_CHARS]
         finally:
             _kernel32.GlobalUnlock(handle)
     except (OSError, ValueError):
@@ -68,6 +85,11 @@ def read_text() -> str | None:
 
 def write_text(value: str) -> bool:
     """Replace the clipboard with Unicode text; return whether it succeeded."""
+    with _clipboard_lock:
+        return _write_text_locked(value)
+
+
+def _write_text_locked(value):
     if os.name != "nt" or not isinstance(value, str):
         return False
     value = value[:MAX_CLIPBOARD_CHARS]

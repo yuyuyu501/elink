@@ -18,7 +18,6 @@ from elink.ui.controls import StreamOptions
 from elink.ui.window import MainWindow
 from elink.ui.theme import apply_theme
 from test_window import pump
-from test_display import FakeDisplay
 
 
 def close(window, app):
@@ -67,8 +66,7 @@ def test_device_single_click_failure_and_refresh_preserves_busy(tmp_path, monkey
 def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(tmp_path / 'ui', auto_refresh=False, auto_host=False)
-    display = FakeDisplay()
-    host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput, display_backend=display)
+    host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput)
     async def start():
         return await host.start('127.0.0.1', 0)
     future = window.runtime.submit(start())
@@ -100,28 +98,32 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         options = dialog.findChild(StreamOptions)
         pump(app, lambda: any(b.isEnabled() and b.text() == '应用并重新连接' for b in dialog.findChildren(QPushButton)))
         options.bitrate.setValue(17)
-        assert options.display_resolution.currentData() == [1920, 1080]
-        options.display_resolution.setCurrentIndex(options.display_resolution.findData([2560, 1440]))
+        assert options.resolution.currentData() == [1920, 1080]
+        options.resolution.setCurrentIndex(options.resolution.findData([2560, 1440]))
         dialog.reject()
         assert window.bitrate.value() == 20
-        assert not display.changes
+        assert window.resolution.currentData() == [1920, 1080]
         player.open_quality()
         dialog = player.settings_dialog
         options = dialog.findChild(StreamOptions)
         pump(app, lambda: any(b.isEnabled() and b.text() == '应用并重新连接' for b in dialog.findChildren(QPushButton)))
         options.bitrate.setValue(12)
-        options.display_refresh.setCurrentIndex(options.display_refresh.findData(144))
+        options.resolution.setCurrentIndex(options.resolution.findData([3840, 2160]))
+        options.fps.setCurrentIndex(options.fps.findData(120))
+        next(b for b in dialog.findChildren(QPushButton) if b.text() == '应用并重新连接').click()
+        assert player.settings_dialog is dialog and window.player is player
+        assert window.bitrate.value() == 20  # Invalid settings don't disconnect or persist.
+        options.fps.setCurrentIndex(options.fps.findData(144))
         assert options.fps.currentData() == 144
-        options.display_refresh.setCurrentIndex(options.display_refresh.findData(60))
-        options.display_resolution.setCurrentIndex(options.display_resolution.findData([1280, 720]))
-        options.display_refresh.setCurrentIndex(options.display_refresh.findData(60))
-        options.scale.setCurrentIndex(options.scale.findData(125))
+        options.resolution.setCurrentIndex(options.resolution.findData([1280, 720]))
+        options.fps.setCurrentIndex(options.fps.findData(60))
         session = window.client.session_id
         next(b for b in dialog.findChildren(QPushButton) if b.text() == '应用并重新连接').click()
         pump(app, lambda: window.player is not None and window.player is not player
              and window.player.image is not None, timeout=25)
         assert window.client.session_id != session
-        assert display.current == [1280, 720] and display.scale == 125
+        assert window.player.image.width() == 1280 and window.player.image.height() == 720
+        assert window.resolution.currentData() == [1280, 720]
         assert window.client.stats.target_mbps == 12
         assert window.fps.currentData() == 60
         assert window.player.preferences['bitrate'] == 12
@@ -131,14 +133,18 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         window.player.open_quality()
         dialog = window.player.settings_dialog
         options = dialog.findChild(StreamOptions)
-        pump(app, lambda: options.display_snapshot is not None)
-        assert options.display_resolution.currentData() == [1280, 720]
-        assert options.display_refresh.currentData() == 60
-        assert options.scale.currentData() == 125
+        assert options.resolution.currentData() == [1280, 720]
+        assert options.fps.currentData() == 60
+        assert not hasattr(options, 'scale')
         dialog.reject()
         window.player.close()
         pump(app, lambda: window.player is None and not window.busy)
         assert window.client.pc is None
+        import json
+        assert json.loads(window.config_path.read_text(encoding='utf-8'))['stream_resolution'] == [1280, 720]
+        window.resolution.setCurrentIndex(0)
+        window.load_config()
+        assert window.resolution.currentData() == [1280, 720]
     finally:
         stopped = window.runtime.submit(host.stop())
         pump(app, stopped.done)

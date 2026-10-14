@@ -19,12 +19,10 @@ from .codecs import metrics
 class DesktopTrack(MediaStreamTrack):
     kind = "video"
 
-    def __init__(self, width: int, height: int, fps: int, synthetic: bool = False, follow_display: bool = False):
+    def __init__(self, width: int, height: int, fps: int, synthetic: bool = False):
         super().__init__()
         self.width, self.height, self.fps = width, height, fps
         self.synthetic = synthetic
-        self.follow_display = follow_display
-        self.display_name = None
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="elink-capture")
         self.camera = None
         self.cursor = None
@@ -48,7 +46,6 @@ class DesktopTrack(MediaStreamTrack):
                 if not getattr(self, "com_initialized", False):
                     self.com_initialized = ctypes.windll.ole32.CoInitializeEx(None, 2) in (0, 1)
                 self.camera = dxcam.create(output_color="BGR", max_buffer_len=2)
-                self.display_name = self.camera._output.devicename
                 # Let DXGI capture run continuously so a slow encode or color
                 # conversion cannot stall the desktop producer. The sender
                 # consumes the newest frame at the configured stream cadence.
@@ -76,25 +73,9 @@ class DesktopTrack(MediaStreamTrack):
             if self.cursor_mode != 'local':
                 pixels = self.cursor.composite(pixels, (output.left, output.top))
         frame = av.VideoFrame.from_ndarray(pixels, format="bgr24")
-        if self.follow_display and not self.synthetic:
-            from .display import stream_size
-            width, height = stream_size(pixels.shape[1], pixels.shape[0])
-        else:
-            width, height = self.width, self.height
-        frame = frame.reformat(width=width, height=height, format="yuv420p")
+        frame = frame.reformat(width=self.width, height=self.height, format="yuv420p")
         metrics["capture_ms"] = (time.perf_counter() - started) * 1000
         return frame
-
-    async def change_display(self, callback):
-        # Serialize the mode switch with capture: release DXGI before Windows
-        # invalidates it, then recreate duplication on the next captured frame.
-        def change():
-            if self.camera:
-                self.camera.release()
-                self.camera = None
-            self.last = None
-            return callback()
-        return await asyncio.get_running_loop().run_in_executor(self.executor, change)
 
     async def recv(self):
         if self.readyState != "live":

@@ -34,7 +34,7 @@ Elink 不再导入 GameStream 适配模块，不使用 Sunshine/Moonlight 可执
 
 发送端不排队捕获帧；音频采集保留至多 3 帧。解码输入最多 4 帧，视频溢出丢弃旧队列并请求 IDR；解码后视频至多 1 帧，GUI 至多 1 帧；音频输出队列至多 5 帧。aiortc 版本固定为 1.14.0，编解码工厂及接收队列适配依赖其内部接口，升级必须重测。
 
-视频协商 H.264 level 5.2，当前设置限制 1080p / 120 FPS / 80 Mbps。编码码率响应 RTCP REMB 上限。当前接收端仍执行 RGB 转换并把 RGB 缓冲交给 Qt；已移除 `QImage.copy()` 的第二次像素复制，但还没有实现 D3D11 纹理到 Qt 的全链路零拷贝。`decode_ms` 只代表解码调用，`convert_ms` 代表帧到 RGB 的转换，`present_ms` 代表 Qt 绘制调用，三者不能相加为端到端延迟。UI 显示的通道 RTT、显示 FPS、解码器来自实际状态；没有端到端延迟承诺。
+视频协商 H.264 level 5.2；0.4.21 起支持独立串流分辨率至 4K，按宏块速率限制分辨率/帧率组合（预设 4K60、1440p144、1080p240），码率范围仍为 1–80 Mbps。这不是性能保证。采集后按指定尺寸编码，不再修改被控端的系统分辨率、刷新率或 DPI。当前固定优先策略以用户码率为编码预算，不直接跟随低流量 REMB 值下降。接收端仍执行 BGR 转换并把缓冲交给 Qt；已移除 `QImage.copy()` 的第二次像素复制，但未实现 D3D11 纹理全链路零拷贝。`decode_ms` 只代表解码调用，`convert_ms` 代表帧到 BGR 的转换，`present_ms` 代表 Qt 绘制调用（不含此前缩放）；三者不能相加为端到端延迟。后续测量和优化参考见 [论文与技术路线](streaming-research.md)。
 
 后续媒体优化采用 Python 控制平面加原生媒体平面：Python 保留 WebRTC、网络、输入、设备发现、配置、更新和 UI；D3D11/NVDEC/NVENC 纹理路径逐步下沉到 Windows 原生 DLL，通过窄接口把 GPU surface 交给 Qt RHI 或 Direct3D 渲染。PyInstaller 只会携带 Python 运行时，Nuitka 可把部分 Python 编译为 C/C++ 产物，Cython 适合局部热点；这些工具都不会自动把现有程序转换成完整的 D3D11/C++ 零拷贝实现。D3D11 作为当前 Windows 首选后端，因为 FFmpeg D3D11VA、NVENC 和 Qt/Direct3D 互操作更成熟；D3D12 暂作为实验后端，不能假定它天然降低延迟。Android 后续使用 MediaCodec + Surface，不复用 Windows D3D11 模块。
 

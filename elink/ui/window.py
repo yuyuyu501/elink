@@ -171,7 +171,7 @@ class MainWindow(QMainWindow):
     def make_host(self):
         layout = self.page("设置", scroll=True)
         layout.addWidget(text_label("本机连接设置", "pageTitle"))
-        layout.addWidget(text_label("画质与显示设置请在远控窗口的控制中心调整。这里仅设置本机接入方式。", "muted"))
+        layout.addWidget(text_label("画质与传输设置请在远控窗口的控制中心调整。这里仅设置本机接入方式。", "muted"))
         self.options = StreamOptions(self)
         self.options.hide()
         for name in StreamOptions.fields:
@@ -277,7 +277,8 @@ class MainWindow(QMainWindow):
         self.save_config()
         self.show_notice(f"正在连接 {address}…", error=False)
         self.set_busy(True)
-        config = dict(width=1920, height=1080, follow_display=True, fps=self.fps.currentData(), bitrate=self.bitrate.value(), audio=self.audio.isChecked())
+        width, height = self.resolution.currentData()
+        config = dict(width=width, height=height, follow_display=False, fps=self.fps.currentData(), bitrate=self.bitrate.value(), audio=self.audio.isChecked())
         host = self.selected_host
         addresses = [address]
         if host and address in host.routes:
@@ -358,7 +359,7 @@ class MainWindow(QMainWindow):
             if not self._closing:
                 self.address.setText(address)
                 self.connect_remote()
-        self.runtime.submit(self.client.disconnect(restore_display=False), reconnect, self.connect_failed)
+        self.runtime.submit(self.client.disconnect(), reconnect, self.connect_failed)
 
     def start_host(self):
         if self._closing or self.host_starting or self.server and self.server.runner:
@@ -531,7 +532,8 @@ class MainWindow(QMainWindow):
             for name in ("fps", "decoder"):
                 widget = getattr(self, name)
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value.get(name, 0))))
-            self.options.restore({'mouse_mode': value.get('mouse_mode', 'smart')})
+            self.options.restore({'mouse_mode': value.get('mouse_mode', 'smart'),
+                                  'resolution': value.get('stream_resolution', [1920, 1080])})
             for name in ("audio", "controllers"):
                 getattr(self, name).setChecked(value.get(name, True))
         except (ValueError, TypeError, OSError, AttributeError) as exc:
@@ -547,6 +549,7 @@ class MainWindow(QMainWindow):
         for name in ("fps", "decoder"):
             value[name] = getattr(self, name).currentIndex()
         value['mouse_mode'] = self.mouse_mode.currentData()
+        value['stream_resolution'] = self.resolution.currentData()
         for name in ("audio", "controllers"):
             value[name] = getattr(self, name).isChecked()
         try:

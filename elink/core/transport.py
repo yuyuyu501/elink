@@ -26,8 +26,8 @@ from .statistics import StreamStats, ReceiveSampler, selected_route
 
 
 def video_preferences(pc):
-    # High profile keeps CABAC enabled at the same bitrate, which is important
-    # for fine game foliage and text. Level 5.2 covers the 1080p120 ceiling.
+    # High profile enables CABAC. Level 5.2 covers up to 4K60; settings()
+    # validates the macroblock rate for higher frame rates.
     import copy
     preferences = copy.deepcopy([c for c in RTCRtpSender.getCapabilities("video").codecs if c.mimeType.lower() == "video/h264"])
     for codec in preferences:
@@ -58,11 +58,16 @@ def settings(value):
         raise ValidationError("串流设置无效。")
     result = {"width": 1920, "height": 1080, "fps": 60, "bitrate": 20, "audio": True, "follow_display": False}
     result.update({k: v for k, v in value.items() if k in result})
-    for key, low, high in [("width", 640, 1920), ("height", 360, 1080), ("fps", 10, 360), ("bitrate", 1, 80)]:
+    for key, low, high in [("width", 640, 3840), ("height", 360, 2160), ("fps", 10, 360), ("bitrate", 1, 80)]:
         if type(result[key]) is not int or not low <= result[key] <= high:
             raise ValidationError(f"{key} 超出当前版本范围（{low}–{high}）。")
     if result["width"] % 2 or result["height"] % 2 or type(result["audio"]) is not bool or type(result["follow_display"]) is not bool:
         raise ValidationError("分辨率必须为偶数，音频开关必须为布尔值。")
+    if ((result['width'] + 15) // 16) * ((result['height'] + 15) // 16) * result['fps'] > 2_073_600:
+        raise ValidationError('所选分辨率与帧率超过 H.264 Level 5.2 范围，请降低帧率（4K 最高 60 FPS，1440p 最高 144 FPS）。')
+    # Old clients may send follow_display=True. The stream now always uses
+    # the requested dimensions; neither client can mutate the host display.
+    result['follow_display'] = False
     return result
 
 
@@ -75,7 +80,7 @@ async def errors(request, handler):
 
 
 class HostServer:
-    def __init__(self, root: Path, *, synthetic=False, backend_factory=None, notify=lambda message: None, pad_backend="vigem", scope=None, display_backend=None):
+    def __init__(self, root: Path, *, synthetic=False, backend_factory=None, notify=lambda message: None, pad_backend="vigem", scope=None):
         if pad_backend not in PAD_BACKENDS:
             raise ValueError("未知手柄后端。")
         self.pad_backend = pad_backend
@@ -99,10 +104,6 @@ class HostServer:
         self.created = 0.0
         self.input_errors = set()
         self.control_channel = None
-        self.display_backend = display_backend
-        self.display_lock = asyncio.Lock()
-        self.display_original = None
-        self.restore_display_on_end = True
         self.clipboard_task = None
         self.clipboard_seen = None
 
@@ -117,8 +118,8 @@ class HostServer:
         app = web.Application(middlewares=[errors, local_access], client_max_size=131072)
         app.add_routes([web.get("/v1/info", self.info), web.get("/v1/apps", self.apps),
                         web.post("/v1/session", self.offer), web.delete("/v1/session/{id}", self.delete),
-                        web.get("/v1/session/{id}/display", self.get_display),
-                        web.post("/v1/session/{id}/display", self.set_display)])
+                        web.get("/v1/session/{id}/display", self.retired_display),
+                        web.post("/v1/session/{id}/display", self.retired_display)])
         self.closing = False
         self.runner = web.AppRunner(app, access_log=None, shutdown_timeout=3)
         try:
@@ -143,7 +144,7 @@ class HostServer:
     def host_info(self):
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
-                "busy": self.pc is not None or self.ending, "features": ["display-settings-v1", "cursor-modes-v1"]}
+                "busy": self.pc is not None or self.ending, "features": ["cursor-modes-v1"]}
 
     async def info(self, request):
         return web.json_response(self.host_info())
@@ -186,8 +187,6 @@ class HostServer:
                 raise web.HTTPForbidden()
             pc = self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.device_id, self.session_id = device, secrets.token_hex(16)
-            self.display_original = None
-            self.restore_display_on_end = True
             self.created = time.monotonic()
             self.input_errors.clear()
             codecs.encode_policy = codecs.CodecPolicy(config["fps"], config["bitrate"] * 1_000_000)
@@ -268,7 +267,7 @@ class HostServer:
 
             try:
                 await pc.setRemoteDescription(RTCSessionDescription(data["sdp"], "offer"))
-                video = DesktopTrack(config["width"], config["height"], config["fps"], self.synthetic, config["follow_display"])
+                video = DesktopTrack(config["width"], config["height"], config["fps"], self.synthetic)
                 self.tracks.append(video)
                 pc.addTrack(video)
                 if config["audio"]:
@@ -290,47 +289,14 @@ class HostServer:
                 await self.end_session()
                 raise
 
-    def display_session(self, request):
-        if (not self.pc or self.ending or self.closing or request.remote != self.device_id
-                or request.match_info['id'] != self.session_id):
-            raise web.HTTPForbidden()
-        video = next((track for track in self.tracks if isinstance(track, DesktopTrack)), None)
-        if video is None:
-            raise ValidationError('当前没有可调整的显示器。')
-        if self.display_backend is None:
-            if self.synthetic:
-                raise ValidationError('测试画面没有 Windows 显示设置。')
-            from .display import WindowsDisplay
-            self.display_backend = WindowsDisplay()
-        return video
-
-    async def get_display(self, request):
-        async with self.display_lock:
-            video = self.display_session(request)
-            result = await asyncio.to_thread(self.display_backend.snapshot, video.display_name)
-            return web.json_response(result)
-
-    async def set_display(self, request):
-        change = await self.body(request)
-        async with self.display_lock:
-            video = self.display_session(request)
-            if self.input:
-                self.input.active = False
-                self.input.release()
-            before = await asyncio.to_thread(self.display_backend.snapshot, video.display_name)
-            result = await video.change_display(lambda: self.display_backend.apply(change, video.display_name))
-            if self.display_original is None and (
-                    result.get('current') != before.get('current')
-                    or result.get('current_refresh') != before.get('current_refresh')
-                    or result.get('scale') != before.get('scale')):
-                self.display_original = dict(device=before['device'], resolution=before['current'],
-                                             refresh=before.get('current_refresh'), scale=before['scale'])
-            return web.json_response(result)
+    async def retired_display(self, request):
+        # Explicit response for old clients, with no native display API call.
+        return web.json_response({'error': '已移除系统显示设置修改，请升级控制端并选择串流分辨率。'},
+                                 status=410, dumps=lambda value: json.dumps(value, ensure_ascii=False))
 
     async def delete(self, request):
         device = request.remote
         if device == self.device_id and request.match_info["id"] == self.session_id:
-            self.restore_display_on_end = request.query.get('restore_display', '1') != '0'
             await self.end_session()
         return web.json_response({"ok": True})
 
@@ -346,8 +312,7 @@ class HostServer:
                     await self.end_session()
 
     async def end_session(self):
-        async with self.display_lock:
-            await self._end_session()
+        await self._end_session()
 
     async def _end_session(self):
         if self.pc:
@@ -376,17 +341,6 @@ class HostServer:
                 self.clipboard_task.cancel()
                 await asyncio.gather(self.clipboard_task, return_exceptions=True)
                 self.clipboard_task = None
-            original = self.display_original if self.restore_display_on_end else None
-            self.display_original = None
-            self.restore_display_on_end = True
-            video = next((track for track in tracks if isinstance(track, DesktopTrack)), None)
-            if original and video and self.display_backend:
-                try:
-                    change = dict(device=original['device'], resolution=original['resolution'],
-                                  refresh=original.get('refresh'), scale=original['scale'])
-                    await video.change_display(lambda: self.display_backend.apply(change, video.display_name))
-                except Exception as exc:
-                    self.notify(f'断开时恢复原显示设置失败：{exc}')
             if input_session:
                 input_session.close()
             for track in tracks:
@@ -492,7 +446,6 @@ class Client:
         self.close_task = None
         self.stats = StreamStats()
         self.encoder = "--"
-        self.display_supported = False
         self.cursor_supported = False
         self.cursor_mode = 'smart'
         self.cursor_applied = 'remote'
@@ -514,7 +467,6 @@ class Client:
             info = await request(self.endpoint, self.fp, "GET", "/v1/info")
             if info.get("protocol") != "elink" or info.get("version") != 2:
                 raise ValidationError("主机不支持自动连接，请将两端更新至 0.4.2 或更高版本。")
-            self.display_supported = "display-settings-v1" in info.get("features", [])
             self.cursor_supported = 'cursor-modes-v1' in info.get('features', [])
             self.cursor_applied, self.cursor_visible, self.cursor_updated = 'remote', None, 0.0
             if info.get("busy") is True:
@@ -606,15 +558,6 @@ class Client:
             except BaseException:
                 await self._disconnect()
                 raise
-
-    async def display_settings(self, change=None):
-        async with self.lock:
-            if not self.pc or not self.session_id:
-                raise ValidationError('串流已断开，请重新连接后再修改显示设置。')
-            if not self.display_supported:
-                raise ValidationError('被控端版本不支持显示设置，请将被控端升级至 0.4.5 或更高版本。')
-            return await request(self.endpoint, self.fp, 'GET' if change is None else 'POST',
-                                 f'/v1/session/{self.session_id}/display', payload=change)
 
     def task(self, coro):
         task = asyncio.create_task(coro)
@@ -749,11 +692,11 @@ class Client:
                 return
             await asyncio.sleep(0.5)
 
-    async def disconnect(self, restore_display=True):
+    async def disconnect(self):
         async with self.lock:
-            await self._disconnect(restore_display)
+            await self._disconnect()
 
-    async def _disconnect(self, restore_display=True):
+    async def _disconnect(self):
         self.focus(False)
         pc, self.pc = self.pc, None
         current = asyncio.current_task()
@@ -764,25 +707,12 @@ class Client:
         if self.output:
             self.output.close()
             self.output = None
-        # A temporary reconnect after display settings must tell the host to
-        # keep the newly selected mode before closing the ICE connection. If
-        # the socket closes first, the host may tear down from its state event
-        # before it receives the DELETE request.
-        if self.session_id and not restore_display:
-            identifier, self.session_id = self.session_id, ""
-            try:
-                await asyncio.wait_for(request(self.endpoint, self.fp, "DELETE",
-                                               f"/v1/session/{identifier}?restore_display=0",
-                                               token=self.token), 4)
-            except Exception:
-                pass
         if pc:
             await pc.close()
         if self.session_id:
             identifier, self.session_id = self.session_id, ""
             try:
-                suffix = '' if restore_display else '?restore_display=0'
-                await asyncio.wait_for(request(self.endpoint, self.fp, "DELETE", f"/v1/session/{identifier}{suffix}", token=self.token), 4)
+                await asyncio.wait_for(request(self.endpoint, self.fp, "DELETE", f"/v1/session/{identifier}", token=self.token), 4)
             except Exception:
                 pass
         self.control = self.motion = None

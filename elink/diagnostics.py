@@ -84,11 +84,7 @@ def run(root: Path, desktop=False):
         from PySide6.QtWidgets import QPushButton
         pump(lambda: any(b.text() == '应用并重新连接' and b.isEnabled()
                          for b in player.settings_dialog.findChildren(QPushButton)))
-        display = player.settings_dialog.findChild(StreamOptions).display_snapshot
-        if desktop:
-            if not display:
-                raise RuntimeError('Real desktop display capabilities were not returned.')
-            result['display_capabilities'] = display
+        result['stream_preferences'] = player.settings_dialog.findChild(StreamOptions).values()
         app.processEvents()
         player.settings_dialog.grab().save(str(root / "stream-settings.png"))
         player.settings_dialog.reject()
