@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import time
+import av
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPolygon, QActionGroup
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QMenu, QDialog
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QMenu, QDialog, QApplication, QFileDialog
 
 from .controls import StreamOptions
 from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_resize_handles
@@ -66,6 +68,8 @@ class Player(QWidget):
         self.control_menu = None
         self.settings_dialog = None
         self.captured = False
+        self.gpu_surface = None
+        self.frame_taken_at = None
         self.image = None
         # QImage wraps this buffer without copying. Keep the numpy owner alive
         # until the next frame replaces it; all access happens on the GUI thread.
@@ -95,6 +99,70 @@ class Player(QWidget):
         self.timer.timeout.connect(self.tick)
         self.timer.start(8)
         self._closed = False
+        self.setup_renderer()
+
+    def setup_renderer(self):
+        if self.preferences.get('renderer', 'cpu') != 'gpu':
+            return
+        if QApplication.platformName() in ('offscreen', 'minimal'):
+            self.fallback_renderer('当前窗口平台不支持 GPU 纹理显示')
+            return
+        try:
+            from .gpu_video import YuvSurface
+            self.gpu_surface = YuvSurface(self)
+            self.gpu_surface.failed.connect(lambda message: QTimer.singleShot(0, lambda: self.fallback_renderer(message)))
+            self.gpu_surface.setGeometry(self.rect())
+            self.gpu_surface.lower()
+            self.gpu_surface.show()
+            if hasattr(self.client, 'set_renderer'):
+                self.runtime.call(self.client.set_renderer, 'gpu')
+            QTimer.singleShot(1000, self.check_renderer)
+        except Exception as exc:
+            self.fallback_renderer(str(exc))
+
+    def check_renderer(self):
+        if not self._closed and self.gpu_surface and not self.gpu_surface.isValid():
+            self.fallback_renderer('OpenGL 上下文创建失败')
+
+    def fallback_renderer(self, reason):
+        if self._closed:
+            return
+        surface, self.gpu_surface = self.gpu_surface, None
+        if surface:
+            surface.hide()
+            surface.cleanup()
+            surface.deleteLater()
+        if hasattr(self.client, 'set_renderer'):
+            self.runtime.call(self.client.set_renderer, 'cpu')
+        if hasattr(self.client, 'profile'):
+            self.client.profile.describe(renderer='qimage-bgr', renderer_fallback=str(reason)[:240])
+        self.show_error('已回退兼容显示：' + str(reason)[:180])
+        self.update()
+
+    def export_performance(self):
+        self.release()
+        filename, _ = QFileDialog.getSaveFileName(self, '导出性能报告', 'elink-performance.json', 'JSON (*.json)')
+        if not filename:
+            return
+        def saved(report):
+            from ..storage import atomic_json
+            try:
+                atomic_json(Path(filename), report)
+                self.show_error('性能报告已保存：' + filename)
+            except OSError as exc:
+                self.show_error(str(exc))
+        self.runtime.submit(self.client.performance_report(), saved, self.show_error)
+
+    def frame_presented(self):
+        self.drawn += 1
+        self.new_image = False
+        profile = getattr(self.client, 'profile', None)
+        if profile:
+            profile.mark('present_interval')
+            profile.count('presented_frames')
+            if self.frame_taken_at is not None:
+                profile.elapsed('gui_schedule_to_paint', self.frame_taken_at)
+        self.frame_taken_at = None
 
     def make_toolbar(self):
         self.toolbar = StreamTitleBar(self)
@@ -117,6 +185,9 @@ class Player(QWidget):
         self.toolbar.update_state()
         top = TITLE_HEIGHT if self.toolbar.isVisible() else 0
         self.error_label.setGeometry(16, top + 8, self.width() - 32, 72)
+        if self.gpu_surface:
+            self.gpu_surface.setGeometry(self.rect())
+            self.gpu_surface.lower()
         place_resize_handles(self)
         self.update()
 
@@ -188,6 +259,9 @@ class Player(QWidget):
         stats.setCheckable(True)
         stats.setChecked(self.show_statistics)
         stats.triggered.connect(self.set_statistics)
+        export = menu.addAction('导出性能报告…')
+        export.setEnabled(hasattr(self.client, 'performance_report'))
+        export.triggered.connect(self.export_performance)
         menu.addAction("退出全屏    F11" if self.isFullScreen() else "全屏    F11").triggered.connect(self.toggle_fullscreen)
         menu.addAction("释放键鼠输入").triggered.connect(self.release)
         menu.addSeparator()
@@ -344,7 +418,17 @@ class Player(QWidget):
         pixels = self.client.mailbox.take()
         frame_changed = pixels is not None
         if pixels is not None:
-            self.set_frame_pixels(pixels)
+            self.frame_taken_at = time.perf_counter()
+            if isinstance(pixels, av.VideoFrame):
+                if self.gpu_surface:
+                    try:
+                        self.gpu_surface.set_frame(pixels)
+                    except Exception as exc:
+                        self.fallback_renderer(str(exc))
+                # A frame queued before a fallback is discarded, never converted
+                # on the GUI thread. The receive worker prepares the next BGR frame.
+            else:
+                self.set_frame_pixels(pixels)
         now = time.monotonic()
         stats_due = now - self.stats_at >= 1
         if stats_due:
@@ -380,12 +464,17 @@ class Player(QWidget):
             self.xinput.rumble(event["index"], event["left"], event["right"])
 
     def paintEvent(self, event):
+        if self.gpu_surface:
+            self.gpu_surface.update()
+            return
+        paint_started = time.perf_counter()
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#101719"))
         viewport = self.video_viewport()
         if self.image:
             size = self.image.size().scaled(viewport.size(), Qt.AspectRatioMode.KeepAspectRatio)
             self.rect_image = QRect((self.width() - size.width()) // 2, viewport.top() + (viewport.height() - size.height()) // 2, size.width(), size.height())
+            scale_started = time.perf_counter()
             viewport_size = viewport.size()
             if (self._scaled_image is None or self._scaled_image_size != size
                     or self._scaled_viewport_size != viewport_size):
@@ -398,12 +487,21 @@ class Player(QWidget):
                                                         Qt.TransformationMode.SmoothTransformation))
                 self._scaled_image_size = size
                 self._scaled_viewport_size = viewport_size
+            profile = getattr(self.client, 'profile', None)
+            if profile and self.new_image:
+                profile.elapsed('qt_scale', scale_started)
             started = time.perf_counter()
             painter.drawImage(self.rect_image.topLeft(), self._scaled_image)
             codecs.metrics["present_ms"] = (time.perf_counter() - started) * 1000
             if self.new_image:
-                self.drawn += 1
-                self.new_image = False
+                self.frame_presented()
+        self.paint_overlay(painter)
+        painter.end()
+        profile = getattr(self.client, 'profile', None)
+        if profile:
+            profile.elapsed('cpu_paint_total', paint_started)
+
+    def paint_overlay(self, painter):
         if self.software_cursor and not self.rect_image.isEmpty():
             self.draw_software_cursor(painter)
         if self.show_statistics:
@@ -505,7 +603,8 @@ class Player(QWidget):
 
     def mousePressEvent(self, event):
         if not self.captured:
-            if self.client.pc and self.video_viewport().contains(event.position().toPoint()) and self.image is not None:
+            has_frame = self.image is not None or (self.gpu_surface is not None and self.gpu_surface.frame is not None)
+            if self.client.pc and self.video_viewport().contains(event.position().toPoint()) and has_frame:
                 self.capture()
             return
         self.mouse_button(event, True)
@@ -542,6 +641,8 @@ class Player(QWidget):
             self.release()
             self.timer.stop()
             self.runtime.feedback.disconnect(self.rumble)
+            if self.gpu_surface:
+                self.gpu_surface.cleanup()
             self._closed = True
             self.ended.emit()
         event.accept()

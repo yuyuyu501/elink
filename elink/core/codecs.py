@@ -100,6 +100,10 @@ class DesktopEncoder(H264Encoder):
         # the RTP transport, so the encoder must return promptly and avoid a
         # second frame-level delay that would halve the effective frame rate.
         started = time.perf_counter()
+        trace = frame.opaque if isinstance(frame.opaque, dict) else {}
+        profile = trace.get('profile')
+        if profile:
+            profile.elapsed('capture_to_encode', trace['captured_at'])
         changed = self.codec and (self.codec.width != frame.width or self.codec.height != frame.height
                                   or abs(self._rate - self.codec.bit_rate) / self.codec.bit_rate > 0.25)
         if changed:
@@ -122,6 +126,11 @@ class DesktopEncoder(H264Encoder):
         data = b"".join(bytes(packet) for packet in self.codec.encode(frame))
         metrics.update(encoder=self.name, encode_ms=(time.perf_counter() - started) * 1000,
                        encoded=metrics["encoded"] + 1, bitrate=self._rate)
+        if profile:
+            profile.elapsed('encode', started)
+            profile.mark('encode_interval')
+            profile.describe(encoder=self.name)
+            profile.count('encoded_frames')
         if data:
             yield from self._split_bitstream(data)
 
@@ -148,6 +157,9 @@ class DesktopDecoder(H264Decoder):
 
     def decode(self, encoded_frame):
         started = time.perf_counter()
+        profile = getattr(encoded_frame, '_elink_profile', None)
+        if profile:
+            profile.elapsed('decode_queue_wait', encoded_frame._elink_queued_at)
         packet = av.Packet(encoded_frame.data)
         packet.pts = encoded_frame.timestamp
         packet.time_base = fractions.Fraction(1, 90000)
@@ -155,6 +167,8 @@ class DesktopDecoder(H264Decoder):
             frames = self.codec.decode(packet)
         except av.FFmpegError as exc:
             metrics["decode_errors"] += 1
+            if profile:
+                profile.count("decode_errors")
             metrics["last_decode_error"] = f"{type(exc).__name__}: {exc}"[:500]
             if self.hardware and self.mode == "auto":
                 self.hardware = False
@@ -168,6 +182,12 @@ class DesktopDecoder(H264Decoder):
                 return []
         metrics.update(decoder="D3D11VA" if self.hardware else "软件 H.264",
                        decode_ms=(time.perf_counter() - started) * 1000, decoded=metrics["decoded"] + len(frames))
+        if profile:
+            profile.elapsed('decode', started)
+            profile.describe(decoder='D3D11VA' if self.hardware else 'software-h264')
+            for frame in frames:
+                frame.opaque = {'profile': profile, 'decoded_at': time.perf_counter()}
+                profile.count('decoded_frames')
         return frames
 
 

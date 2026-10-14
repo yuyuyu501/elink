@@ -14,13 +14,23 @@ from aiortc import MediaStreamTrack
 from aiortc.mediastreams import MediaStreamError
 
 from .codecs import metrics
+from .profiling import PipelineProfile
+
+
+def bgr_pixels(frame):
+    # PyAV/sws can skip matrix setup when source and destination both inherit
+    # BT.709. RGB has no YUV matrix: an explicit 601 destination forces the
+    # correct source coefficients while preserving the decoded color range.
+    return frame.to_ndarray(format='bgr24', dst_colorspace='ITU601',
+                            src_color_range=int(frame.color_range))
 
 
 class DesktopTrack(MediaStreamTrack):
     kind = "video"
 
-    def __init__(self, width: int, height: int, fps: int, synthetic: bool = False):
+    def __init__(self, width: int, height: int, fps: int, synthetic: bool = False, profile=None):
         super().__init__()
+        self.profile = profile or PipelineProfile()
         self.width, self.height, self.fps = width, height, fps
         self.synthetic = synthetic
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="elink-capture")
@@ -72,8 +82,13 @@ class DesktopTrack(MediaStreamTrack):
             self.cursor_visible = self.cursor.visible() if hasattr(self.cursor, 'visible') else None
             if self.cursor_mode != 'local':
                 pixels = self.cursor.composite(pixels, (output.left, output.top))
+        self.profile.elapsed("capture_read_cursor", started)
+        converted = time.perf_counter()
         frame = av.VideoFrame.from_ndarray(pixels, format="bgr24")
         frame = frame.reformat(width=self.width, height=self.height, format="yuv420p")
+        self.profile.elapsed("capture_convert", converted)
+        frame.opaque = {"profile": self.profile, "captured_at": started}
+        self.profile.mark("capture_interval")
         metrics["capture_ms"] = (time.perf_counter() - started) * 1000
         return frame
 
@@ -225,7 +240,9 @@ class AudioOutput:
 
 class FrameMailbox:
     """Only the newest decoded frame is retained, never a growing GUI event queue."""
-    def __init__(self):
+    def __init__(self, profile=None):
+        self.profile = profile or PipelineProfile()
+        self.queued_at = 0.0
         self.lock = threading.Lock()
         self.frame = None
         self.received = 0
@@ -236,11 +253,15 @@ class FrameMailbox:
         with self.lock:
             if self.frame is not None:
                 self.dropped += 1
+                self.profile.count("mailbox_dropped")
             self.frame = frame
+            self.queued_at = time.perf_counter()
             self.received += 1
             self.updated = time.monotonic()
 
     def take(self):
         with self.lock:
             frame, self.frame = self.frame, None
+            if frame is not None:
+                self.profile.elapsed("mailbox_wait", self.queued_at)
             return frame

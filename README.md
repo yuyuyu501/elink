@@ -14,7 +14,7 @@ python -m venv .venv
 
 本地便携构建入口：`dist/Elink/Elink.exe`，需保留整个文件夹。构建：`.venv/Scripts/python.exe -m scripts.build`。
 
-日常开发按“本地修改 → 自动测试 → Git 同步 → Windows 打包 → GitHub Release”执行，发布后由用户安装新版并手动测试。更新版本号、写好发布说明并审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.release_windows --message "修改说明" --notes docs/releases/v0.4.6.md`。各阶段失败即停止；打包与上传脚本也可单独重试。详见 [开发与打包流程](docs/development-workflow.md)。
+本轮日常开发按“本地修改 → 自动测试 → Git 同步”执行，审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.check_and_sync --message "修改说明"`。完整优化完成前暂停打包、新版本号、标签和 Release 发布，之后由用户明确启用。详见 [开发与打包流程](docs/development-workflow.md)。
 
 自动化测试：`.venv/Scripts/python.exe -m pytest -q`。便携包自测可运行 `Elink.exe --self-test <独立测试目录>`，结果写入该目录；实际桌面采集自测为 `--self-test-desktop`，两者均不向系统注入键鼠。
 
@@ -33,6 +33,8 @@ python -m venv .venv
 首页不再显示常驻日志或串流参数表单，连接失败以可选择复制的提示显示。详细记录在“网络诊断 → 查看诊断记录”中，默认收起。“设置”页仅保留本机监听端口与手柄后端；画质表单仅在远控窗口显示。
 
 画质提供 720p、900p、1080p、1440p 和 4K 串流分辨率；采集完整桌面后缩放到所选尺寸编码，控制端接收相同像素尺寸并按窗口大小显示。缩放倍率选项已移除。详见 [串流分辨率](docs/remote-display.md)。后续优化参考见 [论文与技术路线](docs/streaming-research.md)。
+
+源码开发版新增“控制中心 → 导出性能报告”，可保存两端各阶段 P50/P95/P99 与队列丢帧计数；画质中可选择实验性 GPU 纹理显示，默认保持兼容显示。GPU 模式将 YUV 颜色转换和缩放移到显卡，但仍有 CPU 平面上传，并非 D3D11 零拷贝；本地验证减少了绘制提交开销，仍需双机游戏验收。使用方法与测量边界见 [性能测量与 GPU 原型](docs/streaming-performance.md)。这些改动尚未打包发布。
 
 远控窗口使用单层自定义标题栏，控制中心和最小化 / 最大化 / 关闭按钮位于同一行。拖动标题栏移动窗口，双击切换最大化；释放输入后可拖动边缘调整大小。全屏控制时标题栏隐藏，F8 释放输入并显示控制中心；F11 退出全屏并恢复此前窗口状态。
 

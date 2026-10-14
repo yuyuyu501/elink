@@ -41,7 +41,7 @@ def mark_rtc_sockets(pc, dscp: int = VIDEO_DSCP) -> int:
     return updated
 
 
-def install_rtp_pacer(pc, bitrate_mbps: int) -> int:
+def install_rtp_pacer(pc, bitrate_mbps: int, profile=None) -> int:
     """Smooth RTP packet bursts at the configured media rate.
 
     aiortc sends all RTP packets belonging to one encoded frame back to back.
@@ -68,6 +68,7 @@ def install_rtp_pacer(pc, bitrate_mbps: int) -> int:
         state = {'next_at': 0.0, 'lock': asyncio.Lock()}
 
         async def paced(data, *, _original=original, _state=state):
+            queued = time.perf_counter()
             async with _state['lock']:
                 loop = asyncio.get_running_loop()
                 now = loop.time()
@@ -81,7 +82,13 @@ def install_rtp_pacer(pc, bitrate_mbps: int) -> int:
                     await asyncio.sleep(0)
                 now = loop.time()
                 _state['next_at'] = max(_state['next_at'], now) + len(data) * 8 / rate
-                return await _original(data)
+                if profile:
+                    profile.elapsed('rtp_pacer_wait', queued)
+                sent = time.perf_counter()
+                result = await _original(data)
+                if profile:
+                    profile.elapsed('rtp_send_call', sent)
+                return result
 
         transport._send_rtp = paced
         transport._elink_rtp_pacer = state

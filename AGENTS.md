@@ -1,30 +1,62 @@
-# Project Workflow
+# Elink project workflow
 
-The user-approved default is: local changes -> automated tests -> Git sync ->
-Windows packaging -> GitHub Release. The user manually tests the installed update.
+Apply the global task-routing rules first. Questions, research and planning do not
+trigger source edits, Git, tests, packaging or deployment by themselves.
 
-- Complete the requested changes, run appropriate automated tests, then commit
-  and push the task's changes to the configured upstream when tests pass.
-- Check the worktree and remote state first. Preserve unrelated user changes;
-  stage explicit task paths. Never force-push, discard changes, or auto-merge a
-  diverged remote just to complete synchronization. Report a failed sync.
-- `python -m scripts.check_and_sync --message "..."` tests and synchronizes an
-  already reviewed/staged worktree. It refuses unstaged/untracked source changes
-  so the committed code matches the code tested. It never builds binaries.
-- For completed application updates, prepare a new unused version (patch bump by
-  default), update both version declarations and write release notes. The standing
-  authorization includes packaging, version bumps, tags and publishing preview
-  Releases to yuyuyu501/elink; do not ask for permission again for these steps.
-- Run `python -m scripts.release_windows --message "..." --notes <notes.md>`
-  after reviewing/staging task changes. It runs check_and_sync, package_windows
-  and publish_release in order, stopping on failure. Its individual scripts remain
-  available for retrying a failed stage without rebuilding successful artifacts.
-- Publish only a clean, synchronized commit whose Windows CI passed. Upload to a
-  draft, verify asset sizes and hashes, then publish. Never overwrite a published
-  version. Failed packaging or upload must not be reported as a successful release.
-- User manual acceptance happens after release and is not an automated-test result.
-  Record pending user acceptance accurately. Driver installation is not authorized.
-- Never commit `.artifacts`, `.runtime`, `dist`, `build`, credentials, pairing
-  identities, private keys or machine-specific test configuration.
-- Keep preview limitations accurate. Passing unit tests does not establish
-  stable game streaming, virtual driver compatibility or release signing.
+```yaml
+workflow:
+  local_change: 1
+  test: 1
+  git_sync: 1
+  server_update: 0
+  windows_package: 0
+  github_release: 0
+```
+
+## Current development cycle
+
+- Default for code/configuration tasks: local changes -> automated tests -> Git
+  sync. Windows packaging and new Release publication are paused while the
+  current complete optimization cycle is being developed and validated.
+- Do not bump application versions, create release tags, build distributable
+  EXEs or publish Releases during this cycle. The user will explicitly enable
+  packaging/publication after the complete change is ready. Keep progress in
+  development documentation rather than new release notes.
+- Development-only native compilation and rendering benchmarks are allowed when
+  required to validate the requested implementation; they are not app packaging.
+- No server deployment is enabled. Git synchronization is not deployment.
+- Before editing, read applicable instructions, check branch/worktree and remote
+  state, preserve unrelated work. For replacement/refactoring, inspect current
+  code and Git history, identify related tests/configuration/docs and search for
+  stale references after editing. Do not spawn sub-agents by default.
+
+## Tests and Git synchronization
+
+- Use the project environment: `.venv/Scripts/python.exe` on Windows. Run relevant
+  checks while developing, then the full suite before committing/pushing.
+- Review the final diff, stage explicit task paths and run
+  `.venv/Scripts/python.exe -m scripts.check_and_sync --message "..."`.
+  It tests the reviewed/staged source, checks the remote, commits and pushes.
+  It refuses remaining unstaged/untracked source and never packages binaries.
+- Verify local HEAD and the upstream remote branch reference the same commit.
+  Preserve failed-sync commits and report failures. Never force-push, discard
+  changes or auto-merge a diverged remote merely to complete synchronization.
+- Never commit `.artifacts`, `.runtime`, `dist`, `build`, credentials, environment
+  files, pairing identities, keys, personal media or machine-specific test data.
+- Routine verification must not invoke paid providers or install drivers.
+- Record limitations accurately: tests and local benchmarks do not establish
+  stable two-machine gaming, all driver compatibility or release signing.
+
+## Packaging and publication when explicitly re-enabled
+
+- Prepare a new unused version, update both declarations and write release notes.
+- Use `.venv/Scripts/python.exe -m scripts.release_windows --message "..." --notes <notes.md>`.
+  It tests/syncs, packages/self-tests and publishes, stopping on failure. Retry
+  individual failed stages without rebuilding already verified artifacts.
+- Publish only a clean synchronized commit whose Windows CI passed. Upload to a
+  draft, verify asset sizes/hashes, then publish a Windows Preview Release to
+  yuyuyu501/elink. Never overwrite a published version or report failed builds
+  or uploads as successful releases.
+- User manual acceptance follows installation and is separate from automated
+  tests. Preview signing limitations remain explicit. Driver installation is
+  not authorized.

@@ -48,7 +48,7 @@ Kuan-Ta Chen 等，**Measuring The Latency of Cloud Gaming Systems**，ACM Multi
 
 [Moonlight Qt 源码](https://github.com/moonlight-stream/moonlight-qt) 是实践参考，不是论文。官方 README 明确支持硬件解码、多种视频编解码器和 YUV 4:4:4。直接显示 GPU 解码表面、把 YUV→RGB 转换与缩放留在 GPU 上，是比不断优化 numpy/QImage 拷贝更值得投入的长期方向。
 
-当前 Elink 仍通过 PyAV 解码、to_ndarray(BGR) 和 Qt QWidget 显示；选择 D3D11VA 不等于已经实现端到端 GPU 零拷贝。建议保留 Python 设备管理/设置 UI，用独立原生模块承接 D3D11 解码表面和呈现，并保留现有路径作回退。引入开源代码前需检查相应许可证；本次只参考设计，没有复制第三方实现。
+兼容路径通过 PyAV 解码、to_ndarray(BGR) 和 Qt QWidget 显示；开发版新增可选 OpenGL YUV 纹理原型及阶段统计，见 [实施记录](streaming-performance.md)。选择 D3D11VA 或 GPU 纹理显示都不等于已经实现端到端 GPU 零拷贝。长期建议保留 Python 设备管理/设置 UI，用独立原生模块承接 D3D11 解码表面和呈现，并保留现有路径作回退。引入开源代码前需检查相应许可证；本次只参考设计，没有复制第三方实现。
 
 ## 推荐实施与验收顺序
 

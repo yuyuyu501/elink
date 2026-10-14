@@ -11,6 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from elink.core.media import FrameMailbox
+from elink.core.profiling import PipelineProfile
 from elink.ui.chrome import TITLE_HEIGHT
 from elink.ui.player import Player
 from elink.ui.theme import apply_theme
@@ -88,6 +89,45 @@ def test_bgr_frame_is_presented_without_a_second_qimage_copy():
         pixels[2, 3] = [40, 50, 60]
         assert player.image.pixelColor(3, 2).getRgb()[:3] == (60, 50, 40)
     finally:
+        player.close()
+
+
+def test_gpu_unavailable_falls_back_without_losing_cpu_display(monkeypatch):
+    app, player, events = make_player()
+    modes = []
+    player.client.set_renderer = modes.append
+    player.client.profile = PipelineProfile()
+    player.preferences['renderer'] = 'gpu'
+    monkeypatch.setattr(QApplication, 'platformName', lambda: 'offscreen')
+    try:
+        player.setup_renderer()
+        assert player.gpu_surface is None and modes == ['cpu']
+        assert '回退' in player.error_label.text()
+        pixels = np.zeros((10, 20, 3), dtype=np.uint8)
+        player.client.mailbox.put(pixels)
+        player.tick()
+        app.processEvents()
+        assert player.image_pixels is pixels
+        assert player.client.profile.snapshot()['counters']['presented_frames'] > 0
+        # Late failure notifications after shutdown must not touch GUI objects.
+        player.close()
+        player.fallback_renderer('late callback')
+        assert modes == ['cpu']
+    finally:
+        player.close()
+
+
+def test_gpu_frame_allows_click_to_capture_without_qimage(monkeypatch):
+    app, player, events = make_player()
+    captured = []
+    player.image = None
+    player.gpu_surface = SimpleNamespace(frame=object())
+    monkeypatch.setattr(player, 'capture', lambda: captured.append(True))
+    try:
+        QTest.mouseClick(player, Qt.MouseButton.LeftButton, pos=player.video_viewport().center())
+        assert captured == [True]
+    finally:
+        player.gpu_surface = None
         player.close()
 
 

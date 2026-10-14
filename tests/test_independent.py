@@ -102,6 +102,18 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         await until(lambda: client.stats.rx_kbps is not None and client.stats.loss_percent is not None)
         assert client.stats.rx_kbps > 0
         assert client.stats.decode_ms is not None
+        performance = await client.performance_report()
+        assert performance['schema'] == 1 and performance['host_error'] is None
+        assert {'capture_read_cursor', 'capture_convert', 'encode', 'rtp_pacer_wait'} <= performance['host']['stages'].keys()
+        assert {'decode_queue_wait', 'decode', 'prepare_display', 'mailbox_wait'} <= performance['client']['stages'].keys()
+        old_host_profile, old_client_profile = host.profile, client.profile
+        import av
+        client.set_renderer('gpu')
+        received = client.mailbox.received
+        await until(lambda: client.mailbox.received >= received + 3)
+        assert isinstance(client.mailbox.take(), av.VideoFrame)
+        assert client.profile.snapshot()['metadata']['renderer'] == 'opengl-yuv'
+        client.set_renderer('cpu')
         from elink.core.codecs import metrics
         report = {"video_frames": client.mailbox.received, "audio_frames": client.audio_frames,
                   "rtt_ms": round(client.rtt_ms, 2), "metrics": dict(metrics), "messages": messages}
@@ -110,6 +122,7 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         assert backend.events[-1]["values"] == [0] * 7
         await client.connect(address, {"width": width, "height": height, "fps": fps, "audio": False})
         await until(lambda: client.mailbox.received >= 3)
+        assert host.profile is not old_host_profile and client.profile is not old_client_profile
         await until(lambda: client.cursor_applied == 'smart')
         assert not (root / "host/authorized-devices.json").exists()
         assert not (root / "client/trusted-hosts.json").exists()

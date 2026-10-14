@@ -17,11 +17,12 @@ from ..models import Endpoint, ValidationError
 from . import codecs
 from .clipboard import MAX_CLIPBOARD_CHARS, read_text, write_text
 from .input import InputSession, WindowsInput, PAD_BACKENDS
-from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack
+from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack, bgr_pixels
 from .qos import install_rtp_pacer, mark_rtc_sockets
 from .security import Identity
 from ..discovery import NetworkScope, Responder, DISCOVERY_PORT, machine_id
 from .buffers import tune_receiver, tune_track
+from .profiling import PipelineProfile
 from .statistics import StreamStats, ReceiveSampler, selected_route
 
 
@@ -104,6 +105,7 @@ class HostServer:
         self.created = 0.0
         self.input_errors = set()
         self.control_channel = None
+        self.profile = PipelineProfile()
         self.clipboard_task = None
         self.clipboard_seen = None
 
@@ -118,6 +120,7 @@ class HostServer:
         app = web.Application(middlewares=[errors, local_access], client_max_size=131072)
         app.add_routes([web.get("/v1/info", self.info), web.get("/v1/apps", self.apps),
                         web.post("/v1/session", self.offer), web.delete("/v1/session/{id}", self.delete),
+                        web.get("/v1/session/{id}/performance", self.performance),
                         web.get("/v1/session/{id}/display", self.retired_display),
                         web.post("/v1/session/{id}/display", self.retired_display)])
         self.closing = False
@@ -144,7 +147,7 @@ class HostServer:
     def host_info(self):
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
-                "busy": self.pc is not None or self.ending, "features": ["cursor-modes-v1"]}
+                "busy": self.pc is not None or self.ending, "features": ["cursor-modes-v1", "performance-v1"]}
 
     async def info(self, request):
         return web.json_response(self.host_info())
@@ -187,6 +190,8 @@ class HostServer:
                 raise web.HTTPForbidden()
             pc = self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.device_id, self.session_id = device, secrets.token_hex(16)
+            self.profile = PipelineProfile()
+            self.profile.describe(width=config["width"], height=config["height"], fps=config["fps"])
             self.created = time.monotonic()
             self.input_errors.clear()
             codecs.encode_policy = codecs.CodecPolicy(config["fps"], config["bitrate"] * 1_000_000)
@@ -267,7 +272,7 @@ class HostServer:
 
             try:
                 await pc.setRemoteDescription(RTCSessionDescription(data["sdp"], "offer"))
-                video = DesktopTrack(config["width"], config["height"], config["fps"], self.synthetic)
+                video = DesktopTrack(config["width"], config["height"], config["fps"], self.synthetic, self.profile)
                 self.tracks.append(video)
                 pc.addTrack(video)
                 if config["audio"]:
@@ -276,7 +281,7 @@ class HostServer:
                     pc.addTrack(audio)
                 video_preferences(pc)
                 await pc.setLocalDescription(await pc.createAnswer())
-                install_rtp_pacer(pc, config["bitrate"])
+                install_rtp_pacer(pc, config["bitrate"], self.profile)
                 mark_rtc_sockets(pc)
                 self.clipboard_seen = await asyncio.to_thread(read_text)
                 self.clipboard_task = asyncio.create_task(self.watch_clipboard(pc, feedback))
@@ -288,6 +293,11 @@ class HostServer:
             except BaseException:
                 await self.end_session()
                 raise
+
+    async def performance(self, request):
+        if not self.pc or request.remote != self.device_id or request.match_info['id'] != self.session_id:
+            raise web.HTTPForbidden()
+        return web.json_response(self.profile.snapshot())
 
     async def retired_display(self, request):
         # Explicit response for old clients, with no native display API call.
@@ -427,11 +437,14 @@ class Client:
         # No persistent client authorizations or pairing records in automatic mode.
         self.notify, self.feedback = notify, feedback
         self.play_audio = play_audio
+        self.renderer = "cpu"
+        self.performance_supported = False
         self.muted = False
         self.pc = None
         self.session_id = ""
         self.endpoint = None
-        self.mailbox = FrameMailbox()
+        self.profile = PipelineProfile()
+        self.mailbox = FrameMailbox(self.profile)
         self.tasks = set()
         self.control = self.motion = None
         self.output = None
@@ -467,13 +480,15 @@ class Client:
             info = await request(self.endpoint, self.fp, "GET", "/v1/info")
             if info.get("protocol") != "elink" or info.get("version") != 2:
                 raise ValidationError("主机不支持自动连接，请将两端更新至 0.4.2 或更高版本。")
+            self.performance_supported = "performance-v1" in info.get("features", [])
             self.cursor_supported = 'cursor-modes-v1' in info.get('features', [])
             self.cursor_applied, self.cursor_visible, self.cursor_updated = 'remote', None, 0.0
             if info.get("busy") is True:
                 raise ValidationError("主机正在被其他设备控制或连接中，请等待当前会话结束。")
             codecs.decode_policy = codecs.CodecPolicy(decoder=decoder)
             self.pc = pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
-            self.mailbox = FrameMailbox()
+            self.profile = PipelineProfile()
+            self.mailbox = FrameMailbox(self.profile)
             self.audio_frames = 0
             self.rtt_ms = 0.0
             self.stats = StreamStats(target_mbps=config["bitrate"])
@@ -528,7 +543,7 @@ class Client:
 
             @pc.on("track")
             def track_received(track):
-                tune_track(track)
+                tune_track(track, self.profile)
                 self.task(self.consume(track))
 
             @pc.on("connectionstatechange")
@@ -541,7 +556,7 @@ class Client:
             if config["audio"]:
                 pc.addTransceiver("audio", direction="recvonly")
             for transceiver in pc.getTransceivers():
-                tune_receiver(transceiver.receiver)
+                tune_receiver(transceiver.receiver, self.profile)
             video_preferences(pc)
             try:
                 await pc.setLocalDescription(await pc.createOffer())
@@ -558,6 +573,28 @@ class Client:
             except BaseException:
                 await self._disconnect()
                 raise
+
+    def set_renderer(self, mode):
+        self.renderer = 'gpu' if mode == 'gpu' else 'cpu'
+
+    async def performance_report(self):
+        from dataclasses import asdict
+        host = None
+        error = None
+        identifier = self.session_id
+        if identifier and self.performance_supported:
+            try:
+                host = await request(self.endpoint, self.fp, 'GET', f'/v1/session/{identifier}/performance')
+            except Exception as exc:
+                error = type(exc).__name__
+        if identifier != self.session_id:
+            raise ValidationError('会话已变化，请重新导出。')
+        return dict(schema=1, client=self.profile.snapshot(), host=host, host_error=error,
+                    stream=asdict(self.stats), rtt_ms=self.rtt_ms,
+                    limitations=['Per-stage CPU wall time; not GPU execution time or input-to-photon latency.',
+                                 'Peer clocks are never subtracted. Network one-way, GPU completion and scanout are not measured.',
+                                 'Frame intervals are not RTP reassembly duration. Pacer samples are per packet; other stages may overlap.',
+                                 'GPU texture rendering uploads CPU YUV planes; hardware decode readback is not eliminated.'])
 
     def task(self, coro):
         task = asyncio.create_task(coro)
@@ -625,11 +662,19 @@ class Client:
                 frame = await track.recv()
                 if track.kind == "video":
                     started = time.perf_counter()
-                    # QImage can wrap BGR888 directly. This avoids the RGB
-                    # channel shuffle and keeps the ndarray owner alive until
-                    # the next frame replaces it.
-                    pixels = await asyncio.to_thread(frame.to_ndarray, format="bgr24")
+                    trace = frame.opaque if isinstance(frame.opaque, dict) else {}
+                    if 'decoded_at' in trace:
+                        self.profile.elapsed('decoded_queue_wait', trace['decoded_at'])
+                    if self.renderer == 'gpu':
+                        # CPU-addressable YUV planes go straight to GPU textures.
+                        # PyAV D3D11VA may already have copied them from VRAM.
+                        pixels = frame if frame.format.name in ('yuv420p', 'nv12', 'yuvj420p') else await asyncio.to_thread(frame.reformat, format='yuv420p')
+                        self.profile.describe(renderer='opengl-yuv', pixel_format=pixels.format.name)
+                    else:
+                        pixels = await asyncio.to_thread(bgr_pixels, frame)
+                        self.profile.describe(renderer='qimage-bgr', pixel_format='bgr24')
                     codecs.metrics["convert_ms"] = (time.perf_counter() - started) * 1000
+                    self.profile.elapsed('prepare_display', started)
                     self.mailbox.put(pixels)
                 else:
                     self.audio_frames += 1

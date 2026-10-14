@@ -284,10 +284,12 @@ class MainWindow(QMainWindow):
         if host and address in host.routes:
             addresses += [route for route in host.routes if route != address]
         decoder = self.decoder.currentData()
+        renderer = self.options.renderer.currentData()
         muted = bool(self.resume_view and self.resume_view['muted'])
         async def connect():
             import aiohttp
             self.client.set_muted(muted)
+            self.client.set_renderer(renderer)
             for index, route in enumerate(addresses):
                 try:
                     result = await self.client.connect(route, config, decoder)
@@ -533,7 +535,8 @@ class MainWindow(QMainWindow):
                 widget = getattr(self, name)
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value.get(name, 0))))
             self.options.restore({'mouse_mode': value.get('mouse_mode', 'smart'),
-                                  'resolution': value.get('stream_resolution', [1920, 1080])})
+                                  'resolution': value.get('stream_resolution', [1920, 1080]),
+                                  'renderer': value.get('renderer', 'cpu')})
             for name in ("audio", "controllers"):
                 getattr(self, name).setChecked(value.get(name, True))
         except (ValueError, TypeError, OSError, AttributeError) as exc:
@@ -550,6 +553,7 @@ class MainWindow(QMainWindow):
             value[name] = getattr(self, name).currentIndex()
         value['mouse_mode'] = self.mouse_mode.currentData()
         value['stream_resolution'] = self.resolution.currentData()
+        value['renderer'] = self.renderer.currentData()
         for name in ("audio", "controllers"):
             value[name] = getattr(self, name).isChecked()
         try:

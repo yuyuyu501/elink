@@ -1,10 +1,24 @@
 # 开发、打包与发布流程
 
-2026-09-21 起，用户授权的默认流程为：**本地修改 → 自动测试 → Git 同步 → Windows 打包 → GitHub Release → 用户安装后手动功能测试**。每次完成应用更新都按此流程推进，无需再次询问是否打包发布。不会安装驱动。
+2026-10-14 起，本轮完整优化完成前，默认流程为：**本地修改 → 自动测试 → Git 同步**。按新版全局规则区分问题讨论与代码任务；普通问答不自动触发开发流程。项目开关见 `AGENTS.md`：`local_change: 1`、`test: 1`、`git_sync: 1`、`server_update: 0`、`windows_package: 0`、`github_release: 0`。
+
+本轮不增加应用版本号、不创建发布标签、不打包 EXE、不上传新 Release。用户之后明确要求打包发布时再启用后两步。开发用原生编译、源码运行和 GPU 测量不属于应用打包；不会更新服务器或安装驱动。
 
 ## 默认入口
 
-先检查工作区和远端，保留无关修改。每次发布使用未被占用的新版本，默认递增补丁号，同时更新 `elink/__init__.py` 和 `pyproject.toml`。在 `docs/releases/v<版本>.md` 写好此次发布说明，审阅并暂存本次文件，然后运行：
+先检查工作区、分支、远端和相关 Git 历史，保留无关修改。完成修改与相关检查后审阅差异，仅暂存本次文件：
+
+```powershell
+git status --short
+git add <本次修改的具体文件>
+.venv/Scripts/python.exe -m scripts.check_and_sync --message "说明本次修改"
+```
+
+同步后核对本地 HEAD 与远端分支一致。测试或推送失败时保留工作和确切提交并报告，不强推或自动合并远端分叉。性能报告和临时产物放在忽略的 `.artifacts`，不提交机器身份、配置或凭据。性能测试方法见 [串流性能测量与 GPU 原型](streaming-performance.md)。
+
+## 后续明确启用打包发布时
+
+每次发布使用未被占用的新版本，默认递增补丁号，同时更新 `elink/__init__.py` 和 `pyproject.toml`。在 `docs/releases/v<版本>.md` 写好此次发布说明，审阅并暂存本次文件，然后运行：
 
 ```powershell
 git status --short
@@ -20,7 +34,7 @@ git add <本次修改的具体文件>
 
 GitHub Actions 补跑 Windows 单元测试，不直接打包。构建仍在本地 Windows 桌面环境进行，需要项目 `.venv`、`pip install -e ".[dev]"` 和可用音频输出设备。发布使用 Git Credential Manager 内已有的 GitHub HTTPS 凭据，只在内存读取，不写入仓库或产物。
 
-## 失败后独立重试
+## 发布阶段失败后独立重试（需先启用发布）
 
 ```powershell
 # 测试并同步源码，不执行后两个阶段
