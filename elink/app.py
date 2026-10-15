@@ -14,6 +14,10 @@ from .ui.window import MainWindow
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == '--self-test-gpu':
+        from scripts.check_gpu_video import main as check_gpu
+        check_gpu(['--output', sys.argv[2], '--frames', '30', '--stream-check'])
+        return 0
     if len(sys.argv) == 3 and sys.argv[1] == "--peer-test":
         from .peer_diagnostics import run
         return run(sys.argv[2])

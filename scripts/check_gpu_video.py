@@ -1,6 +1,7 @@
 """Composed GPU video/overlay checks and CPU/GPU presentation benchmark.
 
-Run on a Windows desktop, not offscreen CI. No desktop capture or input injection.
+Run on an unlocked Windows desktop, not offscreen CI. Test windows temporarily
+stay on top; native pixels are checked in memory, never saved. No input injection.
 Optional stream checks use local synthetic H.264/WebRTC with software/hardware decode.
 Timings include CPU submission, not GPU completion or physical scanout.
 """
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 
 import av
 import numpy as np
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QPoint, Signal
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
@@ -40,9 +41,44 @@ def player(app, mode, *, statistics=True):
     view = Player(Runtime(), client, controllers=False, preferences={'renderer': mode})
     view.timer.stop()
     view.show_statistics = statistics
+    prepare_visible(view)
     view.show()
     app.processEvents()
     return view
+
+
+def prepare_visible(view):
+    # QScreen.grabWindow observes the real screen and can include an occluder.
+    # Keep only this synthetic test window on top and within the work area.
+    view.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+    area = view.screen().availableGeometry()
+    view.resize(min(930, area.width()), min(650, area.height()))
+    view.move(area.topLeft())
+
+
+def screen_image(app, view):
+    settle(app, .15)
+    # Window-DC capture can return a stale pre-fullscreen surface on Windows.
+    # Capture the displayed client rectangle from the desktop instead.
+    position = view.mapToGlobal(QPoint()) - view.screen().geometry().topLeft()
+    image = view.screen().grabWindow(0, position.x(), position.y(), view.width(), view.height()).toImage()
+    if image.isNull():
+        raise AssertionError('Native output unavailable; use an unlocked Windows desktop')
+    return image
+
+
+def verify_pixels(view, image, expected):
+    rect = view.rect_image
+    ratio = image.width() / view.width()
+    errors = []
+    for nx, ny in ((.25, .25), (.75, .25), (.25, .75), (.75, .75)):
+        actual = image.pixelColor(round((rect.x() + nx * rect.width()) * ratio),
+                                  round((rect.y() + ny * rect.height()) * ratio)).getRgb()[:3]
+        reference = expected[int(ny * expected.shape[0]), int(nx * expected.shape[1])].astype(int)
+        errors.append(int(np.max(np.abs(reference - actual))))
+    if max(errors) > 5:
+        raise AssertionError(f'Native/composed video color errors {errors}; output may be black or occluded')
+    return max(errors)
 
 
 def settle(app, seconds=.1):
@@ -69,7 +105,6 @@ def verify_colors(app):
                 format=fmt, dst_colorspace='ITU709' if space == 1 else 'ITU601',
                 dst_color_range=2 if full else 1)
             frame.colorspace, frame.color_range = space, 2 if full else 1
-            view.resize(930, 650)
             surface = view.gpu_surface
             if surface is None:
                 raise RuntimeError('GPU renderer fell back before color validation')
@@ -81,26 +116,23 @@ def verify_colors(app):
                 settle(app, .03)
             if surface.broken or not surface.isValid() or view.gpu_surface is None:
                 raise RuntimeError('GPU renderer unavailable: ' + view.error_label.text())
-            image = view.grab().toImage()
-            rect, ratio = view.rect_image, surface.devicePixelRatioF()
             expected = frame.to_ndarray(format='rgb24', src_colorspace='ITU709' if space == 1 else 'ITU601',
                                         dst_colorspace='ITU601', src_color_range=2 if full else 1)
-            errors = []
-            for nx, ny in ((.25, .25), (.75, .25), (.25, .75), (.75, .75)):
-                actual = image.pixelColor(round((rect.x() + nx * rect.width()) * ratio),
-                                          round((rect.y() + ny * rect.height()) * ratio)).getRgb()[:3]
-                reference = expected[int(ny * 362), int(nx * 642)].astype(int)
-                errors.append(int(np.max(np.abs(reference - actual))))
-            if max(errors) > 5:
-                raise AssertionError(f'{fmt}/{space}/{full}: color errors {errors}')
-            results.append(dict(format=fmt, colorspace=space, full_range=full, max_rgb_error=max(errors)))
+            # Read native output BEFORE grab(): QWidget.grab renders internally
+            # and succeeds even when Qt's on-screen compositor is entirely black.
+            native_error = verify_pixels(view, screen_image(app, view), expected)
+            error = verify_pixels(view, view.grab().toImage(), expected)
+            results.append(dict(format=fmt, colorspace=space, full_range=full,
+                                max_rgb_error=error, native_rgb_error=native_error))
         # Resource reconstruction when moving between a window and fullscreen.
         view.toggle_fullscreen()
         settle(app)
+        verify_pixels(view, screen_image(app, view), expected)
         view.toggle_fullscreen()
         settle(app)
         if view.gpu_surface is None or view.gpu_surface.broken:
             raise AssertionError('GPU context failed during fullscreen transition')
+        verify_pixels(view, screen_image(app, view), expected)
         # Validate retained video, not merely context survival, after recreation.
         surface = view.gpu_surface
         image = view.grab().toImage()
@@ -113,21 +145,21 @@ def verify_colors(app):
         # without painting into the OpenGL video target.
         QTest.keyClick(view, Qt.Key.Key_F10)
         settle(app)
-        without_stats = view.grab().toImage()
+        without_stats = screen_image(app, view)
         QTest.keyClick(view, Qt.Key.Key_F10)
         settle(app)
-        with_stats = view.grab().toImage()
+        with_stats = screen_image(app, view)
         if without_stats == with_stats:
             raise AssertionError('Statistics overlay did not compose above video')
         view.software_cursor_pos = view.rect_image.center()
         view.software_cursor = True
         view.refresh_video()
         settle(app)
-        with_cursor = view.grab().toImage()
+        with_cursor = screen_image(app, view)
         view.software_cursor = False
         view.refresh_video()
         settle(app)
-        if with_cursor == view.grab().toImage():
+        if with_cursor == screen_image(app, view):
             raise AssertionError('Software cursor overlay did not show/hide')
         view.controls_button.click()
         settle(app)
@@ -212,6 +244,7 @@ def verify_stream(app, root, decoder):
     try:
         runtime.submit(connect()).result(25)
         view = Player(runtime, client, controllers=False, preferences={'renderer': 'gpu'})
+        prepare_visible(view)
         view.show()
         deadline = time.perf_counter() + 12
         while client.profile.snapshot()['counters'].get('presented_frames', 0) < 30:
@@ -225,6 +258,7 @@ def verify_stream(app, root, decoder):
         surface = view.gpu_surface
         frame = surface.frame
         reference = bgr_pixels(frame)
+        verify_pixels(view, screen_image(app, view), reference[:, :, ::-1])
         image = view.grab().toImage()
         rect, ratio = view.rect_image, surface.devicePixelRatioF()
         for nx, ny in ((.25, .25), (.75, .25), (.25, .75), (.75, .75)):
@@ -249,7 +283,7 @@ def verify_stream(app, root, decoder):
         if view.gpu_overlay is not None or not view.error_label.isVisible():
             raise AssertionError('Fallback left an overlay over the CPU video or hid its notice')
         return dict(decoder=metadata['decoder'], pixel_format=frame.format.name,
-                    composed_video=True, cpu_fallback=True)
+                    composed_video=True, native_video=True, cpu_fallback=True)
     finally:
         if view:
             view.close()
@@ -261,13 +295,13 @@ def verify_stream(app, root, decoder):
             runtime.stop()
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=Path('.artifacts/gpu-video-check.json'))
     parser.add_argument('--frames', type=int, default=120)
     parser.add_argument('--stream-check', action='store_true',
                         help='Also verify real local WebRTC video with software H.264 and D3D11VA')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.frames < 1:
         parser.error('--frames must be positive')
     os.environ['QT_QPA_PLATFORM'] = 'windows'

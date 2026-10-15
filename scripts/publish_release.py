@@ -13,7 +13,7 @@ import urllib.parse
 import aiohttp
 
 from elink import __version__
-from scripts.package_windows import ROOT, source_snapshot, validate_self_test
+from scripts.package_windows import ROOT, source_snapshot, validate_self_test, validate_gpu_test
 
 REPO = 'yuyuyu501/elink'
 API = f'https://api.github.com/repos/{REPO}'
@@ -78,6 +78,7 @@ def validate_package(directory):
     if receipt['source_sha256'] != source_snapshot():
         raise RuntimeError('Package source hashes differ from the current worktree.')
     validate_self_test(receipt['self_test'])
+    validate_gpu_test(receipt.get('gpu_test', {}))
     if receipt.get('updater_test', {}).get('ok') is not True:
         raise RuntimeError('Packaged updater test has not passed.')
     archive = directory / f'Elink-{__version__}-windows-x64.zip'

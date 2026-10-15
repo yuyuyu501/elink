@@ -43,6 +43,9 @@ def package_fixture(tmp_path, monkeypatch):
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     receipt = dict(version=publisher.__version__, source_dirty=False, commit='abc', source_sha256={'source': 'hash'},
                    self_test=dict(ok=True, runtime_stopped=True, audio_frames=10, video_frames=90),
+                   gpu_test=dict(colors=[dict(native_rgb_error=2)] * 5,
+                                 streams=[dict(decoder=d, native_video=True, cpu_fallback=True)
+                                          for d in ('software-h264', 'D3D11VA')]),
                    updater_test=dict(ok=True), package_sha256=digest)
     (tmp_path / 'verification.json').write_text(json.dumps(receipt), encoding='utf-8')
     (tmp_path / 'SHA256SUMS.txt').write_text(f'{digest}  {archive.name}\n', encoding='ascii')
@@ -51,7 +54,7 @@ def package_fixture(tmp_path, monkeypatch):
     return notes, receipt, archive
 
 
-@pytest.mark.parametrize('problem', ['checksum', 'commit', 'updater', 'source'])
+@pytest.mark.parametrize('problem', ['checksum', 'commit', 'updater', 'source', 'gpu_missing', 'gpu_black'])
 def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypatch, problem):
     _, receipt, archive = package_fixture(tmp_path, monkeypatch)
     if problem == 'checksum':
@@ -60,6 +63,10 @@ def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypa
         receipt['commit'] = 'other'
     elif problem == 'updater':
         receipt['updater_test']['ok'] = False
+    elif problem == 'gpu_missing':
+        receipt.pop('gpu_test')
+    elif problem == 'gpu_black':
+        receipt['gpu_test']['colors'][0]['native_rgb_error'] = 240
     else:
         receipt['source_sha256'] = {}
     (tmp_path / 'verification.json').write_text(json.dumps(receipt), encoding='utf-8')

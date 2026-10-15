@@ -74,7 +74,10 @@ class YuvSurface(QOpenGLWidget):
 
     def __init__(self, player):
         fmt = QSurfaceFormat()
-        fmt.setVersion(3, 0)
+        # Qt 6's window compositor needs a modern GL context too. A 3.0
+        # request has no defined compatibility profile (profiles start at 3.2)
+        # and can render our FBO successfully while the entire window is black.
+        fmt.setVersion(3, 3)
         fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
         fmt.setSwapInterval(0)
         # Qt's top-level composition context uses the default format, not just

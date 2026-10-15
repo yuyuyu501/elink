@@ -31,6 +31,16 @@ def validate_self_test(report):
         raise RuntimeError('Packaged EXE did not receive both video and audio.')
 
 
+def validate_gpu_test(report):
+    colors = report.get('colors', [])
+    streams = report.get('streams', [])
+    if (len(colors) != 5 or any(not isinstance(c.get('native_rgb_error'), (int, float))
+                               or not 0 <= c['native_rgb_error'] <= 5 for c in colors)
+            or {s.get('decoder') for s in streams} != {'software-h264', 'D3D11VA'}
+            or any(s.get('native_video') is not True or s.get('cpu_fallback') is not True for s in streams)):
+        raise RuntimeError('Packaged GPU native display checks have not passed.')
+
+
 def package():
     if os.name != 'nt' or sys.maxsize <= 2**32:
         raise RuntimeError('Build this package using 64-bit Python on Windows.')
@@ -52,6 +62,11 @@ def package():
                        cwd=ROOT, env=native_environment(), check=True, timeout=120)
         report = json.loads((diagnostics / 'result.json').read_text(encoding='utf-8'))
         validate_self_test(report)
+        gpu_result = temporary / 'gpu-test.json'
+        subprocess.run([str(ROOT / 'dist' / 'Elink' / 'Elink.exe'), '--self-test-gpu', str(gpu_result)],
+                       cwd=ROOT, env=native_environment(), check=True, timeout=120)
+        gpu_report = json.loads(gpu_result.read_text(encoding='utf-8'))
+        validate_gpu_test(gpu_report)
         upgrade = verify_portable_update(ROOT / 'dist' / 'Elink', temporary / 'update-check')
         if source_snapshot() != snapshot:
             raise RuntimeError('Source changed during packaging; rerun before distributing this build.')
@@ -60,7 +75,7 @@ def package():
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         receipt = dict(version=__version__, built_at=stamp, commit=revision, source_dirty=dirty,
                        source_sha256=snapshot, package_sha256=digest, self_test=report,
-                       updater_test=upgrade, manual_acceptance='pending',
+                       gpu_test=gpu_report, updater_test=upgrade, manual_acceptance='pending',
                        signed=False, channel='preview', format='portable-folder')
         (temporary / 'verification.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
         (temporary / 'SHA256SUMS.txt').write_text(f'{digest}  {archive.name}\n', encoding='ascii')
