@@ -36,7 +36,9 @@ def rate_control_options(policy: CodecPolicy) -> dict[str, str]:
     """Return a low-latency CBR/VBV budget shared by supported encoders."""
     return {
         "maxrate": str(policy.bitrate),
-        "bufsize": str(max(policy.bitrate // 2, 300_000)),
+        # Request a small VBV budget rather than half a second. This is a rate
+        # control hint, not a hard per-frame size cap (NVENC IDRs can exceed it).
+        "bufsize": str(max(2 * policy.bitrate // policy.fps, 300_000)),
     }
 
 
@@ -47,7 +49,10 @@ def make_encoder(name: str, width: int, height: int, policy: CodecPolicy):
     codec.framerate = fractions.Fraction(policy.fps, 1)
     codec.time_base = fractions.Fraction(1, 90000)
     codec.bit_rate = policy.bitrate
-    codec.gop_size = policy.fps
+    # NVENC supports explicit IDRs for RTCP PLI/FIR. Avoid a large mandatory
+    # IDR every second, which stalls a paced stream on high-detail scenes.
+    # Retain a 10-second recovery fallback; other encoders keep their tested GOP.
+    codec.gop_size = policy.fps * (10 if name == 'h264_nvenc' else 1)
     codec.max_b_frames = 0
     # Software H.264 benefits from a small amount of frame/slice parallelism.
     # Hardware encoders have their own scheduler and should keep the driver
@@ -131,6 +136,10 @@ class DesktopEncoder(H264Encoder):
             profile.mark('encode_interval')
             profile.describe(encoder=self.name)
             profile.count('encoded_frames')
+            profile.count('encoded_bytes', len(data))
+            profile.observe('encoded_media_time', len(data) * 8 * 1000 / self._rate)
+            if force_keyframe:
+                profile.count('keyframe_requests')
         if data:
             yield from self._split_bitstream(data)
 

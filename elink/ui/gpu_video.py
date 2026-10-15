@@ -133,7 +133,10 @@ class YuvSurface(QOpenGLWidget):
         color_parameters(frame)  # Unsupported color metadata falls back to CPU.
         self.frame = frame  # Own every plane until OpenGL has consumed it.
         self.pending = True
-        self.update()
+        # Called on the GUI thread by a coalesced frame-ready signal. Submit
+        # this frame now instead of adding another deferred QWidget update
+        # which can merge multiple video frames under compositor load.
+        self.repaint()
 
     def upload(self):
         frame = self.frame

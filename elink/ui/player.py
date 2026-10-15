@@ -49,6 +49,7 @@ class Player(QWidget):
     ended = Signal()
     reconfigure = Signal(dict)
     settings_changed = Signal(dict)
+    frame_ready = Signal()
 
     def __init__(self, runtime, client, *, game_mouse=None, controllers=True, preferences=None):
         super().__init__()
@@ -101,6 +102,8 @@ class Player(QWidget):
         self.timer.start(8)
         self._closed = False
         self.setup_renderer()
+        self.frame_ready.connect(self.consume_frame, Qt.ConnectionType.QueuedConnection)
+        self.client.mailbox.set_notifier(self.frame_ready.emit)
 
     def setup_renderer(self):
         if self.preferences.get('renderer', 'cpu') != 'gpu':
@@ -424,22 +427,29 @@ class Player(QWidget):
         self.pad_indices.clear()
         self.layout_chrome()
 
-    def tick(self):
-        self.update_mouse()
+    def consume_frame(self):
+        if self._closed:
+            return
         pixels = self.client.mailbox.take()
-        frame_changed = pixels is not None
         if pixels is not None:
             self.frame_taken_at = time.perf_counter()
             if isinstance(pixels, av.VideoFrame):
                 if self.gpu_surface:
                     try:
+                        old_rect = QRect(self.rect_image)
                         self.gpu_surface.set_frame(pixels)
+                        if self.rect_image != old_rect:
+                            self.refresh_video()
                     except Exception as exc:
                         self.fallback_renderer(str(exc))
                 # A frame queued before a fallback is discarded, never converted
                 # on the GUI thread. The receive worker prepares the next BGR frame.
             else:
                 self.set_frame_pixels(pixels)
+                self.refresh_video()
+
+    def tick(self):
+        self.update_mouse()
         now = time.monotonic()
         stats_due = now - self.stats_at >= 1
         if stats_due:
@@ -454,10 +464,9 @@ class Player(QWidget):
                 elif index in self.pad_indices:
                     self.send({"type": "pad", "index": index, "values": [0] * 7})
                     self.pad_indices.discard(index)
-        # The timer still drains the newest-frame mailbox and input devices,
-        # but avoid repainting the same scaled image at 125 Hz when no frame or
-        # overlay state changed.
-        if frame_changed or stats_due:
+        # Video is notified as soon as a frame arrives; the timer only handles
+        # input/statistics. A slow GUI retains one newest frame and one wakeup.
+        if stats_due:
             self.refresh_video()
 
     def set_frame_pixels(self, pixels):
@@ -651,6 +660,7 @@ class Player(QWidget):
 
     def closeEvent(self, event):
         if not self._closed:
+            self.client.mailbox.set_notifier(None)
             if self.control_menu:
                 self.control_menu.close()
             if self.settings_dialog:

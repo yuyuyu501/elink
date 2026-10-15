@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, Signal, QObject
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from elink import updates
+from elink.core.media import FrameMailbox
 from elink.ui.player import Player
 from elink.ui.window import MainWindow
 from test_window import pump
@@ -168,7 +169,8 @@ def test_captured_desktop_mouse_uses_host_cursor_and_release_restores_local():
         feedback = Signal(object)
         def call(self, fn, *args):
             fn(*args)
-    player = Player(Runtime(), SimpleNamespace(focus=lambda _: None), game_mouse=False, controllers=False)
+    player = Player(Runtime(), SimpleNamespace(focus=lambda _: None, mailbox=FrameMailbox()),
+                    game_mouse=False, controllers=False)
     try:
         player.capture()
         assert player.cursor().shape() == Qt.CursorShape.BlankCursor

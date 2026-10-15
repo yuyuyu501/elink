@@ -19,6 +19,7 @@ from .clipboard import MAX_CLIPBOARD_CHARS, read_text, write_text
 from .input import InputSession, WindowsInput, PAD_BACKENDS
 from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack, bgr_pixels
 from .qos import install_rtp_pacer, mark_rtc_sockets
+from .sending import install_video_pipeline
 from .security import Identity
 from ..discovery import NetworkScope, Responder, DISCOVERY_PORT, machine_id
 from .buffers import tune_receiver, tune_track
@@ -274,7 +275,8 @@ class HostServer:
                 await pc.setRemoteDescription(RTCSessionDescription(data["sdp"], "offer"))
                 video = DesktopTrack(config["width"], config["height"], config["fps"], self.synthetic, self.profile)
                 self.tracks.append(video)
-                pc.addTrack(video)
+                video_sender = pc.addTrack(video)
+                install_video_pipeline(video_sender, self.profile)
                 if config["audio"]:
                     audio = LoopbackTrack(self.synthetic)
                     self.tracks.append(audio)

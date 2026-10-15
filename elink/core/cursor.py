@@ -107,13 +107,13 @@ class WindowsCursor:
             surface = surface.reshape(height, width, 4)
             surface.fill(0)
             patch = surface[sy:sy + bottom - top, sx:sx + right - left, :3]
-            patch[:] = pixels[top:bottom, left:right]
+            patch[:] = pixels[top:bottom, left:right, :3]
             # GDI handles alpha and monochrome inversion against the actual background.
             if not self.user.DrawIconEx(dc, 0, 0, handle, width, height, 0, None, 3):
                 return pixels
             self.gdi.GdiFlush()
             result = pixels.copy()  # Never paint on the cached, cursor-free DXGI image.
-            result[top:bottom, left:right] = patch
+            result[top:bottom, left:right, :3] = patch
             return result
         finally:
             if previous:

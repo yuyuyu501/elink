@@ -3,6 +3,7 @@ from ctypes import wintypes
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from elink.core.cursor import WindowsCursor, cursor_rect
 from elink.core.media import DesktopTrack
@@ -14,13 +15,14 @@ def test_cursor_hotspot_output_origin_and_clipping():
     assert cursor_rect((100, 200, 3), (201, 99), (0, 0), (32, 32)) is None
 
 
-def test_windows_cursor_draw_does_not_change_cached_frame():
+@pytest.mark.parametrize('channels', [3, 4])
+def test_windows_cursor_draw_does_not_change_cached_frame(channels):
     cursor = WindowsCursor()
     cursor.user.LoadCursorW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
     cursor.user.LoadCursorW.restype = wintypes.HANDLE
     handle = cursor.user.LoadCursorW(None, 32512)  # Shared system arrow, no ownership.
     assert handle
-    background = np.full((100, 200, 3), 80, dtype=np.uint8)
+    background = np.full((100, 200, channels), 80, dtype=np.uint8)
     first = cursor.draw(background, handle, (10, 10))
     second = cursor.draw(background, handle, (80, 10))
     assert np.any(first != background)
@@ -29,6 +31,8 @@ def test_windows_cursor_draw_does_not_change_cached_frame():
     assert np.all(second[:, :60] == 80)  # No trail left from the previous position.
     clipped = cursor.draw(background, handle, (-5, -5))
     assert clipped.shape == background.shape
+    if channels == 4:
+        assert np.all(first[:, :, 3] == 80)  # Cursor changes color, not source alpha.
 
 
 def test_hidden_cursor_preserves_game_frame():

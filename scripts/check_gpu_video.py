@@ -108,11 +108,11 @@ def verify_colors(app):
             surface = view.gpu_surface
             if surface is None:
                 raise RuntimeError('GPU renderer fell back before color validation')
-            # Exercise the same mailbox/timer handoff as a real session, with
+            # Exercise the same mailbox/queued-signal handoff as a real session, with
             # the default statistics visible across consecutive video frames.
             for _ in range(3):
                 view.client.mailbox.put(frame)
-                view.tick()
+                app.processEvents()
                 settle(app, .03)
             if surface.broken or not surface.isValid() or view.gpu_surface is None:
                 raise RuntimeError('GPU renderer unavailable: ' + view.error_label.text())
@@ -254,6 +254,7 @@ def verify_stream(app, root, decoder):
             if time.perf_counter() > deadline:
                 raise AssertionError('Real stream did not present 30 frames')
         view.timer.stop()
+        client.mailbox.set_notifier(None)
         settle(app)
         surface = view.gpu_surface
         frame = surface.frame
@@ -274,6 +275,7 @@ def verify_stream(app, root, decoder):
         # A genuine render failure must remove both GPU widgets and let the
         # receive worker deliver CPU frames, with an accessible error notice.
         surface.fail(RuntimeError('injected rendering failure for fallback check'))
+        client.mailbox.set_notifier(view.frame_ready.emit)
         view.timer.start(8)
         deadline = time.perf_counter() + 5
         while view.gpu_surface is not None or view.image is None:

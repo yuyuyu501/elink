@@ -15,6 +15,7 @@ from aiortc.mediastreams import MediaStreamError
 
 from .codecs import metrics
 from .profiling import PipelineProfile
+from .pacing import FrameClock
 
 
 def bgr_pixels(frame):
@@ -40,7 +41,9 @@ class DesktopTrack(MediaStreamTrack):
         self.cursor_visible = None
         self.last = None
         self.start_time = None
-        self.next_time = 0.0
+        self.frame_clock = FrameClock(fps)
+        self.reformatter = av.video.reformatter.VideoReformatter()
+        self.last_pts = -1
         self.frame_count = 0
         self.capture_future = None
 
@@ -55,7 +58,7 @@ class DesktopTrack(MediaStreamTrack):
                 import dxcam
                 if not getattr(self, "com_initialized", False):
                     self.com_initialized = ctypes.windll.ole32.CoInitializeEx(None, 2) in (0, 1)
-                self.camera = dxcam.create(output_color="BGR", max_buffer_len=2)
+                self.camera = dxcam.create(output_color="BGRA", max_buffer_len=2)
                 # Let DXGI capture run continuously so a slow encode or color
                 # conversion cannot stall the desktop producer. The sender
                 # consumes the newest frame at the configured stream cadence.
@@ -84,13 +87,27 @@ class DesktopTrack(MediaStreamTrack):
                 pixels = self.cursor.composite(pixels, (output.left, output.top))
         self.profile.elapsed("capture_read_cursor", started)
         converted = time.perf_counter()
-        frame = av.VideoFrame.from_ndarray(pixels, format="bgr24")
-        frame = frame.reformat(width=self.width, height=self.height, format="yuv420p")
+        # DXCam returns an owned array; PyAV holds its lifetime until conversion
+        # finishes. Retain BGRA from DXGI instead of converting it to BGR first.
+        pixels = np.ascontiguousarray(pixels)
+        pixel_format = 'bgra' if pixels.shape[2] == 4 else 'bgr24'
+        frame = av.VideoFrame.from_numpy_buffer(pixels, format=pixel_format)
+        frame = self.reformatter.reformat(frame, width=self.width, height=self.height, format="yuv420p")
         self.profile.elapsed("capture_convert", converted)
         frame.opaque = {"profile": self.profile, "captured_at": started}
         self.profile.mark("capture_interval")
+        self.profile.count('captured_frames')
+        self.profile.describe(capture_format=pixel_format)
         metrics["capture_ms"] = (time.perf_counter() - started) * 1000
         return frame
+
+    def scheduled_capture(self):
+        late, skipped = self.frame_clock.wait()
+        if self.readyState != 'live':
+            raise MediaStreamError
+        self.profile.observe('capture_deadline_late', late * 1000)
+        self.profile.count('capture_slots_missed', skipped)
+        return self.capture()
 
     async def recv(self):
         if self.readyState != "live":
@@ -98,12 +115,6 @@ class DesktopTrack(MediaStreamTrack):
         now = time.perf_counter()
         if self.start_time is None:
             self.start_time = now
-            self.next_time = now
-        await asyncio.sleep(max(0, self.next_time - now))
-        if self.readyState != "live":
-            raise MediaStreamError
-        now = time.perf_counter()
-        self.next_time = max(self.next_time + 1 / self.fps, now)
         loop = asyncio.get_running_loop()
         # Capture and color conversion can overlap the sender's H.264 encode:
         # while aiortc encodes the current frame, the single capture worker
@@ -111,12 +122,16 @@ class DesktopTrack(MediaStreamTrack):
         # bubble without allowing multiple capture calls to pile up.
         future = self.capture_future
         if future is None:
-            future = loop.run_in_executor(self.executor, self.capture)
+            future = loop.run_in_executor(self.executor, self.scheduled_capture)
         self.capture_future = None
         frame = await future
-        if self.readyState == "live":
-            self.capture_future = loop.run_in_executor(self.executor, self.capture)
-        frame.pts = int((now - self.start_time) * 90000)
+        if self.readyState != 'live':
+            raise MediaStreamError
+        self.capture_future = loop.run_in_executor(self.executor, self.scheduled_capture)
+        # Timestamp the frame after the asynchronous capture completes, not
+        # before a potentially long wait for the capture worker.
+        frame.pts = max(self.last_pts + 1, int((time.perf_counter() - self.start_time) * 90000))
+        self.last_pts = frame.pts
         frame.time_base = fractions.Fraction(1, 90000)
         self.frame_count += 1
         return frame
@@ -248,9 +263,22 @@ class FrameMailbox:
         self.received = 0
         self.dropped = 0
         self.updated = 0.0
+        self.notifier = None
+
+    def set_notifier(self, notifier):
+        """Attach a nonblocking notification (e.g. an explicitly queued Qt signal).
+
+        Invoke under the lock so detach guarantees no later calls into a deleted
+        GUI object. The callback must never synchronously call take().
+        """
+        with self.lock:
+            self.notifier = notifier
+            if notifier is not None and self.frame is not None:
+                notifier()
 
     def put(self, frame):
         with self.lock:
+            was_empty = self.frame is None
             if self.frame is not None:
                 self.dropped += 1
                 self.profile.count("mailbox_dropped")
@@ -258,6 +286,8 @@ class FrameMailbox:
             self.queued_at = time.perf_counter()
             self.received += 1
             self.updated = time.monotonic()
+            if was_empty and self.notifier is not None:
+                self.notifier()
 
     def take(self):
         with self.lock:

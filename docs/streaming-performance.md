@@ -1,5 +1,7 @@
 # 串流性能测量与 GPU 显示原型
 
+90 FPS 调度问题的最新诊断、论文/开源资料、实施计划和修改前后实测见 [帧率修复计划与验证](frame-rate-plan.md)。下文保留前几轮的实现记录和测量边界。
+
 2026-10-14 开发记录。实现阶段先完成修改、测试和 Git 同步；随后用户明确授权将本阶段成果打包为 0.4.22 Preview。合成实验结果不代表双机游戏验收完成。
 
 ## 使用
@@ -18,8 +20,12 @@ GPU 选择独立于解码器：软件 H.264 解码也可用 GPU 显示；D3D11VA
 | --- | --- |
 | `capture_read_cursor` | 读取桌面像素、查询/叠加光标的 CPU 墙钟耗时 |
 | `capture_convert` | 构造 AVFrame、缩放与转换 YUV420P |
+| `capture_deadline_late` | 采集工作线程相对绝对时间槽的迟到量；`capture_slots_missed` 另统计跳过的时间槽 |
 | `capture_to_encode` | 本机从采集调用开始到进入编码的时间，包含前两项，不可重复相加 |
 | `encode` | 编码调用时间，第一帧可能含编码器初始化 |
+| `encoded_media_time` | 编码帧字节数除以当前媒体码率预算，单位 ms；不是编码耗时 |
+| `send_frame` | 上一帧交给发送循环到它请求下一帧的墙钟耗时 |
+| `encode_ahead_wait` / `encoded_queue_wait` | 发送循环等待预取编码完成 / 已编码帧就绪后等待被取走 |
 | `rtp_pacer_wait` | 单个 RTP 包进入发送限速器到允许发送的等待，含锁等待 |
 | `rtp_send_call` | 单个 RTP 发送调用耗时，不等于数据到达网卡或对端的时间 |
 | `assembled_frame_interval` | 完整编码帧进入解码队列的间隔，不是 RTP 重组耗时 |

@@ -40,6 +40,26 @@ def make_player():
     return app, player, events
 
 
+def test_frame_ready_wakes_gui_without_polling_and_close_detaches():
+    from concurrent.futures import ThreadPoolExecutor
+    app, player, _ = make_player()
+    try:
+        pixels = np.full((360, 640, 3), 80, np.uint8)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(player.client.mailbox.put, pixels).result()
+        assert not player.timer.isActive()
+        app.processEvents()
+        assert player.image_pixels is pixels
+        player.close()
+        assert player.client.mailbox.notifier is None
+        replacement = np.zeros_like(pixels)
+        player.client.mailbox.put(replacement)
+        app.processEvents()
+        assert player.image_pixels is pixels
+    finally:
+        player.close()
+
+
 def test_titlebar_buttons_and_double_click_stay_local():
     app, player, events = make_player()
     ended = []
@@ -105,7 +125,7 @@ def test_gpu_unavailable_falls_back_without_losing_cpu_display(monkeypatch):
         assert '回退' in player.error_label.text()
         pixels = np.zeros((10, 20, 3), dtype=np.uint8)
         player.client.mailbox.put(pixels)
-        player.tick()
+        app.processEvents()
         app.processEvents()
         assert player.image_pixels is pixels
         assert player.client.profile.snapshot()['counters']['presented_frames'] > 0
@@ -159,7 +179,7 @@ def test_gpu_overlay_refresh_keeps_video_and_raster_drawing_separate():
         assert modes == ['cpu']
         pixels = np.full((10, 20, 3), 120, dtype=np.uint8)
         player.client.mailbox.put(pixels)
-        player.tick()
+        app.processEvents()
         app.processEvents()
         assert player.image_pixels is pixels
         assert player.toolbar.isVisible() and player.error_label.isVisible()

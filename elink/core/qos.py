@@ -5,6 +5,8 @@ import asyncio
 import socket
 import time
 
+from .pacing import wait_until
+
 
 VIDEO_DSCP = 34  # AF41: high-priority interactive video, leaving EF for voice.
 
@@ -70,18 +72,17 @@ def install_rtp_pacer(pc, bitrate_mbps: int, profile=None) -> int:
         async def paced(data, *, _original=original, _state=state):
             queued = time.perf_counter()
             async with _state['lock']:
-                loop = asyncio.get_running_loop()
-                now = loop.time()
-                delay = _state['next_at'] - now
-                if delay > 0.008:
-                    # Windows' event-loop timer rounds small sleeps up to a
-                    # full tick. Sleep in a worker for a precise short wait,
-                    # keeping the event loop available for input and audio.
-                    await asyncio.to_thread(time.sleep, delay)
-                elif delay > 0:
-                    await asyncio.sleep(0)
-                now = loop.time()
-                _state['next_at'] = max(_state['next_at'], now) + len(data) * 8 / rate
+                # A bounded 4 ms packet burst amortizes Python/crypto overhead.
+                # Beyond that budget wait to a QPC deadline in a worker, not a
+                # Windows event-loop timer. No unbounded background send queue.
+                now = time.perf_counter()
+                charged_at = max(_state['next_at'], now - 0.004) + len(data) * 8 / rate
+                if charged_at > now:
+                    await asyncio.to_thread(wait_until, max(charged_at, now + 0.002))
+                # Retain up to 4 ms of refill credit after an oversleep. Resetting
+                # to the wakeup time loses capacity on every delayed wake and
+                # makes the configured bitrate unattainable near saturation.
+                _state['next_at'] = charged_at
                 if profile:
                     profile.elapsed('rtp_pacer_wait', queued)
                 sent = time.perf_counter()
