@@ -131,6 +131,42 @@ def test_gpu_frame_allows_click_to_capture_without_qimage(monkeypatch):
         player.close()
 
 
+def test_gpu_overlay_refresh_keeps_video_and_raster_drawing_separate():
+    from elink.ui.gpu_video import VideoOverlay
+    app, player, events = make_player()
+    video_updates = []
+    modes = []
+    player.client.set_renderer = modes.append
+    surface = SimpleNamespace(update=lambda: video_updates.append(True),
+                              hide=lambda: None, cleanup=lambda: None, deleteLater=lambda: None)
+    player.gpu_surface = surface
+    overlay = player.gpu_overlay = VideoOverlay(player)
+    overlay.setGeometry(player.rect())
+    overlay.stackUnder(player.toolbar)
+    overlay.show()
+    try:
+        assert overlay.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        assert overlay.focusPolicy() == Qt.FocusPolicy.NoFocus
+        player.refresh_video()
+        player.paintEvent(None)
+        app.processEvents()
+        # Overlay changes must not schedule video inside the parent's paint
+        # event; that creates a self-sustaining composition/repaint loop.
+        assert video_updates == []
+        player.fallback_renderer('injected draw failure')
+        assert player.gpu_surface is player.gpu_overlay is None
+        assert not overlay.isVisible()
+        assert modes == ['cpu']
+        pixels = np.full((10, 20, 3), 120, dtype=np.uint8)
+        player.client.mailbox.put(pixels)
+        player.tick()
+        app.processEvents()
+        assert player.image_pixels is pixels
+        assert player.toolbar.isVisible() and player.error_label.isVisible()
+    finally:
+        player.close()
+
+
 def test_fullscreen_uses_entire_video_area_and_f8_remains_accessible():
     app, player, events = make_player()
     try:

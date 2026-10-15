@@ -9,6 +9,7 @@ from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLPixelTransferOptions,
                               QOpenGLShader, QOpenGLShaderProgram, QOpenGLTexture,
                               QOpenGLVertexArrayObject)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtWidgets import QWidget
 
 
 VERTEX = '''#version 120
@@ -48,6 +49,24 @@ def color_parameters(frame):
     full = int(frame.color_range) == 2 or frame.format.name == 'yuvj420p'
     coeff = (1.5748, -.187324, -.468124, 1.8556) if space == 1 else (1.402, -.344136, -.714136, 1.772)
     return (0.0, 1.0, 1.0, coeff) if full else (16 / 255, 255 / 219, 255 / 224, coeff)
+
+
+class VideoOverlay(QWidget):
+    """Raster sibling composed above video; never changes the video GL state."""
+
+    def __init__(self, player):
+        super().__init__(player)
+        self.player = player
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            self.player.paint_overlay(painter)
+        finally:
+            painter.end()
 
 
 class YuvSurface(QOpenGLWidget):
@@ -208,9 +227,6 @@ class YuvSurface(QOpenGLWidget):
                 if self.pending:
                     self.player.frame_presented()
                 self.pending = False
-            painter = QPainter(self)
-            self.player.paint_overlay(painter)
-            painter.end()
             if profile:
                 profile.elapsed('gpu_paint_submit', started)
         except Exception as exc:

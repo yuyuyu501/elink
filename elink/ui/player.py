@@ -69,6 +69,7 @@ class Player(QWidget):
         self.settings_dialog = None
         self.captured = False
         self.gpu_surface = None
+        self.gpu_overlay = None
         self.frame_taken_at = None
         self.image = None
         # QImage wraps this buffer without copying. Keep the numpy owner alive
@@ -108,12 +109,16 @@ class Player(QWidget):
             self.fallback_renderer('当前窗口平台不支持 GPU 纹理显示')
             return
         try:
-            from .gpu_video import YuvSurface
+            from .gpu_video import VideoOverlay, YuvSurface
             self.gpu_surface = YuvSurface(self)
             self.gpu_surface.failed.connect(lambda message: QTimer.singleShot(0, lambda: self.fallback_renderer(message)))
             self.gpu_surface.setGeometry(self.rect())
             self.gpu_surface.lower()
             self.gpu_surface.show()
+            self.gpu_overlay = VideoOverlay(self)
+            self.gpu_overlay.setGeometry(self.rect())
+            self.gpu_overlay.stackUnder(self.toolbar)
+            self.gpu_overlay.show()
             if hasattr(self.client, 'set_renderer'):
                 self.runtime.call(self.client.set_renderer, 'gpu')
             QTimer.singleShot(1000, self.check_renderer)
@@ -128,6 +133,10 @@ class Player(QWidget):
         if self._closed:
             return
         surface, self.gpu_surface = self.gpu_surface, None
+        overlay, self.gpu_overlay = self.gpu_overlay, None
+        if overlay:
+            overlay.hide()
+            overlay.deleteLater()
         if surface:
             surface.hide()
             surface.cleanup()
@@ -137,7 +146,7 @@ class Player(QWidget):
         if hasattr(self.client, 'profile'):
             self.client.profile.describe(renderer='qimage-bgr', renderer_fallback=str(reason)[:240])
         self.show_error('已回退兼容显示：' + str(reason)[:180])
-        self.update()
+        self.refresh_video()
 
     def export_performance(self):
         self.release()
@@ -188,8 +197,10 @@ class Player(QWidget):
         if self.gpu_surface:
             self.gpu_surface.setGeometry(self.rect())
             self.gpu_surface.lower()
+        if self.gpu_overlay:
+            self.gpu_overlay.setGeometry(self.rect())
         place_resize_handles(self)
-        self.update()
+        self.refresh_video()
 
     def resizeEvent(self, event):
         self.layout_chrome()
@@ -289,7 +300,7 @@ class Player(QWidget):
 
     def set_statistics(self, enabled):
         self.show_statistics = enabled
-        self.update()
+        self.refresh_video()
 
     def toggle_fullscreen(self):
         self.release()
@@ -381,7 +392,7 @@ class Player(QWidget):
         software = self.captured and self.mouse_mode == 'local' and not relative
         if force or software != self.software_cursor:
             self.software_cursor = software
-            self.update()
+            self.refresh_video()
         if force or relative != self.game_mouse:
             if relative:
                 self.grabMouse()
@@ -406,7 +417,7 @@ class Player(QWidget):
         self.releaseMouse()
         self.unsetCursor()
         self.software_cursor = False
-        self.update()
+        self.refresh_video()
         if self.xinput:
             for index in self.pad_indices:
                 self.xinput.rumble(index)
@@ -447,7 +458,7 @@ class Player(QWidget):
         # but avoid repainting the same scaled image at 125 Hz when no frame or
         # overlay state changed.
         if frame_changed or stats_due:
-            self.update()
+            self.refresh_video()
 
     def set_frame_pixels(self, pixels):
         """Present a BGR ndarray while retaining its owner for QImage."""
@@ -463,9 +474,15 @@ class Player(QWidget):
         if self.captured and self.xinput and not self._closed:
             self.xinput.rumble(event["index"], event["left"], event["right"])
 
+    def refresh_video(self):
+        if self.gpu_surface:
+            if self.gpu_overlay:
+                self.gpu_overlay.update()
+        else:
+            self.update()
+
     def paintEvent(self, event):
         if self.gpu_surface:
-            self.gpu_surface.update()
             return
         paint_started = time.perf_counter()
         painter = QPainter(self)
@@ -548,7 +565,7 @@ class Player(QWidget):
             self.toggle_fullscreen()
         elif event.key() == Qt.Key.Key_F10:
             self.show_statistics = not self.show_statistics
-            self.update()
+            self.refresh_video()
         elif event.key() == Qt.Key.Key_Z and event.modifiers() & modifiers == modifiers:
             self.release()
         elif self.captured and not event.isAutoRepeat():
@@ -587,7 +604,7 @@ class Player(QWidget):
         elif not self.rect_image.isEmpty():
             self.software_cursor_pos = event.position().toPoint()
             if self.software_cursor:
-                self.update()
+                self.refresh_video()
             rect = self.rect_image
             x = max(0, min(65535, int((event.position().x() - rect.x()) * 65535 / max(1, rect.width() - 1))))
             y = max(0, min(65535, int((event.position().y() - rect.y()) * 65535 / max(1, rect.height() - 1))))

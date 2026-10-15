@@ -1,12 +1,14 @@
-"""Local synthetic OpenGL color/stride checks and CPU/GPU presentation benchmark.
+"""Composed GPU video/overlay checks and CPU/GPU presentation benchmark.
 
 Run on a Windows desktop, not offscreen CI. No desktop capture or input injection.
+Optional stream checks use local synthetic H.264/WebRTC with software/hardware decode.
 Timings include CPU submission, not GPU completion or physical scanout.
 """
 import argparse
 import json
 import os
 from pathlib import Path
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -14,11 +16,14 @@ import av
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 from elink.core.media import FrameMailbox
 from elink.core.media import bgr_pixels
 from elink.core.profiling import PipelineProfile
 from elink.ui.player import Player
+from elink.ui.theme import apply_theme
 
 
 class Runtime(QObject):
@@ -28,13 +33,13 @@ class Runtime(QObject):
         fn(*args)
 
 
-def player(app, mode):
+def player(app, mode, *, statistics=True):
     client = SimpleNamespace(profile=PipelineProfile(), pc=None, mailbox=FrameMailbox(), rtt_ms=0,
                              last_pong=0, focus=lambda _: None, set_renderer=lambda _: None,
                              send=lambda _: None)
     view = Player(Runtime(), client, controllers=False, preferences={'renderer': mode})
     view.timer.stop()
-    view.show_statistics = False
+    view.show_statistics = statistics
     view.show()
     app.processEvents()
     return view
@@ -68,11 +73,15 @@ def verify_colors(app):
             surface = view.gpu_surface
             if surface is None:
                 raise RuntimeError('GPU renderer fell back before color validation')
-            surface.set_frame(frame)
-            settle(app)
+            # Exercise the same mailbox/timer handoff as a real session, with
+            # the default statistics visible across consecutive video frames.
+            for _ in range(3):
+                view.client.mailbox.put(frame)
+                view.tick()
+                settle(app, .03)
             if surface.broken or not surface.isValid() or view.gpu_surface is None:
                 raise RuntimeError('GPU renderer unavailable: ' + view.error_label.text())
-            image = surface.grabFramebuffer()
+            image = view.grab().toImage()
             rect, ratio = view.rect_image, surface.devicePixelRatioF()
             expected = frame.to_ndarray(format='rgb24', src_colorspace='ITU709' if space == 1 else 'ITU601',
                                         dst_colorspace='ITU601', src_color_range=2 if full else 1)
@@ -94,15 +103,43 @@ def verify_colors(app):
             raise AssertionError('GPU context failed during fullscreen transition')
         # Validate retained video, not merely context survival, after recreation.
         surface = view.gpu_surface
-        image = surface.grabFramebuffer()
+        image = view.grab().toImage()
         rect, ratio = view.rect_image, surface.devicePixelRatioF()
         actual = image.pixelColor(round((rect.x() + rect.width() * .25) * ratio),
                                   round((rect.y() + rect.height() * .25) * ratio)).getRgb()[:3]
         if np.max(np.abs(expected[90, 160].astype(int) - actual)) > 5:
             raise AssertionError('Retained frame was lost during fullscreen transition')
-        view.show_statistics = True
-        view.update()
+        # Both overlay removal and software cursor must compose correctly
+        # without painting into the OpenGL video target.
+        QTest.keyClick(view, Qt.Key.Key_F10)
         settle(app)
+        without_stats = view.grab().toImage()
+        QTest.keyClick(view, Qt.Key.Key_F10)
+        settle(app)
+        with_stats = view.grab().toImage()
+        if without_stats == with_stats:
+            raise AssertionError('Statistics overlay did not compose above video')
+        view.software_cursor_pos = view.rect_image.center()
+        view.software_cursor = True
+        view.refresh_video()
+        settle(app)
+        with_cursor = view.grab().toImage()
+        view.software_cursor = False
+        view.refresh_video()
+        settle(app)
+        if with_cursor == view.grab().toImage():
+            raise AssertionError('Software cursor overlay did not show/hide')
+        view.controls_button.click()
+        settle(app)
+        if not view.control_menu.isVisible():
+            raise AssertionError('GPU overlay blocked the control menu')
+        view.control_menu.close()
+        settle(app)
+        before = view.client.profile.snapshot()['counters']['gpu_paint_submit']
+        settle(app, .15)
+        after = view.client.profile.snapshot()['counters']['gpu_paint_submit']
+        if after - before > 2:
+            raise AssertionError('Idle GPU player is repainting continuously')
     finally:
         view.close()
         view.deleteLater()
@@ -111,7 +148,7 @@ def verify_colors(app):
 
 
 def benchmark(app, mode, frames, width, height):
-    view = player(app, mode)
+    view = player(app, mode, statistics=False)
     rgb = np.zeros((height, width, 3), dtype=np.uint8)
     rgb[:, ::2, 1] = 180
     frame = av.VideoFrame.from_ndarray(rgb, format='rgb24').reformat(format='yuv420p')
@@ -134,8 +171,8 @@ def benchmark(app, mode, frames, width, height):
                 view.set_frame_pixels(pixels)
                 view.update()
             view.frame_taken_at = time.perf_counter()
-            # repaint is synchronous CPU submission. No grabFramebuffer in the
-            # timed region: a GPU readback would distort the result.
+            # repaint is synchronous CPU submission. No image grab in the timed
+            # region: a GPU readback would distort the result.
             (view.gpu_surface if mode == 'gpu' else view).repaint()
             app.processEvents()
             profile.elapsed('prepare_and_paint_call', started)
@@ -152,18 +189,98 @@ def benchmark(app, mode, frames, width, height):
         app.processEvents()
 
 
+def verify_stream(app, root, decoder):
+    """Real H.264/WebRTC/GUI handoff using only local synthetic video."""
+    from elink.core.runtime import Runtime as NetworkRuntime
+    from elink.core.transport import Client, HostServer
+    from elink.core.input import RecordingInput
+
+    runtime = NetworkRuntime()
+    host = HostServer(root / 'host', synthetic=True, backend_factory=RecordingInput)
+    client = Client(root / 'client', play_audio=False)
+    client.set_renderer('gpu')
+    view = None
+
+    async def connect():
+        port = await host.start('127.0.0.1', 0)
+        await client.connect(f'127.0.0.1:{port}', dict(width=1920, height=1080, fps=60, audio=False), decoder)
+
+    async def close():
+        await client.disconnect()
+        await host.stop()
+
+    try:
+        runtime.submit(connect()).result(25)
+        view = Player(runtime, client, controllers=False, preferences={'renderer': 'gpu'})
+        view.show()
+        deadline = time.perf_counter() + 12
+        while client.profile.snapshot()['counters'].get('presented_frames', 0) < 30:
+            settle(app, .03)
+            if view.gpu_surface is None or view.gpu_surface.broken:
+                raise AssertionError('Real stream GPU display failed: ' + view.error_label.text())
+            if time.perf_counter() > deadline:
+                raise AssertionError('Real stream did not present 30 frames')
+        view.timer.stop()
+        settle(app)
+        surface = view.gpu_surface
+        frame = surface.frame
+        reference = bgr_pixels(frame)
+        image = view.grab().toImage()
+        rect, ratio = view.rect_image, surface.devicePixelRatioF()
+        for nx, ny in ((.25, .25), (.75, .25), (.25, .75), (.75, .75)):
+            actual = image.pixelColor(round((rect.x() + nx * rect.width()) * ratio),
+                                      round((rect.y() + ny * rect.height()) * ratio)).getRgb()[:3]
+            expected = reference[int(ny * frame.height), int(nx * frame.width), ::-1].astype(int)
+            if np.max(np.abs(expected - actual)) > 5:
+                raise AssertionError(f'Real {decoder} stream composed pixels disagree with decoded frame')
+        metadata = client.profile.snapshot()['metadata']
+        if decoder == 'hardware' and metadata.get('decoder') != 'D3D11VA':
+            raise AssertionError('Hardware validation did not use D3D11VA')
+
+        # A genuine render failure must remove both GPU widgets and let the
+        # receive worker deliver CPU frames, with an accessible error notice.
+        surface.fail(RuntimeError('injected rendering failure for fallback check'))
+        view.timer.start(8)
+        deadline = time.perf_counter() + 5
+        while view.gpu_surface is not None or view.image is None:
+            settle(app, .03)
+            if time.perf_counter() > deadline:
+                raise AssertionError('Failed GPU stream did not resume CPU video')
+        if view.gpu_overlay is not None or not view.error_label.isVisible():
+            raise AssertionError('Fallback left an overlay over the CPU video or hid its notice')
+        return dict(decoder=metadata['decoder'], pixel_format=frame.format.name,
+                    composed_video=True, cpu_fallback=True)
+    finally:
+        if view:
+            view.close()
+            view.deleteLater()
+            app.processEvents()
+        try:
+            runtime.submit(close()).result(15)
+        finally:
+            runtime.stop()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=Path('.artifacts/gpu-video-check.json'))
     parser.add_argument('--frames', type=int, default=120)
+    parser.add_argument('--stream-check', action='store_true',
+                        help='Also verify real local WebRTC video with software H.264 and D3D11VA')
     args = parser.parse_args()
     if args.frames < 1:
         parser.error('--frames must be positive')
     os.environ['QT_QPA_PLATFORM'] = 'windows'
     app = QApplication.instance() or QApplication([])
+    apply_theme(app)
     result = dict(colors=verify_colors(app), benchmarks=[benchmark(app, mode, args.frames, 1920, 1080)
                                                       for mode in ('cpu', 'gpu')],
                   limitations='Synthetic CPU submission benchmark, not game FPS, GPU time or input-to-photon latency.')
+    if args.stream_check:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='gpu-stream-', dir=args.output.parent) as temp:
+            result['streams'] = [verify_stream(app, Path(temp) / decoder, decoder)
+                                 for decoder in ('software', 'hardware')]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(json.dumps(result, indent=2))
