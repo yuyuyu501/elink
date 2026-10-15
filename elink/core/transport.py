@@ -502,6 +502,13 @@ class Client:
             self.control = pc.createDataChannel("control", ordered=True)
             self.motion = pc.createDataChannel("motion", ordered=False, maxRetransmits=0)
 
+            @self.control.on("open")
+            def control_opened():
+                # Negotiation/ICE/DTLS can already exceed the pong timeout.
+                # Start the response budget when this channel can send a ping.
+                if self.pc is pc:
+                    self.last_pong = time.monotonic()
+
             @self.control.on("close")
             def control_closed():
                 if self.pc is pc:

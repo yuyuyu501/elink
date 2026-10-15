@@ -176,9 +176,10 @@ class DesktopDecoder(H264Decoder):
             frames = self.codec.decode(packet)
         except av.FFmpegError as exc:
             metrics["decode_errors"] += 1
+            metrics["last_decode_error"] = f"{type(exc).__name__}: {exc}"[:500]
             if profile:
                 profile.count("decode_errors")
-            metrics["last_decode_error"] = f"{type(exc).__name__}: {exc}"[:500]
+                profile.describe(last_decode_error=metrics["last_decode_error"])
             if self.hardware and self.mode == "auto":
                 self.hardware = False
                 self.codec = av.CodecContext.create("h264", "r")

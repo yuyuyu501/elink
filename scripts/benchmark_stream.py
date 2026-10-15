@@ -44,7 +44,8 @@ def host_worker(connection, root, source, width, height):
     if source == 'motion':
         transport.DesktopTrack = motion_track(width, height)
     async def run():
-        host = transport.HostServer(root, synthetic=source != 'desktop', backend_factory=RecordingInput)
+        host = transport.HostServer(root, synthetic=source != 'desktop', backend_factory=RecordingInput,
+                                    notify=lambda message: print('HOST: ' + message, flush=True))
         try:
             await host.start('127.0.0.1', 0)
             connection.send(('port', host.port))
@@ -53,7 +54,7 @@ def host_worker(connection, root, source, width, height):
                 if command == 'stop':
                     break
                 if command == 'profile':
-                    connection.send(('profile', host.profile.snapshot()))
+                    connection.send(('profile', peer_snapshot(host)))
         finally:
             await host.stop()
     try:
@@ -106,6 +107,13 @@ class SeparateHost:
             self.child_connection.close()
 
 
+def peer_snapshot(peer):
+    report = peer.profile.snapshot()
+    pc = peer.pc
+    report['connection_state'] = pc.connectionState if pc else 'disconnected'
+    return report
+
+
 def result(args, before, after, seconds, refresh=None):
     rates = {}
     for name, keys in [('host', ('captured_frames', 'encoded_frames', 'encoded_bytes')),
@@ -126,6 +134,13 @@ def result(args, before, after, seconds, refresh=None):
                 measured_seconds=seconds, display_hz=refresh, rates=rates, **after,
                 limitations='Local shared-resource loopback. Submission is not physical scanout; '
                              'desktop captures may repeat. No claim about WAN or gaming performance.')
+
+
+def presentation_issues(window):
+    """Do not mistake an unexposed Qt window for a slow video pipeline."""
+    return [name for name, bad in (
+        ('hidden', not window['visible']), ('minimized', window['minimized']),
+        ('unexposed', not window['exposed'])) if bad]
 
 
 def main(argv=None):
@@ -157,7 +172,8 @@ def main(argv=None):
             host = (SeparateHost(root / 'host', args) if args.separate_host else
                     transport.HostServer(root / 'host', synthetic=args.source != 'desktop',
                                          backend_factory=RecordingInput))
-            client = transport.Client(root / 'client', play_audio=False)
+            client = transport.Client(root / 'client', play_audio=False,
+                                      notify=lambda message: print('CLIENT: ' + message, flush=True))
             client.set_renderer(args.renderer)
 
             async def connect():
@@ -182,24 +198,71 @@ def main(argv=None):
                 runtime = Runtime()
                 state = {}
 
+                def window_state():
+                    view = state['view']
+                    surface = view.gpu_surface
+                    handle = view.windowHandle()
+                    return dict(visible=view.isVisible(), minimized=view.isMinimized(),
+                                exposed=bool(handle and handle.isExposed()),
+                                active=view.isActiveWindow(),
+                                application_state=app.applicationState().name,
+                                surface_visible=surface.isVisible() if surface else None,
+                                surface_updates=surface.updatesEnabled() if surface else None,
+                                surface_valid=surface.isValid() if surface else None,
+                                surface_pending=surface.pending if surface else None,
+                                surface_broken=surface.broken if surface else None,
+                                error=view.error_label.text())
+
                 def finish():
+                    check_window()
                     state['result'] = result(args, state['before'], snapshot(),
                                              time.perf_counter() - state['start'],
                                              state['view'].screen().refreshRate())
+                    state['result']['window'] = dict(before=state['window_before'], after=window_state())
+                    state['result']['invalid_window_samples'] = state['invalid_window_samples']
+                    state['result']['startup_counters'] = {name: value['counters']
+                                                          for name, value in state['before'].items()}
                     state['view'].close()
                     app.quit()
 
                 def warm():
-                    state.update(before=snapshot(), start=time.perf_counter())
+                    state.update(before=snapshot(), start=time.perf_counter(), window_before=window_state(),
+                                 invalid_window_samples=0)
+                    check_window()
                     QTimer.singleShot(round(args.seconds * 1000), finish)
+
+                def check_window():
+                    if 'start' in state and presentation_issues(window_state()):
+                        state['invalid_window_samples'] += 1
+
+                visibility_timer = QTimer()
+                visibility_timer.timeout.connect(check_window)
+                visibility_timer.start(250)
 
                 def connected(_):
                     view = Player(runtime, client, controllers=False, preferences={'renderer': args.renderer})
                     state['view'] = view
                     view.setWindowTitle('Elink streaming benchmark')
                     view.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+                    area = view.screen().availableGeometry()
+                    view.resize(min(800, area.width()), min(490, area.height()))
+                    view.move(area.topLeft())
                     view.show()
-                    QTimer.singleShot(round(args.warmup * 1000), warm)
+                    # Shell startup show-state can otherwise minimize a GUI
+                    # child even though QWidget.show() was called.
+                    QTimer.singleShot(200, view.showNormal)
+                    state['connected_at'] = time.perf_counter()
+                    await_first_frame()
+
+                def await_first_frame():
+                    # SDP completion is earlier than ICE/DTLS/media startup.
+                    # Warm up a running pipeline, not an idle connection.
+                    if client.profile.snapshot()['counters'].get('presented_frames', 0):
+                        QTimer.singleShot(round(args.warmup * 1000), warm)
+                    elif time.perf_counter() - state['connected_at'] > 20:
+                        failed('No presented frame within 20 seconds of connection')
+                    else:
+                        QTimer.singleShot(50, await_first_frame)
 
                 def failed(error):
                     state['error'] = error
@@ -220,6 +283,11 @@ def main(argv=None):
                 async def run():
                     try:
                         await connect()
+                        deadline = time.perf_counter() + 20
+                        while not client.profile.snapshot()['counters'].get('decoded_frames', 0):
+                            if time.perf_counter() > deadline:
+                                raise RuntimeError('No decoded frame within 20 seconds of connection')
+                            await asyncio.sleep(.05)
                         await asyncio.sleep(args.warmup)
                         before, started = snapshot(), time.perf_counter()
                         await asyncio.sleep(args.seconds)
@@ -230,8 +298,12 @@ def main(argv=None):
             args.output.write_text(json.dumps(measured, indent=2), encoding='utf-8')
             print(json.dumps(measured['rates'], indent=2))
             print(f'Report: {args.output}')
+            if measured.get('invalid_window_samples', 0):
+                raise RuntimeError('Invalid presentation run: window hidden/minimized/unexposed')
             if measured['rates']['decoded_frames_per_second'] == 0:
                 raise RuntimeError('No decoded frames during measurement')
+            if args.present and measured['rates']['presented_frames_per_second'] == 0:
+                raise RuntimeError('No video frames submitted during measurement; inspect window state')
     finally:
         transport.DesktopTrack = original_track
 
