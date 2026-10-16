@@ -14,7 +14,7 @@ python -m venv .venv
 
 本地便携构建入口：`dist/Elink/Elink.exe`，需保留整个文件夹。构建：`.venv/Scripts/python.exe -m scripts.build`。
 
-本轮日常开发按“本地修改 → 自动测试 → Git 同步”执行，审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.check_and_sync --message "修改说明"`。完整优化完成前暂停打包、新版本号、标签和 Release 发布，之后由用户明确启用。详见 [开发与打包流程](docs/development-workflow.md)。
+日常开发按“本地修改 → 自动测试 → Git 同步”执行，审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.check_and_sync --message "修改说明"`。按用户授权，明确修复并验证具体问题后继续打包、自测并发布 Windows Preview；调查和未完成的实验不自动发布，剩余限制写入发布说明。详见 [开发与打包流程](docs/development-workflow.md)。
 
 自动化测试：`.venv/Scripts/python.exe -m pytest -q`。便携包自测可运行 `Elink.exe --self-test <独立测试目录>`，结果写入该目录；实际桌面采集自测为 `--self-test-desktop`，两者均不向系统注入键鼠。
 

@@ -9,19 +9,20 @@ workflow:
   test: 1
   git_sync: 1
   server_update: 0
-  windows_package: 0
-  github_release: 0
+  windows_package: 1
+  github_release: 1
 ```
 
 ## Current development cycle
 
 - Default for code/configuration tasks: local changes -> automated tests -> Git
-  sync. Windows packaging and new Release publication are paused while the
-  current complete optimization cycle is being developed and validated.
-- Do not bump application versions, create release tags, build distributable
-  EXEs or publish Releases during this cycle. The user will explicitly enable
-  packaging/publication after the complete change is ready. Keep progress in
-  development documentation rather than new release notes.
+  sync. As authorized on 2026-10-16, continue to Windows packaging and Preview
+  publication when a concrete problem has been clearly fixed and validated.
+- Investigation, incomplete experiments and documentation-only changes do not
+  trigger a release. Record evidence for the resolved problem and disclose any
+  remaining limitations; a passing unit suite alone does not prove a performance
+  problem is resolved. No further permission is needed for a verified fix under
+  this standing authorization, unless the user marks the task local-only.
 - Development-only native compilation and rendering benchmarks are allowed when
   required to validate the requested implementation; they are not app packaging.
 - No server deployment is enabled. Git synchronization is not deployment.
@@ -47,7 +48,7 @@ workflow:
 - Record limitations accurately: tests and local benchmarks do not establish
   stable two-machine gaming, all driver compatibility or release signing.
 
-## Packaging and publication when explicitly re-enabled
+## Packaging and publication after a verified fix
 
 - Prepare a new unused version, update both declarations and write release notes.
 - Use `.venv/Scripts/python.exe -m scripts.release_windows --message "..." --notes <notes.md>`.
