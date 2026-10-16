@@ -46,7 +46,7 @@ class EncodeAhead:
             self.task = None
 
 
-def install_video_pipeline(sender, profile):
+def install_video_pipeline(sender, profile, budget=None):
     if sender.kind != 'video' or hasattr(sender, '_elink_encode_ahead'):
         return False
     pipeline = EncodeAhead(sender._next_encoded_frame, profile)
@@ -61,4 +61,19 @@ def install_video_pipeline(sender, profile):
     sender._next_encoded_frame = pipeline.get
     sender._run_rtp = run
     sender._elink_encode_ahead = pipeline
+    if budget is not None:
+        from aiortc.rtp import RtcpRrPacket, RtcpSrPacket, RtcpPsfbPacket
+        original_feedback = sender._handle_rtcp_packet
+
+        async def feedback(packet):
+            await original_feedback(packet)
+            if isinstance(packet, (RtcpRrPacket, RtcpSrPacket)):
+                for report in packet.reports:
+                    if report.ssrc == sender._ssrc:
+                        budget.feedback(report.fraction_lost / 256, getattr(sender, '_RTCRtpSender__rtt', None))
+            elif isinstance(packet, RtcpPsfbPacket) and packet.fmt in (1, 4):
+                profile.count('rtcp_keyframe_requests')
+                profile.event('recovery_request', kind='PLI' if packet.fmt == 1 else 'FIR')
+
+        sender._handle_rtcp_packet = feedback
     return True

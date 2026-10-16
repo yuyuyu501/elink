@@ -150,6 +150,8 @@ def main(argv=None):
     parser.add_argument('--width', type=int, default=1920)
     parser.add_argument('--height', type=int, default=1080)
     parser.add_argument('--bitrate', type=int, default=20)
+    parser.add_argument('--render-scale', type=int, choices=(100, 75, 67), default=100)
+    parser.add_argument('--capture-backend', choices=('auto', 'dxcam', 'gpu'), default='auto')
     parser.add_argument('--seconds', type=float, default=10)
     parser.add_argument('--warmup', type=float, default=3)
     parser.add_argument('--renderer', choices=('gpu', 'cpu'), default='gpu')
@@ -161,7 +163,8 @@ def main(argv=None):
     if not (0 < args.seconds <= 300 and 0 <= args.warmup <= 60):
         parser.error('Require 0 < seconds <= 300 and 0 <= warmup <= 60')
     config = transport.settings(dict(width=args.width, height=args.height, fps=args.fps,
-                                     bitrate=args.bitrate, audio=False))
+                                     bitrate=args.bitrate, audio=False, render_scale=args.render_scale,
+                                     capture_backend=args.capture_backend))
     original_track = transport.DesktopTrack
     if args.source == 'motion':
         transport.DesktopTrack = motion_track(args.width, args.height)

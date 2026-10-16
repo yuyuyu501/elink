@@ -26,9 +26,9 @@ def test_profile_bounded_quantiles_invalid_samples_and_independent_sessions():
     stage = profile.snapshot()['stages']['decode']
     assert stage == dict(samples=100, total=200, p50_ms=149, p95_ms=194, p99_ms=198, max_ms=199)
     assert not PipelineProfile().snapshot()['stages']
-    for index in range(40):
+    for index in range(70):
         profile.observe(str(index), 1)
-    assert len(profile.snapshot()['stages']) == 32
+    assert len(profile.snapshot()['stages']) == 64
     for value in (0, -1, True, 1.5):
         with pytest.raises(ValueError):
             PipelineProfile(value)

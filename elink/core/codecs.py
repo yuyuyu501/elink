@@ -42,10 +42,15 @@ def rate_control_options(policy: CodecPolicy) -> dict[str, str]:
     }
 
 
-def make_encoder(name: str, width: int, height: int, policy: CodecPolicy):
+def make_encoder(name: str, width: int, height: int, policy: CodecPolicy, pixel_format='yuv420p',
+                 colorspace=None, color_range=None):
     codec = av.CodecContext.create(name, "w")
     codec.width, codec.height = width, height
-    codec.pix_fmt = "yuv420p"
+    codec.pix_fmt = pixel_format if name in ('h264_nvenc', 'h264_amf', 'h264_qsv') else 'yuv420p'
+    if colorspace in (1, 5, 6):
+        codec.colorspace = colorspace
+    if color_range in (1, 2):
+        codec.color_range = color_range
     codec.framerate = fractions.Fraction(policy.fps, 1)
     codec.time_base = fractions.Fraction(1, 90000)
     codec.bit_rate = policy.bitrate
@@ -80,6 +85,7 @@ class DesktopEncoder(H264Encoder):
         self.policy = CodecPolicy(**vars(policy))
         self._rate = self.policy.bitrate
         self.name = ""
+        self.input_layout = None
         super().__init__()
 
     @property
@@ -109,8 +115,12 @@ class DesktopEncoder(H264Encoder):
         profile = trace.get('profile')
         if profile:
             profile.elapsed('capture_to_encode', trace['captured_at'])
+        budget = trace.get('network_budget')
+        rate = min(self._rate, budget.media_bps) if budget else self._rate
+        layout = frame.format.name, int(frame.colorspace), int(frame.color_range)
         changed = self.codec and (self.codec.width != frame.width or self.codec.height != frame.height
-                                  or abs(self._rate - self.codec.bit_rate) / self.codec.bit_rate > 0.25)
+                                  or rate != self.codec.bit_rate
+                                  or self.input_layout is not None and self.input_layout != layout)
         if changed:
             self.codec = None
         if self.codec is None:
@@ -118,9 +128,11 @@ class DesktopEncoder(H264Encoder):
                                                     if self.policy.encoder == "auto" else [self.policy.encoder])
             for name in choices:
                 try:
-                    policy = CodecPolicy(self.policy.fps, self._rate, name)
-                    self.codec = make_encoder(name, frame.width, frame.height, policy)
+                    policy = CodecPolicy(self.policy.fps, rate, name)
+                    self.codec = make_encoder(name, frame.width, frame.height, policy, frame.format.name,
+                                              int(frame.colorspace), int(frame.color_range))
                     self.name = name
+                    self.input_layout = layout
                     break
                 except (av.FFmpegError, ValueError):
                     log.info("Encoder unavailable: %s", name)
@@ -130,14 +142,17 @@ class DesktopEncoder(H264Encoder):
         frame.pict_type = av.video.frame.PictureType.I if force_keyframe else av.video.frame.PictureType.NONE
         data = b"".join(bytes(packet) for packet in self.codec.encode(frame))
         metrics.update(encoder=self.name, encode_ms=(time.perf_counter() - started) * 1000,
-                       encoded=metrics["encoded"] + 1, bitrate=self._rate)
+                       encoded=metrics["encoded"] + 1, bitrate=rate)
         if profile:
             profile.elapsed('encode', started)
             profile.mark('encode_interval')
             profile.describe(encoder=self.name)
             profile.count('encoded_frames')
             profile.count('encoded_bytes', len(data))
-            profile.observe('encoded_media_time', len(data) * 8 * 1000 / self._rate)
+            media_ms = len(data) * 8 * 1000 / rate
+            profile.observe('encoded_media_time', media_ms)
+            if media_ms > 2000 / self.policy.fps:
+                profile.event('large_encoded_frame', bytes=len(data), media_ms=round(media_ms, 3), keyframe=bool(force_keyframe))
             if force_keyframe:
                 profile.count('keyframe_requests')
         if data:

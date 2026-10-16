@@ -4,6 +4,7 @@ import asyncio
 import collections
 import ctypes
 import fractions
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +30,7 @@ def bgr_pixels(frame):
 class DesktopTrack(MediaStreamTrack):
     kind = "video"
 
-    def __init__(self, width: int, height: int, fps: int, synthetic: bool = False, profile=None):
+    def __init__(self, width: int, height: int, fps: int, synthetic: bool = False, profile=None, capture_backend='auto'):
         super().__init__()
         self.profile = profile or PipelineProfile()
         self.width, self.height, self.fps = width, height, fps
@@ -46,9 +47,41 @@ class DesktopTrack(MediaStreamTrack):
         self.last_pts = -1
         self.frame_count = 0
         self.capture_future = None
+        self.network_budget = None
+        self.capture_backend = capture_backend
+        self.gpu_capture = None
+        self.gpu_capture_disabled = capture_backend == 'dxcam' or os.name != 'nt'
+        self.notify = lambda message: None
 
     def capture(self):
         started = time.perf_counter()
+        if not self.synthetic and self.camera is None and not self.gpu_capture_disabled:
+            try:
+                from .gpu_capture import D3D11Capture
+                from .cursor import WindowsCursor
+                draw_mouse = self.cursor_mode != 'local'
+                if self.gpu_capture and self.gpu_capture.draw_mouse != draw_mouse:
+                    self.gpu_capture.close()
+                    self.gpu_capture = None
+                if self.gpu_capture is None:
+                    self.gpu_capture = D3D11Capture(self.width, self.height, draw_mouse)
+                    self.cursor = WindowsCursor()
+                frame = self.gpu_capture.read()
+                self.cursor_visible = self.cursor.visible()
+                self.profile.elapsed('capture_gpu_readback', started)
+                self.profile.describe(capture_backend='ddagrab-scale_d3d11', capture_format='nv12')
+                return self.finish_capture(frame, started)
+            except (av.FFmpegError, RuntimeError, ValueError, OSError) as exc:
+                if self.gpu_capture:
+                    self.gpu_capture.close()
+                    self.gpu_capture = None
+                if self.capture_backend == 'gpu':
+                    self.notify(f'D3D11 采集失败：{exc}')
+                    raise
+                self.gpu_capture_disabled = True
+                self.profile.describe(capture_fallback=type(exc).__name__)
+                self.profile.event('capture_fallback', reason=type(exc).__name__)
+                self.notify('D3D11 采集不可用，已回退兼容采集。')
         if self.synthetic:
             pixels = np.zeros((self.height, self.width, 3), dtype=np.uint8)
             pixels[:, :, 1] = self.frame_count % 255
@@ -94,10 +127,13 @@ class DesktopTrack(MediaStreamTrack):
         frame = av.VideoFrame.from_numpy_buffer(pixels, format=pixel_format)
         frame = self.reformatter.reformat(frame, width=self.width, height=self.height, format="yuv420p")
         self.profile.elapsed("capture_convert", converted)
-        frame.opaque = {"profile": self.profile, "captured_at": started}
+        self.profile.describe(capture_backend='synthetic' if self.synthetic else 'dxcam', capture_format=pixel_format)
+        return self.finish_capture(frame, started)
+
+    def finish_capture(self, frame, started):
+        frame.opaque = {"profile": self.profile, "captured_at": started, 'network_budget': self.network_budget}
         self.profile.mark("capture_interval")
         self.profile.count('captured_frames')
-        self.profile.describe(capture_format=pixel_format)
         metrics["capture_ms"] = (time.perf_counter() - started) * 1000
         return frame
 
@@ -144,6 +180,9 @@ class DesktopTrack(MediaStreamTrack):
             self.capture_future.cancel()
             self.capture_future = None
         def release():
+            if self.gpu_capture:
+                self.gpu_capture.close()
+                self.gpu_capture = None
             if self.camera:
                 self.camera.release()
                 self.camera = None

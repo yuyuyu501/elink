@@ -47,6 +47,8 @@ def main(argv=None):
     parser.add_argument('--warmup', type=float, default=3)
     parser.add_argument('--bitrate', type=int, default=20)
     parser.add_argument('--source', choices=('motion', 'desktop'), default='motion')
+    parser.add_argument('--render-scale', type=int, choices=(100, 75, 67), default=100)
+    parser.add_argument('--capture-backend', choices=('auto', 'dxcam', 'gpu'), default='auto')
     parser.add_argument('--output', type=Path, default=Path('.artifacts/fps-matrix'))
     args = parser.parse_args(argv)
     if not (0 < args.seconds <= 300 and 0 <= args.warmup <= 60 and 1 <= args.bitrate <= 80):
@@ -54,10 +56,10 @@ def main(argv=None):
     args.output.mkdir(parents=True, exist_ok=True)
     rows = []
     for case in cases():
-        row = dict(case)
+        row = dict(case, render_scale=args.render_scale, capture_backend=args.capture_backend)
         stem = f"{case['width']}x{case['height']}-{case['fps']}"
         try:
-            settings(dict(case, bitrate=args.bitrate))
+            settings(dict(case, bitrate=args.bitrate, render_scale=args.render_scale))
         except ValidationError as exc:
             row.update(status='rejected', reason=str(exc))
         else:
@@ -68,6 +70,7 @@ def main(argv=None):
                        '--source', args.source,
                        '--width', str(case['width']), '--height', str(case['height']),
                        '--fps', str(case['fps']), '--bitrate', str(args.bitrate),
+                       '--render-scale', str(args.render_scale), '--capture-backend', args.capture_backend,
                        '--seconds', str(args.seconds), '--warmup', str(args.warmup), '--output', str(report)]
             print('START ' + stem, flush=True)
             # The child owns its host cleanup. No timeout that kills just the

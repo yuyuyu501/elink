@@ -1,6 +1,6 @@
 # 串流性能测量与 GPU 显示原型
 
-90 FPS 调度问题的最新诊断、论文/开源资料、实施计划和修改前后实测见 [帧率修复计划与验证](frame-rate-plan.md)。完整设置预设的补测见 [分辨率与帧率矩阵](frame-rate-matrix.md)。下文保留前几轮的实现记录和测量边界。
+90 FPS 调度问题的诊断、论文/开源资料和实测见 [帧率修复计划与验证](frame-rate-plan.md)。完整设置预设的补测见 [分辨率与帧率矩阵](frame-rate-matrix.md)。本轮发送突发、D3D11 采集与 FSR 实施见 [突发与超分优化](burst-and-upscaling.md)。下文保留前几轮的实现记录和测量边界。
 
 2026-10-14 开发记录。实现阶段先完成修改、测试和 Git 同步；随后用户明确授权将本阶段成果打包为 0.4.22 Preview。合成实验结果不代表双机游戏验收完成。
 
@@ -14,12 +14,13 @@ GPU 选择独立于解码器：软件 H.264 解码也可用 GPU 显示；D3D11VA
 
 ## 报告口径
 
-每个会话重置，线程安全；每阶段保留最近 600 个样本，最多 32 个计时阶段。P50/P95/P99 使用排序后 nearest-rank，`total` 是会话累计次数，`samples` 是当前窗口样本数。按包计时的窗口比按帧计时的窗口短，不能直接当作同一段时间的总量。
+每个会话重置，线程安全；每阶段保留最近 600 个样本，最多 64 个计时阶段，另保留最近 64 条数值/控制事件。P50/P95/P99 使用排序后 nearest-rank，`total` 是会话累计次数，`samples` 是当前窗口样本数。按包计时的窗口比按帧计时的窗口短，不能直接当作同一段时间的总量。
 
 | 阶段 | 测量含义 |
 | --- | --- |
 | `capture_read_cursor` | 读取桌面像素、查询/叠加光标的 CPU 墙钟耗时 |
 | `capture_convert` | 构造 AVFrame、缩放与转换 YUV420P |
+| `capture_gpu_readback` | D3D11 采集、GPU 缩放/转换及 NV12 回读的墙钟耗时；首次含初始化/校准 |
 | `capture_deadline_late` | 采集工作线程相对绝对时间槽的迟到量；`capture_slots_missed` 另统计跳过的时间槽 |
 | `capture_to_encode` | 本机从采集调用开始到进入编码的时间，包含前两项，不可重复相加 |
 | `encode` | 编码调用时间，第一帧可能含编码器初始化 |
@@ -28,6 +29,8 @@ GPU 选择独立于解码器：软件 H.264 解码也可用 GPU 显示；D3D11VA
 | `encode_ahead_wait` / `encoded_queue_wait` | 发送循环等待预取编码完成 / 已编码帧就绪后等待被取走 |
 | `rtp_pacer_wait` | 单个 RTP 包进入发送限速器到允许发送的等待，含锁等待 |
 | `rtp_send_call` | 单个 RTP 发送调用耗时，不等于数据到达网卡或对端的时间 |
+| `rtp_frame_send` / `rtp_budget_debt` | 按 RTP 时间戳统计一帧发送耗时 / 平均令牌额度已使用的时间预算 |
+| `feedback_rtt` | aiortc 发送端根据 RTCP 报告估算的 RTT；丢包比例另存 metadata，不能当作 ms |
 | `assembled_frame_interval` | 完整编码帧进入解码队列的间隔，不是 RTP 重组耗时 |
 | `decode_queue_wait` | 完整编码帧入队到开始解码 |
 | `decode` | 解码调用，可能包含硬解帧回读；未分离 GPU 执行时间 |
@@ -36,12 +39,13 @@ GPU 选择独立于解码器：软件 H.264 解码也可用 GPU 显示；D3D11VA
 | `mailbox_wait` | 图像进入最新帧邮箱到 GUI 取出 |
 | `qt_scale` / `cpu_paint_total` | CPU 缩放、整个 CPU paintEvent（后者包含前者） |
 | `texture_upload_call` / `gpu_paint_submit` | 纹理上传调用、GPU paintGL 的 CPU 提交时间（后者包含前者） |
+| `fsr_gpu` | 异步 GPU 时间查询的 YUV→RGB、EASU、RCAS 和最终显示采样总时间，不包含纹理上传或 Qt 合成 |
 | `gui_schedule_to_paint` | GUI 取出帧到提交该帧，含窗口调度和部分绘制 |
 | `capture_interval` / `encode_interval` / `present_interval` | 对应本机事件的间隔；present 是提交绘制，不是屏幕实际亮起 |
 
 队列计数包括解码队列清空/等待 IDR 时丢弃的帧、解码后队列覆盖、GUI 邮箱覆盖、解码错误。它们是本地处理丢帧，不能当作网络丢包率。`encoded_frames` / `decoded_frames` / `presented_frames` 用于比较阶段处理量。
 
-各阶段有重叠，不可把所有 P95 相加。不同主机的时钟从不相减；RTT 仍是网络往返测量。报告没有单向网络时延、RTP 首包到完整帧重组时间、GPU 完成时间、扫描输出时间或输入到显示的完整延迟。
+各阶段有重叠，不可把所有 P95 相加。不同主机的时钟从不相减；RTT 仍是网络往返测量。只有 `fsr_gpu` 使用 GPU 时间查询，其它绘制统计仍是 CPU 调用时间。报告没有单向网络时延、RTP 首包到完整帧重组时间、屏幕扫描输出时间或输入到显示的完整延迟。
 
 ## GPU 路径与边界
 

@@ -45,7 +45,15 @@ def package_fixture(tmp_path, monkeypatch):
                    self_test=dict(ok=True, runtime_stopped=True, audio_frames=10, video_frames=90),
                    gpu_test=dict(colors=[dict(native_rgb_error=2)] * 5,
                                  streams=[dict(decoder=d, native_video=True, cpu_fallback=True)
-                                          for d in ('software-h264', 'D3D11VA')]),
+                                          for d in ('software-h264', 'D3D11VA')],
+                                 super_resolution={str(s): [dict(native_rgb_error=2)] * 5 for s in (75, 67)},
+                                 super_resolution_streams=[dict(render_scale=s, upscaler='FSR1-EASU-RCAS',
+                                                                native_video=True, cpu_fallback=True,
+                                                                fsr_gpu=dict(samples=20)) for s in (75, 67)],
+                                 native_capture=[dict(width=w, height=h, format='nv12', max_rgb_error=2,
+                                                      colorspace=1, decoded_colorspace=1,
+                                                      color_range=2, decoded_color_range=2)
+                                                 for w, h in ((1920, 1080), (1440, 810), (1280, 720))]),
                    updater_test=dict(ok=True), package_sha256=digest)
     (tmp_path / 'verification.json').write_text(json.dumps(receipt), encoding='utf-8')
     (tmp_path / 'SHA256SUMS.txt').write_text(f'{digest}  {archive.name}\n', encoding='ascii')
@@ -54,7 +62,8 @@ def package_fixture(tmp_path, monkeypatch):
     return notes, receipt, archive
 
 
-@pytest.mark.parametrize('problem', ['checksum', 'commit', 'updater', 'source', 'gpu_missing', 'gpu_black'])
+@pytest.mark.parametrize('problem', ['checksum', 'commit', 'updater', 'source', 'gpu_missing', 'gpu_black',
+                                   'fsr_missing', 'fsr_black', 'fsr_timer', 'capture_missing', 'capture_color'])
 def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypatch, problem):
     _, receipt, archive = package_fixture(tmp_path, monkeypatch)
     if problem == 'checksum':
@@ -67,6 +76,16 @@ def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypa
         receipt.pop('gpu_test')
     elif problem == 'gpu_black':
         receipt['gpu_test']['colors'][0]['native_rgb_error'] = 240
+    elif problem == 'fsr_missing':
+        receipt['gpu_test'].pop('super_resolution_streams')
+    elif problem == 'fsr_black':
+        receipt['gpu_test']['super_resolution']['67'][0]['native_rgb_error'] = 240
+    elif problem == 'fsr_timer':
+        receipt['gpu_test']['super_resolution_streams'][0]['fsr_gpu'] = None
+    elif problem == 'capture_missing':
+        receipt['gpu_test'].pop('native_capture')
+    elif problem == 'capture_color':
+        receipt['gpu_test']['native_capture'][0]['decoded_colorspace'] = 5
     else:
         receipt['source_sha256'] = {}
     (tmp_path / 'verification.json').write_text(json.dumps(receipt), encoding='utf-8')

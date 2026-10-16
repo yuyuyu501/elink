@@ -38,6 +38,7 @@ def test_window_automatic_host_start_settings_and_shutdown(tmp_path, monkeypatch
         pump(app, lambda: not window.host_starting)
         assert window.server.pad_backend == "disabled"
         window.renderer.setCurrentIndex(window.renderer.findData('gpu'))
+        window.render_scale.setCurrentIndex(window.render_scale.findData(67))
     finally:
         window.close()
         pump(app, lambda: window._closed)
@@ -46,6 +47,7 @@ def test_window_automatic_host_start_settings_and_shutdown(tmp_path, monkeypatch
     restored = MainWindow(tmp_path, auto_refresh=False)
     assert restored.pad_backend.currentData() == "disabled"
     assert restored.renderer.currentData() == 'gpu'
+    assert restored.render_scale.currentData() == 67
     restored.close()
     pump(app, lambda: restored._closed)
     assert restored.server is None  # Closing before the queued start does not start hosting.

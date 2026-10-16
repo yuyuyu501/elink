@@ -327,11 +327,11 @@ class Player(QWidget):
         options = StreamOptions()
         options.restore(self.preferences)
         layout.addWidget(options)
-        note = QLabel("分辨率决定编码和接收画面的像素尺寸，目标帧率决定串流速率；不会修改被控端系统显示设置。"
-                      "\n画面按所选尺寸缩放后传输；窗口可继续等比例适配显示。不同宽高比可能使内容变形。应用后自动重连。")
+        note = QLabel()
         note.setTextFormat(Qt.TextFormat.PlainText)
         note.setWordWrap(True)
         note.setObjectName('muted')
+        note.hide()
         layout.addWidget(note)
         buttons = QHBoxLayout()
         cancel = QPushButton("取消")
@@ -343,9 +343,11 @@ class Player(QWidget):
             from ..models import ValidationError
             width, height = options.resolution.currentData()
             try:
-                settings(dict(width=width, height=height, fps=options.fps.currentData()))
+                settings(dict(width=width, height=height, fps=options.fps.currentData(),
+                              render_scale=options.render_scale.currentData()))
             except ValidationError as exc:
                 note.setText(str(exc))
+                note.show()
                 return
             values = options.values()
             dialog.accept()

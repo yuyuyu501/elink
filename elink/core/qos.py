@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import struct
 import time
 
 from .pacing import wait_until
@@ -43,8 +44,57 @@ def mark_rtc_sockets(pc, dscp: int = VIDEO_DSCP) -> int:
     return updated
 
 
-def install_rtp_pacer(pc, bitrate_mbps: int, profile=None) -> int:
-    """Smooth RTP packet bursts at the configured media rate.
+class RtpPacer:
+    """Two bounded token schedules: average budget and short-term peak.
+
+    Reserve tokens before waiting, including retransmissions. No encoded-frame
+    drops and no background packet queue. Idle credit has a fixed upper bound.
+    """
+    def __init__(self, bitrate_mbps, fps=60, profile=None, budget=None):
+        self.rate = bitrate_mbps * 1_000_000 * 1.08
+        self.credit = max(.008, min(2 / fps, .032))
+        self.profile, self.budget = profile, budget
+        self.next_at = self.peak_at = 0.0
+        self.lock = asyncio.Lock()
+        self.rtx_lock = asyncio.Lock()
+        self.frames = {}
+
+    async def send(self, data, original, *, retransmit=False):
+        queued = time.perf_counter()
+        async with (self.rtx_lock if retransmit else self.lock):
+            now = time.perf_counter()
+            rate = self.budget.media_bps * 1.08 if self.budget else self.rate
+            peak = rate * (1 if self.budget and self.budget.congested else 1.25)
+            self.next_at = max(self.next_at, now - self.credit) + len(data) * 8 / rate
+            self.peak_at = max(self.peak_at, now - .004) + len(data) * 8 / peak
+            due = max(self.next_at, self.peak_at)
+            if due > now:
+                await asyncio.to_thread(wait_until, max(due, now + .002))
+            if self.profile:
+                self.profile.elapsed('rtp_pacer_wait', queued)
+                self.profile.observe('rtp_budget_debt', max(0, self.next_at - time.perf_counter() + self.credit) * 1000)
+                self.profile.count('rtx_packets' if retransmit else 'video_packets')
+                self.profile.count('rtp_bytes', len(data))
+            sent = time.perf_counter()
+            result = await original(data)
+            if self.profile:
+                self.profile.elapsed('rtp_send_call', sent)
+                if len(data) >= 12 and not retransmit:
+                    stamp, ssrc = struct.unpack_from('!II', data, 4)
+                    frame = self.frames.get(ssrc)
+                    if frame is None or frame[0] != stamp:
+                        frame = self.frames[ssrc] = [stamp, queued, 0]
+                    frame[2] += len(data)
+                    if data[1] & 128:
+                        duration = (time.perf_counter() - frame[1]) * 1000
+                        self.profile.observe('rtp_frame_send', duration)
+                        if duration > 25:
+                            self.profile.event('slow_frame_send', milliseconds=round(duration, 3), bytes=frame[2])
+            return result
+
+
+def install_rtp_pacer(pc, bitrate_mbps: int, profile=None, *, fps=60, budget=None) -> int:
+    """Pace average media rate while permitting bounded short-term bursts.
 
     aiortc sends all RTP packets belonging to one encoded frame back to back.
     That is harmless on a wired LAN but can overflow a Wi-Fi or Tailscale
@@ -54,10 +104,15 @@ def install_rtp_pacer(pc, bitrate_mbps: int, profile=None) -> int:
     """
     if type(bitrate_mbps) is not int or bitrate_mbps <= 0:
         return 0
-    rate = bitrate_mbps * 1_000_000 * 1.08
     transports = set()
+    audio_ssrcs, rtx_ssrcs = set(), set()
     for transceiver in pc.getTransceivers():
-        transport = getattr(getattr(transceiver, 'sender', None), 'transport', None)
+        sender = getattr(transceiver, 'sender', None)
+        transport = getattr(sender, 'transport', None)
+        if getattr(sender, 'kind', None) == 'audio':
+            audio_ssrcs.add(sender._ssrc)
+        elif hasattr(sender, '_rtx_ssrc'):
+            rtx_ssrcs.add(sender._rtx_ssrc)
         if transport is not None:
             transports.add(transport)
     installed = 0
@@ -67,29 +122,18 @@ def install_rtp_pacer(pc, bitrate_mbps: int, profile=None) -> int:
         original = getattr(transport, '_send_rtp', None)
         if original is None:
             continue
-        state = {'next_at': 0.0, 'lock': asyncio.Lock()}
+        state = RtpPacer(bitrate_mbps, fps, profile, budget)
 
         async def paced(data, *, _original=original, _state=state):
-            queued = time.perf_counter()
-            async with _state['lock']:
-                # A bounded 4 ms packet burst amortizes Python/crypto overhead.
-                # Beyond that budget wait to a QPC deadline in a worker, not a
-                # Windows event-loop timer. No unbounded background send queue.
-                now = time.perf_counter()
-                charged_at = max(_state['next_at'], now - 0.004) + len(data) * 8 / rate
-                if charged_at > now:
-                    await asyncio.to_thread(wait_until, max(charged_at, now + 0.002))
-                # Retain up to 4 ms of refill credit after an oversleep. Resetting
-                # to the wakeup time loses capacity on every delayed wake and
-                # makes the configured bitrate unattainable near saturation.
-                _state['next_at'] = charged_at
+            # RTCP shares this aiortc hook; delaying it also delays loss/RTT
+            # feedback. Audio is low-volume and must not wait on video debt.
+            from aiortc.rtp import is_rtcp
+            ssrc = struct.unpack_from('!I', data, 8)[0] if len(data) >= 12 else None
+            if is_rtcp(data) or ssrc in audio_ssrcs:
                 if profile:
-                    profile.elapsed('rtp_pacer_wait', queued)
-                sent = time.perf_counter()
-                result = await _original(data)
-                if profile:
-                    profile.elapsed('rtp_send_call', sent)
-                return result
+                    profile.count('priority_packets')
+                return await _original(data)
+            return await _state.send(data, _original, retransmit=ssrc in rtx_ssrcs)
 
         transport._send_rtp = paced
         transport._elink_rtp_pacer = state

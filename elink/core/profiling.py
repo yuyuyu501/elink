@@ -17,13 +17,14 @@ class PipelineProfile:
         self.counts = Counter()
         self.last = {}
         self.metadata = {}
+        self.events = deque(maxlen=64)
 
     def observe(self, stage, milliseconds):
         if not math.isfinite(milliseconds) or milliseconds < 0:
             return
         with self.lock:
             if stage not in self.samples:
-                if len(self.samples) >= 32:
+                if len(self.samples) >= 64:
                     return
                 self.samples[stage] = deque(maxlen=self.capacity)
             self.samples[stage].append(milliseconds)
@@ -48,10 +49,16 @@ class PipelineProfile:
         with self.lock:
             self.metadata.update(values)
 
+    def event(self, name, **values):
+        # Only numerical/control metadata belongs here, never media or input.
+        with self.lock:
+            self.events.append(dict(event=name, at_ms=round((self.clock() - self.started) * 1000, 3), **values))
+
     def snapshot(self):
         with self.lock:
             samples = {key: list(values) for key, values in self.samples.items()}
             counts, metadata = dict(self.counts), dict(self.metadata)
+            events = [dict(value) for value in self.events]
         summary = {}
         for key, values in samples.items():
             values.sort()
@@ -60,4 +67,4 @@ class PipelineProfile:
             summary[key] = dict(samples=len(values), total=counts[key], p50_ms=percentile(.5),
                                 p95_ms=percentile(.95), p99_ms=percentile(.99), max_ms=round(values[-1], 4))
         return dict(elapsed_seconds=round(self.clock() - self.started, 3),
-                    window_samples=self.capacity, stages=summary, counters=counts, metadata=metadata)
+                    window_samples=self.capacity, stages=summary, counters=counts, metadata=metadata, events=events)

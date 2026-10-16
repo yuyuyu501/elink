@@ -20,6 +20,8 @@ from .input import InputSession, WindowsInput, PAD_BACKENDS
 from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack, bgr_pixels
 from .qos import install_rtp_pacer, mark_rtc_sockets
 from .sending import install_video_pipeline
+from .congestion import NetworkBudget
+from .scaling import RATIOS, encoding_size
 from .security import Identity
 from ..discovery import NetworkScope, Responder, DISCOVERY_PORT, machine_id
 from .buffers import tune_receiver, tune_track
@@ -58,15 +60,21 @@ def install():
 def settings(value):
     if not isinstance(value, dict):
         raise ValidationError("串流设置无效。")
-    result = {"width": 1920, "height": 1080, "fps": 60, "bitrate": 20, "audio": True, "follow_display": False}
+    result = {"width": 1920, "height": 1080, "fps": 60, "bitrate": 20, "audio": True, "follow_display": False,
+              'render_scale': 100, 'capture_backend': 'auto'}
     result.update({k: v for k, v in value.items() if k in result})
     for key, low, high in [("width", 640, 3840), ("height", 360, 2160), ("fps", 10, 360), ("bitrate", 1, 80)]:
         if type(result[key]) is not int or not low <= result[key] <= high:
             raise ValidationError(f"{key} 超出当前版本范围（{low}–{high}）。")
     if result["width"] % 2 or result["height"] % 2 or type(result["audio"]) is not bool or type(result["follow_display"]) is not bool:
         raise ValidationError("分辨率必须为偶数，音频开关必须为布尔值。")
-    if ((result['width'] + 15) // 16) * ((result['height'] + 15) // 16) * result['fps'] > 2_073_600:
-        raise ValidationError('所选分辨率与帧率超过 H.264 Level 5.2 范围，请降低帧率（4K 最高 60 FPS，1440p 最高 144 FPS）。')
+    if type(result['render_scale']) is not int or result['render_scale'] not in RATIOS:
+        raise ValidationError('超分采样比例无效。')
+    if result['capture_backend'] not in ('auto', 'dxcam', 'gpu'):
+        raise ValidationError('采集方式无效。')
+    coded_width, coded_height = encoding_size(result)
+    if ((coded_width + 15) // 16) * ((coded_height + 15) // 16) * result['fps'] > 2_073_600:
+        raise ValidationError(f'编码尺寸 {coded_width}×{coded_height} 与帧率超过 H.264 Level 5.2 范围，请降低帧率或编码尺寸。')
     # Old clients may send follow_display=True. The stream now always uses
     # the requested dimensions; neither client can mutate the host display.
     result['follow_display'] = False
@@ -148,7 +156,8 @@ class HostServer:
     def host_info(self):
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
-                "busy": self.pc is not None or self.ending, "features": ["cursor-modes-v1", "performance-v1"]}
+                "busy": self.pc is not None or self.ending,
+                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1"]}
 
     async def info(self, request):
         return web.json_response(self.host_info())
@@ -192,7 +201,10 @@ class HostServer:
             pc = self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.device_id, self.session_id = device, secrets.token_hex(16)
             self.profile = PipelineProfile()
-            self.profile.describe(width=config["width"], height=config["height"], fps=config["fps"])
+            coded_width, coded_height = encoding_size(config)
+            self.profile.describe(width=config["width"], height=config["height"], fps=config["fps"],
+                                  encoded_width=coded_width, encoded_height=coded_height,
+                                  render_scale=config['render_scale'], target_bps=config['bitrate'] * 1_000_000)
             self.created = time.monotonic()
             self.input_errors.clear()
             codecs.encode_policy = codecs.CodecPolicy(config["fps"], config["bitrate"] * 1_000_000)
@@ -273,17 +285,21 @@ class HostServer:
 
             try:
                 await pc.setRemoteDescription(RTCSessionDescription(data["sdp"], "offer"))
-                video = DesktopTrack(config["width"], config["height"], config["fps"], self.synthetic, self.profile)
+                video = DesktopTrack(coded_width, coded_height, config["fps"], self.synthetic, self.profile)
+                video.capture_backend = config['capture_backend']
+                video.gpu_capture_disabled = video.gpu_capture_disabled or config['capture_backend'] == 'dxcam'
+                video.notify = self.notify
+                video.network_budget = budget = NetworkBudget(config['bitrate'] * 1_000_000, self.profile)
                 self.tracks.append(video)
                 video_sender = pc.addTrack(video)
-                install_video_pipeline(video_sender, self.profile)
+                install_video_pipeline(video_sender, self.profile, budget)
                 if config["audio"]:
                     audio = LoopbackTrack(self.synthetic)
                     self.tracks.append(audio)
                     pc.addTrack(audio)
                 video_preferences(pc)
                 await pc.setLocalDescription(await pc.createAnswer())
-                install_rtp_pacer(pc, config["bitrate"], self.profile)
+                install_rtp_pacer(pc, config["bitrate"], self.profile, fps=config['fps'], budget=budget)
                 mark_rtc_sockets(pc)
                 self.clipboard_seen = await asyncio.to_thread(read_text)
                 self.clipboard_task = asyncio.create_task(self.watch_clipboard(pc, feedback))
@@ -482,6 +498,11 @@ class Client:
             info = await request(self.endpoint, self.fp, "GET", "/v1/info")
             if info.get("protocol") != "elink" or info.get("version") != 2:
                 raise ValidationError("主机不支持自动连接，请将两端更新至 0.4.2 或更高版本。")
+            if config['render_scale'] != 100:
+                if self.renderer != 'gpu':
+                    raise ValidationError('FSR 超分需要 GPU 纹理显示。')
+                if 'spatial-upscale-v1' not in info.get('features', []):
+                    raise ValidationError('主机不支持超分采样，请更新被控端或选择原生 100%。')
             self.performance_supported = "performance-v1" in info.get("features", [])
             self.cursor_supported = 'cursor-modes-v1' in info.get('features', [])
             self.cursor_applied, self.cursor_visible, self.cursor_updated = 'remote', None, 0.0
@@ -490,6 +511,8 @@ class Client:
             codecs.decode_policy = codecs.CodecPolicy(decoder=decoder)
             self.pc = pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.profile = PipelineProfile()
+            self.profile.describe(output_width=config['width'], output_height=config['height'],
+                                  render_scale=config['render_scale'])
             self.mailbox = FrameMailbox(self.profile)
             self.audio_frames = 0
             self.rtt_ms = 0.0

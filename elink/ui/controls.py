@@ -8,7 +8,7 @@ from ..core.mouse import MOUSE_MODES, mouse_mode
 
 
 class StreamOptions(QWidget):
-    fields = ('resolution', 'renderer', 'fps', 'decoder', 'bitrate', 'audio', 'mouse_mode', 'controllers')
+    fields = ('resolution', 'renderer', 'render_scale', 'fps', 'decoder', 'bitrate', 'audio', 'mouse_mode', 'controllers')
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -27,12 +27,20 @@ class StreamOptions(QWidget):
         self.renderer = QComboBox()
         self.renderer.addItem('兼容显示（CPU）', 'cpu')
         self.renderer.addItem('GPU 纹理显示（实验）', 'gpu')
+        self.render_scale = QComboBox()
+        for label, value in [('原生 100%', 100), ('FSR 1 · 75%', 75), ('FSR 1 · 66.7%', 67)]:
+            self.render_scale.addItem(label, value)
+        self.render_scale.currentIndexChanged.connect(
+            lambda: self.renderer.setCurrentIndex(1) if self.render_scale.currentData() != 100 else None)
+        self.renderer.currentIndexChanged.connect(
+            lambda: self.render_scale.setCurrentIndex(0) if self.renderer.currentData() == 'cpu' else None)
         self.bitrate = QSpinBox()
         self.bitrate.setRange(1, 80)
         self.bitrate.setValue(20)
         self.bitrate.setSuffix(' Mbps')
         for label, widget in [('目标帧率', self.fps),
-                              ('目标码率', self.bitrate), ('解码器', self.decoder), ('显示方式', self.renderer)]:
+                              ('目标码率', self.bitrate), ('解码器', self.decoder), ('显示方式', self.renderer),
+                              ('超分采样', self.render_scale)]:
             form.addRow(label, widget)
         self.audio = QCheckBox('传输远端系统声音')
         self.mouse_mode = QComboBox()
@@ -48,7 +56,7 @@ class StreamOptions(QWidget):
             form.addRow(widget)
 
     def values(self):
-        return {name: (widget.currentData() if name in ('mouse_mode', 'resolution', 'renderer') else widget.currentIndex() if isinstance(widget, QComboBox) else
+        return {name: (widget.currentData() if name in ('mouse_mode', 'resolution', 'renderer', 'render_scale') else widget.currentIndex() if isinstance(widget, QComboBox) else
                        widget.isChecked() if isinstance(widget, QCheckBox) else widget.value())
                 for name in self.fields for widget in (getattr(self, name),)}
 
@@ -60,7 +68,7 @@ class StreamOptions(QWidget):
             if name == 'resolution':
                 index = widget.findData(value) if isinstance(value, list) else -1
                 widget.setCurrentIndex(index if index >= 0 else 0)
-            elif name == 'renderer':
+            elif name in ('renderer', 'render_scale'):
                 widget.setCurrentIndex(max(0, widget.findData(value)))
             elif name == 'mouse_mode':
                 widget.setCurrentIndex(widget.findData(mouse_mode(value)))

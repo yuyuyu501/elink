@@ -15,6 +15,7 @@ Elink 0.4 uses generic media, networking and UI libraries. Sunshine and Moonligh
 | cryptography | 46.0.5 | Apache-2.0 OR BSD-3-Clause; https://github.com/pyca/cryptography |
 | NumPy | 2.2.6 | BSD-3-Clause with dependency notices; https://numpy.org/ |
 | OpenCV Python | 4.12.0.88 | Apache-2.0 and bundled dependency licenses; https://github.com/opencv/opencv-python |
+| AMD FidelityFX FSR 1 headers | a21ffb8f6c13233ba336352bdff293894c706575 | MIT, 2021 Advanced Micro Devices, Inc.; https://github.com/GPUOpen-Effects/FidelityFX-FSR |
 | ViGEmClient | x64 DLL from vgamepad 0.1.0 source archive | MIT, Benjamin Höglinger-Stelzer; https://github.com/nefarius/ViGEmClient |
 | HIDMaestro XUSB layout reference | 00b7303f8533c3fe10687a765c84e929b34a5e9c | MIT, 2026 HIDMaestro Contributors; https://github.com/hifihedgehog/HIDMaestro |
 | Python / PyInstaller bootloader | Build-specific / 6.16.0 | PSF / GPL with distribution exception; https://python.org/ and https://pyinstaller.org/ |
@@ -26,6 +27,18 @@ Archive SHA-256: `57f6bd01aec0c172947517fb782d150ef9b285f7f4d524c317374fa5c24a89
 Only the client DLL is included, not vgamepad Python code, ViGEmBus installers or any driver. The ViGEmClient license is in `licenses/ViGEmClient-LICENSE.txt`.
 
 Tailscale is separately installed and not bundled. Its service/account terms apply: https://tailscale.com/terms . No Tailscale account credentials are collected.
+
+FSR 1 EASU and RCAS use the unmodified upstream `ffx-fsr/ffx_a.h` and
+`ffx-fsr/ffx_fsr1.h`, pinned to the commit above and included under
+`elink/resources/fsr/`. Each header preserves its complete upstream MIT
+copyright and permission notice. SHA-256 of the unmodified upstream bytes:
+
+- `ffx_a.h`: `f60e2722fcd13989523b9164d776ab382b3692791767f3bf8bb19967f763f3fb`
+- `ffx_fsr1.h`: `93c3922362ea7fc99cbcc698ca30c98de4f8c246d1fbb0b09e015ddef38ce3a5`
+
+The Elink GLSL wrapper applies EASU followed by RCAS, without FSR 3 frame
+generation or temporal reconstruction. The upstream headers are included in
+the portable application's resources alongside these notices.
 
 ElinkPad's experimental UMDF2 driver adapts XUSB wire layouts and capability arrays from HIDMaestro's `driver/companion.c`; the complete upstream notice is preserved in `licenses/HIDMaestro-LICENSE.txt`. No upstream driver binary or installer is included. The optional ElinkPad driver package is separate from the portable application and is unsigned. Microsoft WDK is a build-only dependency obtained from the pinned Microsoft NuGet package; its full toolchain is not redistributed. Windows' inbox WUDFRd is not redistributed. No LB-SAL-licensed libvirtualhid driver/broker source was used.
 

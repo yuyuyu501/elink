@@ -91,6 +91,7 @@ class YuvSurface(QOpenGLWidget):
         self.program = self.vbo = self.vao = None
         self.textures = []
         self.layout_key = None
+        self.fsr = None
         self.setFormat(fmt)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -126,6 +127,12 @@ class YuvSurface(QOpenGLWidget):
             self.vbo.release()
             self.vao.release()
             self.pending = self.frame is not None
+            profile = getattr(self.player.client, 'profile', None)
+            metadata = profile.snapshot()['metadata'] if profile else {}
+            if self.player.preferences.get('render_scale', metadata.get('render_scale', 100)) != 100:
+                from .super_resolution import FsrUpscaler
+                size = self.player.preferences.get('resolution') or [metadata['output_width'], metadata['output_height']]
+                self.fsr = FsrUpscaler(self, size)
         except Exception as exc:
             self.fail(exc)
 
@@ -182,7 +189,8 @@ class YuvSurface(QOpenGLWidget):
             gl.glClear(0x4000)
             if self.frame is not None:
                 viewport = self.player.video_viewport()
-                size = QSize(self.frame.width, self.frame.height).scaled(viewport.size(), Qt.AspectRatioMode.KeepAspectRatio)
+                output = self.fsr.output_size if self.fsr else (self.frame.width, self.frame.height)
+                size = QSize(*output).scaled(viewport.size(), Qt.AspectRatioMode.KeepAspectRatio)
                 rect = QRect((self.width() - size.width()) // 2,
                              viewport.top() + (viewport.height() - size.height()) // 2, size.width(), size.height())
                 self.player.rect_image = rect
@@ -195,38 +203,13 @@ class YuvSurface(QOpenGLWidget):
                     if profile:
                         profile.elapsed('texture_upload_call', upload_at)
                 ratio = self.devicePixelRatioF()
-                gl.glViewport(round(rect.x() * ratio), round((self.height() - rect.y() - rect.height()) * ratio),
-                              round(rect.width() * ratio), round(rect.height() * ratio))
-                if not self.program.bind():
-                    raise RuntimeError('Cannot bind video shader')
-                for index, texture in enumerate(self.textures):
-                    texture.bind(index)
-                for name, index in [('ytex', 0), ('utex', 1), ('vtex', 2)]:
-                    gl.glUniform1i(self.program.uniformLocation(name), index)
-                offset, gain, cgain, coeff = color_parameters(self.frame)
-                gl.glUniform1i(self.program.uniformLocation('semiplanar'), int(self.frame.format.name == 'nv12'))
-                gl.glUniform1f(self.program.uniformLocation('yoffset'), offset)
-                gl.glUniform1f(self.program.uniformLocation('ygain'), gain)
-                gl.glUniform1f(self.program.uniformLocation('cgain'), cgain)
-                gl.glUniform4f(self.program.uniformLocation('coefficients'), *coeff)
-                error = gl.glGetError()
-                if error:
-                    raise RuntimeError(f"OpenGL uniforms failed: {error}")
-                self.vao.bind()
-                if not self.vbo.bind():
-                    raise RuntimeError('Cannot bind video vertex buffer')
-                for index, offset in ((0, 0), (1, 8)):
-                    self.program.enableAttributeArray(index)
-                    self.program.setAttributeBuffer(index, 0x1406, offset, 2, 16)
-                error = gl.glGetError()
-                if error:
-                    raise RuntimeError(f'OpenGL attributes failed: {error}')
-                gl.glDrawArrays(0x0005, 0, 4)  # GL_TRIANGLE_STRIP
-                self.program.disableAttributeArray(0)
-                self.program.disableAttributeArray(1)
-                self.vbo.release()
-                self.vao.release()
-                self.program.release()
+                target = (round(rect.x() * ratio), round((self.height() - rect.y() - rect.height()) * ratio),
+                          round(rect.width() * ratio), round(rect.height() * ratio))
+                if self.fsr:
+                    self.fsr.render(target, profile, self.pending)
+                else:
+                    gl.glViewport(*target)
+                    self.draw_video()
                 error = gl.glGetError()
                 if error:
                     raise RuntimeError(f'OpenGL video upload/draw failed: {error}')
@@ -238,10 +221,43 @@ class YuvSurface(QOpenGLWidget):
         except Exception as exc:
             self.fail(exc)
 
+    def draw_video(self):
+        gl = self.context().functions()
+        if not self.program.bind():
+            raise RuntimeError('Cannot bind video shader')
+        for index, texture in enumerate(self.textures):
+            texture.bind(index)
+        for name, index in [('ytex', 0), ('utex', 1), ('vtex', 2)]:
+            gl.glUniform1i(self.program.uniformLocation(name), index)
+        offset, gain, cgain, coeff = color_parameters(self.frame)
+        gl.glUniform1i(self.program.uniformLocation('semiplanar'), int(self.frame.format.name == 'nv12'))
+        gl.glUniform1f(self.program.uniformLocation('yoffset'), offset)
+        gl.glUniform1f(self.program.uniformLocation('ygain'), gain)
+        gl.glUniform1f(self.program.uniformLocation('cgain'), cgain)
+        gl.glUniform4f(self.program.uniformLocation('coefficients'), *coeff)
+        self.draw_quad(self.program)
+        self.program.release()
+
+    def draw_quad(self, program):
+        self.vao.bind()
+        if not self.vbo.bind():
+            raise RuntimeError('Cannot bind video vertex buffer')
+        for index, offset in ((0, 0), (1, 8)):
+            program.enableAttributeArray(index)
+            program.setAttributeBuffer(index, 0x1406, offset, 2, 16)
+        self.context().functions().glDrawArrays(0x0005, 0, 4)
+        program.disableAttributeArray(0)
+        program.disableAttributeArray(1)
+        self.vbo.release()
+        self.vao.release()
+
     def cleanup(self):
         if self.context() is None:
             return
         self.makeCurrent()
+        if self.fsr:
+            self.fsr.cleanup()
+            self.fsr = None
         for texture in self.textures:
             texture.destroy()
         self.textures = []

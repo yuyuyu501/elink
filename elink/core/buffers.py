@@ -22,6 +22,7 @@ class DecodeQueue(queue.Queue):
         self.video = video
         self.request_keyframe = request_keyframe
         self.waiting_keyframe = False
+        self.last_frame_at = None
 
     def put(self, item, block=True, timeout=None):
         with self.mutex:
@@ -44,6 +45,10 @@ class DecodeQueue(queue.Queue):
             if item is not None and self.video and self.profile:
                 item[1]._elink_profile = self.profile
                 item[1]._elink_queued_at = time.perf_counter()
+                now = item[1]._elink_queued_at
+                if self.last_frame_at is not None and now - self.last_frame_at > .05:
+                    self.profile.event('receive_frame_gap', milliseconds=round((now - self.last_frame_at) * 1000, 3))
+                self.last_frame_at = now
                 self.profile.mark('assembled_frame_interval')
             self._put(item)
             self.unfinished_tasks += 1

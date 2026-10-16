@@ -278,7 +278,8 @@ class MainWindow(QMainWindow):
         self.show_notice(f"正在连接 {address}…", error=False)
         self.set_busy(True)
         width, height = self.resolution.currentData()
-        config = dict(width=width, height=height, follow_display=False, fps=self.fps.currentData(), bitrate=self.bitrate.value(), audio=self.audio.isChecked())
+        config = dict(width=width, height=height, follow_display=False, fps=self.fps.currentData(),
+                      bitrate=self.bitrate.value(), audio=self.audio.isChecked(), render_scale=self.options.render_scale.currentData())
         host = self.selected_host
         addresses = [address]
         if host and address in host.routes:
@@ -536,7 +537,7 @@ class MainWindow(QMainWindow):
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value.get(name, 0))))
             self.options.restore({'mouse_mode': value.get('mouse_mode', 'smart'),
                                   'resolution': value.get('stream_resolution', [1920, 1080]),
-                                  'renderer': value.get('renderer', 'cpu')})
+                                  'renderer': value.get('renderer', 'cpu'), 'render_scale': value.get('render_scale', 100)})
             for name in ("audio", "controllers"):
                 getattr(self, name).setChecked(value.get(name, True))
         except (ValueError, TypeError, OSError, AttributeError) as exc:
@@ -554,6 +555,7 @@ class MainWindow(QMainWindow):
         value['mouse_mode'] = self.mouse_mode.currentData()
         value['stream_resolution'] = self.resolution.currentData()
         value['renderer'] = self.renderer.currentData()
+        value['render_scale'] = self.options.render_scale.currentData()
         for name in ("audio", "controllers"):
             value[name] = getattr(self, name).isChecked()
         try:

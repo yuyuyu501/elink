@@ -34,11 +34,12 @@ class Runtime(QObject):
         fn(*args)
 
 
-def player(app, mode, *, statistics=True):
+def player(app, mode, *, statistics=True, render_scale=100):
     client = SimpleNamespace(profile=PipelineProfile(), pc=None, mailbox=FrameMailbox(), rtt_ms=0,
                              last_pong=0, focus=lambda _: None, set_renderer=lambda _: None,
                              send=lambda _: None)
-    view = Player(Runtime(), client, controllers=False, preferences={'renderer': mode})
+    view = Player(Runtime(), client, controllers=False,
+                  preferences={'renderer': mode, 'render_scale': render_scale, 'resolution': [960, 540]})
     view.timer.stop()
     view.show_statistics = statistics
     prepare_visible(view)
@@ -88,8 +89,8 @@ def settle(app, seconds=.1):
         time.sleep(.001)
 
 
-def verify_colors(app):
-    view = player(app, 'gpu')
+def verify_colors(app, render_scale=100):
+    view = player(app, 'gpu', render_scale=render_scale)
     results = []
     try:
         for fmt, space, full in [('yuv420p', 5, False), ('nv12', 5, False),
@@ -116,6 +117,8 @@ def verify_colors(app):
                 settle(app, .03)
             if surface.broken or not surface.isValid() or view.gpu_surface is None:
                 raise RuntimeError('GPU renderer unavailable: ' + view.error_label.text())
+            if render_scale != 100 and surface.fsr is None:
+                raise AssertionError('FSR was requested but is not active')
             expected = frame.to_ndarray(format='rgb24', src_colorspace='ITU709' if space == 1 else 'ITU601',
                                         dst_colorspace='ITU601', src_color_range=2 if full else 1)
             # Read native output BEFORE grab(): QWidget.grab renders internally
@@ -123,7 +126,8 @@ def verify_colors(app):
             native_error = verify_pixels(view, screen_image(app, view), expected)
             error = verify_pixels(view, view.grab().toImage(), expected)
             results.append(dict(format=fmt, colorspace=space, full_range=full,
-                                max_rgb_error=error, native_rgb_error=native_error))
+                                max_rgb_error=error, native_rgb_error=native_error,
+                                upscaler='FSR1-EASU-RCAS' if surface.fsr else 'native'))
         # Resource reconstruction when moving between a window and fullscreen.
         view.toggle_fullscreen()
         settle(app)
@@ -221,7 +225,7 @@ def benchmark(app, mode, frames, width, height):
         app.processEvents()
 
 
-def verify_stream(app, root, decoder):
+def verify_stream(app, root, decoder, render_scale=100):
     """Real H.264/WebRTC/GUI handoff using only local synthetic video."""
     from elink.core.runtime import Runtime as NetworkRuntime
     from elink.core.transport import Client, HostServer
@@ -235,7 +239,8 @@ def verify_stream(app, root, decoder):
 
     async def connect():
         port = await host.start('127.0.0.1', 0)
-        await client.connect(f'127.0.0.1:{port}', dict(width=1920, height=1080, fps=60, audio=False), decoder)
+        await client.connect(f'127.0.0.1:{port}', dict(width=1920, height=1080, fps=60, audio=False,
+                                                    render_scale=render_scale), decoder)
 
     async def close():
         await client.disconnect()
@@ -285,7 +290,8 @@ def verify_stream(app, root, decoder):
         if view.gpu_overlay is not None or not view.error_label.isVisible():
             raise AssertionError('Fallback left an overlay over the CPU video or hid its notice')
         return dict(decoder=metadata['decoder'], pixel_format=frame.format.name,
-                    composed_video=True, native_video=True, cpu_fallback=True)
+                    composed_video=True, native_video=True, cpu_fallback=True, render_scale=render_scale,
+                    upscaler=metadata.get('upscaler', 'native'), fsr_gpu=client.profile.snapshot()['stages'].get('fsr_gpu'))
     finally:
         if view:
             view.close()
@@ -311,12 +317,17 @@ def main(argv=None):
     apply_theme(app)
     result = dict(colors=verify_colors(app), benchmarks=[benchmark(app, mode, args.frames, 1920, 1080)
                                                       for mode in ('cpu', 'gpu')],
+                  super_resolution={str(scale): verify_colors(app, scale) for scale in (75, 67)},
                   limitations='Synthetic CPU submission benchmark, not game FPS, GPU time or input-to-photon latency.')
     if args.stream_check:
+        from scripts.check_gpu_capture import verify as verify_capture
+        result['native_capture'] = verify_capture(app)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='gpu-stream-', dir=args.output.parent) as temp:
             result['streams'] = [verify_stream(app, Path(temp) / decoder, decoder)
                                  for decoder in ('software', 'hardware')]
+            result['super_resolution_streams'] = [verify_stream(app, Path(temp) / str(scale), 'hardware', scale)
+                                                   for scale in (75, 67)]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(json.dumps(result, indent=2))

@@ -86,7 +86,7 @@ def test_pacer_enforces_rate_with_bounded_bursts_and_recovers_after_idle(monkeyp
     packet_seconds = 1200 * 8 / (20_000_000 * 1.08)
     assert waits and max(waits) <= .002 + 1e-9
     for i, (stamp, size) in enumerate(sent[:100]):
-        assert stamp - 10 >= (i + 1) * packet_seconds - .004 - 1e-9
+        assert stamp - 10 >= (i + 1) * packet_seconds - .032 - 1e-9
         assert size == 1200
 
 
@@ -115,4 +115,55 @@ def test_pacer_delayed_wakes_do_not_permanently_reduce_available_rate(monkeypatc
     asyncio.run(run())
     budget = 1000 * 1200 * 8 / (20_000_000 * 1.08)
     # Keep the bounded initial credit; do not charge every late wake twice.
-    assert budget - .004 - 1e-9 <= now[0] - 10 <= budget + .004
+    assert budget - .032 - 1e-9 <= now[0] - 10 <= budget + .004
+
+
+def test_transient_large_frame_drains_faster_with_bounded_peak_and_no_drops(monkeypatch):
+    from elink.core import qos
+    from elink.core.congestion import NetworkBudget
+    now, sent = [10.0], []
+    monkeypatch.setattr(qos, 'time', SimpleNamespace(perf_counter=lambda: now[0]))
+    monkeypatch.setattr(qos, 'wait_until', lambda deadline: now.__setitem__(0, deadline))
+    budget = NetworkBudget(20_000_000, clock=lambda: now[0])
+    pacer = qos.RtpPacer(20, fps=90, budget=budget)
+    async def send(data):
+        sent.append((now[0], len(data)))
+    async def run():
+        # Three frames' worth of bytes arriving together, after an idle period.
+        for _ in range(70):
+            await pacer.send(b'x' * 1200, send)
+    asyncio.run(run())
+    duration = now[0] - 10
+    # Previous pacer: one average schedule with 4 ms credit, same packet sizes
+    # and 2 ms minimum wake. Use the same virtual time, not a wall-clock race.
+    old_now, old_next = 10.0, 0.0
+    for _ in range(70):
+        old_next = max(old_next, old_now - .004) + 1200 * 8 / pacer.rate
+        if old_next > old_now:
+            old_now = max(old_next, old_now + .002)
+    assert len(sent) == 70 and duration < (old_now - 10) * .8
+    for index, (stamp, _) in enumerate(sent):
+        assert stamp - 10 >= (index + 1) * 9600 / (pacer.rate * 1.25) - .004 - 1e-9
+        assert stamp - 10 >= (index + 1) * 9600 / pacer.rate - pacer.credit - 1e-9
+    assert budget.media_bps == budget.target_bps == 20_000_000
+
+
+def test_rtx_charges_shared_budget_and_transport_failure_releases_lock(monkeypatch):
+    import pytest
+    from elink.core import qos
+    now = [10.0]
+    monkeypatch.setattr(qos, 'time', SimpleNamespace(perf_counter=lambda: now[0]))
+    monkeypatch.setattr(qos, 'wait_until', lambda deadline: now.__setitem__(0, deadline))
+    pacer = qos.RtpPacer(1)
+    async def fail(data):
+        raise ConnectionError('closed')
+    async def send(data):
+        return len(data)
+    async def run():
+        with pytest.raises(ConnectionError):
+            await pacer.send(b'x' * 1200, fail, retransmit=True)
+        before = pacer.next_at
+        assert await pacer.send(b'x' * 1200, send) == 1200
+        assert pacer.next_at > before
+        assert not pacer.lock.locked() and not pacer.rtx_lock.locked()
+    asyncio.run(run())

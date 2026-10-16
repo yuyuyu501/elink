@@ -1,0 +1,2 @@
+# Preserve the pinned upstream shader headers byte for byte.
+elink/resources/fsr/*.h -text
