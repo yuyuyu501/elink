@@ -77,9 +77,12 @@ def package():
                        cwd=ROOT, env=native_environment(), check=True, timeout=120)
         report = json.loads((diagnostics / 'result.json').read_text(encoding='utf-8'))
         validate_self_test(report)
-        gpu_result = temporary / 'gpu-test.json'
-        subprocess.run([str(ROOT / 'dist' / 'Elink' / 'Elink.exe'), '--self-test-gpu', str(gpu_result)],
-                       cwd=ROOT, env=native_environment(), check=True, timeout=120)
+        gpu_result = artifacts / f'gpu-package-{stamp}.json'
+        try:
+            subprocess.run([str(ROOT / 'dist' / 'Elink' / 'Elink.exe'), '--self-test-gpu', str(gpu_result)],
+                           cwd=ROOT, env=native_environment(), check=True, timeout=120)
+        except subprocess.SubprocessError as exc:
+            raise RuntimeError(f'Packaged GPU check failed; diagnostic report: {gpu_result}') from exc
         gpu_report = json.loads(gpu_result.read_text(encoding='utf-8'))
         validate_gpu_test(gpu_report)
         upgrade = verify_portable_update(ROOT / 'dist' / 'Elink', temporary / 'update-check')

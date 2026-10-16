@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import traceback
@@ -15,8 +16,15 @@ from .ui.window import MainWindow
 
 def main() -> int:
     if len(sys.argv) == 3 and sys.argv[1] == '--self-test-gpu':
-        from scripts.check_gpu_video import main as check_gpu
-        check_gpu(['--output', sys.argv[2], '--frames', '30', '--stream-check'])
+        from pathlib import Path
+        output = Path(sys.argv[2])
+        try:
+            from scripts.check_gpu_video import main as check_gpu
+            check_gpu(['--output', str(output), '--frames', '30', '--stream-check'])
+        except Exception:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps({'ok': False, 'error': traceback.format_exc()}, indent=2), encoding='utf-8')
+            return 1
         return 0
     if len(sys.argv) == 3 and sys.argv[1] == "--peer-test":
         from .peer_diagnostics import run

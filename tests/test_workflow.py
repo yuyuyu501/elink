@@ -1,4 +1,6 @@
+import json
 import subprocess
+import sys
 
 import pytest
 
@@ -81,3 +83,21 @@ def test_packaging_stops_on_failed_tests_before_build(monkeypatch):
     with pytest.raises(subprocess.CalledProcessError):
         package_windows.package()
     assert len(calls) == 1 and calls[0][1:] == ['-m', 'pytest', '-q']
+
+
+def test_windowed_gpu_self_test_preserves_exception_without_stdio(tmp_path, monkeypatch):
+    from elink import app
+    from scripts import check_gpu_video
+
+    def fail(_):
+        raise RuntimeError('diagnostic rendering failure')
+
+    output = tmp_path / 'diagnostics' / 'gpu.json'
+    monkeypatch.setattr(check_gpu_video, 'main', fail)
+    monkeypatch.setattr(sys, 'argv', ['Elink.exe', '--self-test-gpu', str(output)])
+    monkeypatch.setattr(sys, 'stdout', None)
+    monkeypatch.setattr(sys, 'stderr', None)
+    assert app.main() == 1
+    report = json.loads(output.read_text(encoding='utf-8'))
+    assert report['ok'] is False
+    assert 'RuntimeError: diagnostic rendering failure' in report['error']
