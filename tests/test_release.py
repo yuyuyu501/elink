@@ -45,6 +45,8 @@ def package_fixture(tmp_path, monkeypatch):
     receipt = dict(version=publisher.__version__, source_dirty=False, commit='abc', source_sha256={'source': 'hash'},
                    self_test=dict(ok=True, runtime_stopped=True, audio_frames=10, video_frames=90),
                    gpu_test=dict(colors=[dict(native_rgb_error=2)] * 5,
+                                 capture_diagnostics=dict(ok=True, gray_start_recovered=True,
+                                                          continued_after_real_failure=True),
                                  live_settings=[dict(renderer=r, decoder=d, same_session=True, native_rgb_error=2)
                                                 for r, d in [('cpu', 'software'), ('gpu', 'hardware')] * 3],
                                  live_capture=[dict(monotonic_pts=True, capture_backend='gpu', max_rgb_error=2)] * 4,
@@ -81,7 +83,8 @@ def package_fixture(tmp_path, monkeypatch):
                                    'fsr_missing', 'fsr_black', 'fsr_timer', 'capture_missing', 'capture_color',
                                    'rtx_missing', 'rtx_fallback', 'rtx_timer', 'rtx_inactive', 'rtx_notice',
                                    'decoder_colors_missing', 'decoder_clipped', 'decoder_range', 'decoder_native',
-                                   'live_missing', 'live_reconnect', 'live_black', 'live_capture'])
+                                   'live_missing', 'live_reconnect', 'live_black', 'live_capture',
+                                   'capture_diagnostics'])
 def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypatch, problem):
     _, receipt, archive = package_fixture(tmp_path, monkeypatch)
     if problem == 'checksum':
@@ -130,6 +133,8 @@ def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypa
         receipt['gpu_test']['live_settings'][1]['native_rgb_error'] = 240
     elif problem == 'live_capture':
         receipt['gpu_test']['live_capture'][0]['monotonic_pts'] = False
+    elif problem == 'capture_diagnostics':
+        receipt['gpu_test']['capture_diagnostics']['gray_start_recovered'] = False
     else:
         receipt['source_sha256'] = {}
     (tmp_path / 'verification.json').write_text(json.dumps(receipt), encoding='utf-8')

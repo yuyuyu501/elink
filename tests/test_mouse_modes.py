@@ -392,3 +392,70 @@ def test_desktop_click_aligns_host_over_reliable_channel(monkeypatch):
                              (dict(type='button', button='left', down=True), False)]
     finally:
         player.close()
+
+
+@pytest.mark.parametrize('mode', ['smart', 'local', 'remote'])
+@pytest.mark.parametrize('via_poll', [False, True])
+def test_boundary_reentry_resumes_without_click_and_explicit_release_stays_released(monkeypatch, mode, via_poll):
+    app, player, events = make_player()
+    rect = player.rect_image
+    point = rect.center()
+    monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(point))
+    monkeypatch.setattr(QApplication, 'widgetAt', lambda _: player)
+    monkeypatch.setattr(QApplication, 'mouseButtons', lambda: Qt.MouseButton.NoButton)
+    player.client.cursor_supported = player.client.cursor_visible = True
+    player.client.cursor_updated = time.monotonic()
+    try:
+        player.set_mouse_mode(mode)
+        player.capture()
+        point = rect.topLeft() - QPoint(4, 0)
+        QApplication.sendEvent(player, mouse_event(player, point))
+        assert not player.captured and player._resume_on_hover
+        point = rect.center()
+        events.clear()
+        if via_poll:
+            player.tick()
+        else:
+            QApplication.sendEvent(player, mouse_event(player, point))
+        assert player.captured and events[0] == ('focus', True)
+        assert player.software_cursor_pos == point
+        QApplication.sendEvent(player, mouse_event(player, point, QEvent.Type.MouseButtonPress))
+        assert events[-1] == ('input', dict(type='button', button='left', down=True))
+        player.release()
+        events.clear()
+        QApplication.sendEvent(player, mouse_event(player, point))
+        player.tick()
+        assert not player.captured and not events
+    finally:
+        player.close()
+
+
+def test_hover_reentry_ignores_local_panels_occluders_and_drags(monkeypatch):
+    app, player, events = make_player()
+    point = player.rect_image.center()
+    target = player
+    buttons = Qt.MouseButton.NoButton
+    monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(point))
+    monkeypatch.setattr(QApplication, 'widgetAt', lambda _: target)
+    monkeypatch.setattr(QApplication, 'mouseButtons', lambda: buttons)
+    try:
+        player.release(resume_on_hover=True)
+        target = player.toolbar
+        player.tick()
+        assert not player.captured
+        target = player
+        buttons = Qt.MouseButton.LeftButton
+        player.tick()
+        assert not player.captured
+        buttons = Qt.MouseButton.NoButton
+        player.open_controls()
+        player._resume_on_hover = True
+        player.tick()
+        assert not player.captured
+        player.control_menu.hide()
+        player.image = None
+        player.tick()
+        assert not player.captured
+        assert not any(kind == 'input' for kind, _ in events)
+    finally:
+        player.close()

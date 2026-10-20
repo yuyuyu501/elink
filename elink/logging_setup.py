@@ -3,6 +3,7 @@ from functools import lru_cache
 import logging
 from logging.handlers import RotatingFileHandler
 import platform
+import sys
 import traceback
 
 import av
@@ -12,8 +13,13 @@ from . import __version__
 
 @lru_cache(maxsize=1)
 def environment_details():
+    if sys.platform == 'win32':
+        version = sys.getwindowsversion()
+        system = f'Windows-{version.major}.{version.minor}.{version.build}'
+    else:
+        system = platform.platform()
     return dict(elink_version=__version__, python_version=platform.python_version(),
-                system=platform.platform(), av_version=av.__version__)
+                system=system, av_version=av.__version__)
 
 
 def configure_logging(root):
@@ -32,6 +38,7 @@ def configure_logging(root):
         '%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s'))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+    logger.info('Elink %s file logging ready', __version__)
     logger.info('Application started: %s', environment_details())
     return path
 

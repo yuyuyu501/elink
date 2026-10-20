@@ -73,7 +73,9 @@ class DesktopTrack(MediaStreamTrack):
                 frame = self.gpu_capture.read()
                 self.cursor_visible = self.cursor.visible()
                 self.profile.elapsed('capture_gpu_readback', started)
-                self.profile.describe(capture_backend='ddagrab-scale_d3d11', capture_format='nv12')
+                pending = getattr(self.gpu_capture, 'calibration_pending', False)
+                self.profile.describe(capture_backend='ddagrab-cpu-color' if pending else 'ddagrab-scale_d3d11',
+                                      capture_format='nv12', capture_calibration='pending' if pending else 'ready')
                 return self.finish_capture(frame, started)
             except (av.FFmpegError, RuntimeError, ValueError, OSError) as exc:
                 self.record_capture_error('capture', exc, self.width, self.height, self.fps)

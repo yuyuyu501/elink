@@ -129,3 +129,35 @@ def test_native_failure_reports_exact_initialization_stage(monkeypatch, stage):
     with pytest.raises(RuntimeError) as raised:
         gpu_capture.D3D11Capture(64, 36, False)
     assert any(f'stage={stage}' in note and 'output=64x36' in note for note in raised.value.__notes__)
+
+
+def test_gray_start_continues_with_correct_colors_and_recovers_gpu_in_same_capture(monkeypatch):
+    source = av.VideoFrame.from_ndarray(np.full((192, 256, 3), 90, np.uint8), format='rgb24')
+    source.pts = 1
+    builds = []
+    def gpu_frame():
+        return source.reformat(format='nv12', dst_colorspace='ITU709', dst_color_range=2)
+    def build(capture, reference=False):
+        builds.append(reference)
+        capture.sink = SimpleNamespace(pull=gpu_frame)
+        capture.reference_sink = SimpleNamespace(pull=lambda: source) if reference else None
+    monkeypatch.setattr(gpu_capture.D3D11Capture, '_build', build)
+    capture = gpu_capture.D3D11Capture(256, 192, False)
+    try:
+        frame = capture.read()
+        assert capture.calibration_pending and builds == [True]
+        assert (int(frame.colorspace), int(frame.color_range)) == (1, 1)
+        assert np.max(np.abs(media.bgr_pixels(frame).astype(int) - 90)) <= 2
+        rng = np.random.default_rng(48)
+        pixels = np.repeat(np.repeat(rng.integers(20, 230, (24, 32, 3), dtype=np.uint8), 8, 0), 8, 1)
+        source = av.VideoFrame.from_ndarray(pixels, format='rgb24')
+        source.pts = 2
+        capture.next_calibration_at = 0
+        frame = capture.read()
+        assert not capture.calibration_pending and builds == [True, False]
+        assert (int(frame.colorspace), int(frame.color_range)) == (1, 2)
+        actual = media.bgr_pixels(frame)[4::8, 4::8, ::-1].astype(int)
+        assert np.max(np.abs(actual - pixels[4::8, 4::8].astype(int))) <= 4
+        assert capture.read().format.name == 'nv12'
+    finally:
+        capture.close()

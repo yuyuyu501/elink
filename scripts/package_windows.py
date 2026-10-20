@@ -44,6 +44,10 @@ def validate_gpu_test(report):
     decoded_colors = report.get('decoder_colors', [])
     live = report.get('live_settings', [])
     live_capture = report.get('live_capture', [])
+    diagnostics = report.get('capture_diagnostics', {})
+    if any(diagnostics.get(key) is not True for key in
+           ('ok', 'gray_start_recovered', 'continued_after_real_failure')):
+        raise RuntimeError('Packaged D3D11 recovery/file diagnostic checks have not passed.')
     if (len(live) != 6 or {c.get('renderer') for c in live} != {'cpu', 'gpu'}
             or {c.get('decoder') for c in live} != {'software', 'hardware'}
             or any(c.get('same_session') is not True or not isinstance(c.get('native_rgb_error'), (int, float))

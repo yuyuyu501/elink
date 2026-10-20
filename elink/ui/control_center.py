@@ -1,7 +1,7 @@
 """Session controls that stay open while users adjust multiple options."""
-from PySide6.QtCore import Qt, QPoint, QSize
+from PySide6.QtCore import QEvent, Qt, QPoint, QSize
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QRadioButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from ..core.mouse import MOUSE_MODES
@@ -187,5 +187,26 @@ class ControlCenter(LocalPanel):
             self.mouse_options.raise_()
 
     def hideEvent(self, event):
+        QApplication.instance().removeEventFilter(self)
         self.mouse_options.hide()
         super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonPress and isinstance(watched, QWidget):
+            player = self.player
+            if watched.window() is player and self.isVisible():
+                position = event.globalPosition().toPoint()
+                for panel in (self, self.mouse_options, player.controls_button):
+                    if panel.isVisible() and panel.rect().contains(panel.mapFromGlobal(position)):
+                        return False
+                self.hide()
+                player._resume_on_hover = True
+                player.setFocus()
+                # Local window controls still act on this click; video dismissal
+                # must not also press a button on the remote desktop.
+                return watched is player
+        return super().eventFilter(watched, event)

@@ -489,11 +489,13 @@ def main(argv=None):
                   limitations='Synthetic CPU submission benchmark, not game FPS, GPU time or input-to-photon latency.')
     if args.stream_check:
         from scripts.check_gpu_capture import verify as verify_capture, verify_live_capture
+        from scripts.check_capture_diagnostics import verify as verify_diagnostics
         result['native_capture'] = verify_capture(app)
         result['live_capture'] = verify_live_capture(app)
         result['decoder_colors'] = verify_decoder_colors(app)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='gpu-stream-', dir=args.output.parent) as temp:
+            result['capture_diagnostics'] = verify_diagnostics(Path(temp) / 'capture-diagnostics')
             result['streams'] = [verify_stream(app, Path(temp) / decoder, decoder)
                                  for decoder in ('software', 'hardware')]
             result['super_resolution_streams'] = [verify_stream(app, Path(temp) / str(scale), 'hardware', scale)

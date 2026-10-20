@@ -106,7 +106,10 @@ def test_control_center_side_panel_slider_and_f8_stay_local():
         assert player.preferences['mouse_sensitivity'] == 0 and center.sensitivity_value.text() == '0.0'
         assert center.isVisible()
         QTest.mouseClick(player, Qt.MouseButton.LeftButton, pos=QPoint(10, 100))
-        assert center.isVisible() and not player.captured
+        assert not center.isVisible() and not center.mouse_options.isVisible() and not player.captured
+        assert not any(kind == 'input' for kind, _ in events)
+        player.controls_button.click()
+        assert center.isVisible() and center.mouse_options.isVisible()
         center.sensitivity.setFocus()
         QTest.keyClick(center.sensitivity, Qt.Key.Key_F8)
         app.processEvents()

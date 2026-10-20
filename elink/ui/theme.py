@@ -130,6 +130,8 @@ class AppStyle(QProxyStyle):
 
 
 def apply_theme(app: QApplication) -> None:
+    if app.property('elinkThemeApplied'):
+        return
     app.setStyle(AppStyle())
     app.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
     app.setFont(QFont('Microsoft YaHei UI', 10))
@@ -139,3 +141,4 @@ def apply_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.Link, QColor('#2855eb'))
     app.setPalette(palette)
     app.setStyleSheet(STYLE.replace('@RES@', resource_dir().as_posix()))
+    app.setProperty('elinkThemeApplied', True)

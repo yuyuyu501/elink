@@ -41,6 +41,17 @@ def make_player():
     return app, player, events
 
 
+def test_repeated_window_setup_keeps_the_application_style_alive():
+    app, player, _ = make_player()
+    try:
+        style = app.style()
+        apply_theme(app)
+        assert app.style() is style
+        assert app.property('elinkThemeApplied')
+    finally:
+        player.close()
+
+
 def test_export_success_notice_disappears_after_three_seconds(monkeypatch, tmp_path):
     app, player, _ = make_player()
     filename = tmp_path / 'performance.json'

@@ -89,6 +89,7 @@ class Player(QWidget):
         self.settings_dialog = None
         self.quality_applying = False
         self.captured = False
+        self._resume_on_hover = False
         self.gpu_surface = None
         self.gpu_overlay = None
         self.renderer_widgets = None
@@ -317,6 +318,7 @@ class Player(QWidget):
             return
         if self.control_menu and self.control_menu.isVisible():
             self.control_menu.hide()
+            self._resume_on_hover = True
             self.setFocus()
             return
         self.release()
@@ -434,8 +436,9 @@ class Player(QWidget):
             self.runtime.call(self.client.send, event)
 
     def capture(self):
-        if self.control_menu and self.control_menu.isVisible():
+        if self.captured or (self.control_menu and self.control_menu.isVisible()):
             return
+        self._resume_on_hover = False
         self.setFocus()
         self.captured = True
         self.layout_chrome()
@@ -510,8 +513,9 @@ class Player(QWidget):
         else:
             self.cursor_confinement.release()
 
-    def release(self):
+    def release(self, *, resume_on_hover=False):
         self.captured = False
+        self._resume_on_hover = resume_on_hover
         self.keyboard_hook.stop()
         self.raw_mouse.stop()
         self._relative_last = None
@@ -549,6 +553,7 @@ class Player(QWidget):
                 self.refresh_video()
 
     def tick(self):
+        self.resume_hover_input()
         self.update_mouse()
         now = time.monotonic()
         stats_due = now - self.stats_at >= 1
@@ -698,7 +703,9 @@ class Player(QWidget):
 
     def mouseMoveEvent(self, event):
         if not self.captured:
-            return
+            self.resume_hover_input(event.position())
+            if not self.captured:
+                return
         if self.release_outside_video(event.position()):
             return
         if self.game_mouse:
@@ -798,13 +805,36 @@ class Player(QWidget):
         return (rect.x() <= position.x() < rect.x() + rect.width()
                 and rect.y() <= position.y() < rect.y() + rect.height())
 
+    def resume_hover_input(self, position=None):
+        if (not self._resume_on_hover or self.captured or self._closed
+                or not self.isVisible() or self.isMinimized() or self.client.pc is None
+                or QApplication.mouseButtons() != Qt.MouseButton.NoButton
+                or QApplication.activeModalWidget() is not None
+                or QApplication.activePopupWidget() is not None
+                or (self.control_menu and self.control_menu.isVisible())
+                or (self.settings_dialog and self.settings_dialog.isVisible())):
+            return
+        has_frame = self.image is not None or (self.gpu_surface is not None and self.gpu_surface.frame is not None)
+        position = QPointF(self.mapFromGlobal(QCursor.pos())) if position is None else position
+        if not has_frame or not self.video_contains(position):
+            return
+        # The video can be covered by another window or by local title/resize
+        # controls. Geometry alone would resume input through those surfaces.
+        if QApplication.widgetAt(self.mapToGlobal(position.toPoint())) is not self:
+            return
+        if not self.isActiveWindow():
+            self.activateWindow()
+            if not self.isActiveWindow():
+                return
+        self.capture()
+
     def release_outside_video(self, position):
         if not (self.game_mouse and self.isFullScreen()) and not self.video_contains(position):
             if not self.game_mouse:
                 # The last move can jump over an edge or arrive after the poll.
                 # Order the final desktop position before the focus epoch ends.
                 self.send_absolute_motion(position, reliable=True, adjust=False)
-            self.release()
+            self.release(resume_on_hover=True)
             return True
         return False
 
@@ -813,6 +843,10 @@ class Player(QWidget):
             self.release_outside_video(QPointF(self.mapFromGlobal(QCursor.pos())))
         super().leaveEvent(event)
 
+    def enterEvent(self, event):
+        self.resume_hover_input()
+        super().enterEvent(event)
+
     def event(self, event):
         if getattr(self, 'captured', False) and event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             if event.key() == Qt.Key.Key_Tab and not event.isAutoRepeat():
@@ -820,7 +854,8 @@ class Player(QWidget):
                 event.accept()
                 return True
         if event.type() in (QEvent.Type.WindowDeactivate, QEvent.Type.FocusOut) and getattr(self, "captured", False):
-            self.release()
+            outside = not self.video_contains(QPointF(self.mapFromGlobal(QCursor.pos())))
+            self.release(resume_on_hover=outside)
         return super().event(event)
 
     def closeEvent(self, event):

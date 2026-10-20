@@ -17,7 +17,7 @@ import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from elink.core.media import FrameMailbox
 from elink.ui.player import Player
@@ -117,7 +117,19 @@ def check_windowed(app, view, client, events, before, mode, visible, fallback=Fa
             final = events[-2][1]
             assert final['absolute']
             assert final['x'] in (0, 65535) or final['y'] in (0, 65535)
+        events.clear()
+        # Released windows expose local resize handles along their outer edge.
+        # Reenter the video past those handles, without clicking them.
+        reentry = QPoint(max(rect.left() + 10, min(rect.right() - 10, inside.x())),
+                         max(rect.top() + 10, min(rect.bottom() - 10, inside.y())))
+        QCursor.setPos(view.mapToGlobal(reentry))
+        settle(app, lambda: view.captured)
+        assert view.captured and events[0] == ('focus', True), (
+            'pointer reentry needed a click', mode, visible, view.isActiveWindow(), view._resume_on_hover,
+            QApplication.widgetAt(QCursor.pos()), view.mapFromGlobal(QCursor.pos()), events[-5:])
+        assert clip_bounds() == before
     return dict(mode=mode, host_cursor_visible=visible, fallback=fallback, four_edges=True,
+                reentry_without_click=True,
                 desktop_aligned=True if visible else None)
 
 
@@ -157,6 +169,52 @@ def check(app, renderer):
         finally:
             view.raw_mouse.start = start
 
+        # Returning from an active local window also needs no activation click.
+        client.cursor_visible = True
+        client.cursor_updated = time.monotonic()
+        view.set_mouse_mode('local')
+        QCursor.setPos(view.mapToGlobal(view.rect_image.center()))
+        view.capture()
+        QCursor.setPos(view.mapToGlobal(QPoint(view.width() + 30, view.height() // 2)))
+        settle(app)
+        assert not view.captured and view._resume_on_hover
+        local = QWidget()
+        local.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        local.resize(100, 120)
+        local.move(view.mapToGlobal(QPoint(view.width() + 10, 80)))
+        try:
+            local.show()
+            local.activateWindow()
+            settle(app)
+            assert local.isActiveWindow() and not view.isActiveWindow()
+            QCursor.setPos(view.mapToGlobal(view.rect_image.center()))
+            settle(app, lambda: view.captured)
+            assert view.captured and view.isActiveWindow(), 'return from local app needs a click'
+            view.release(resume_on_hover=True)
+            local.move(view.mapToGlobal(view.rect_image.center() - QPoint(50, 60)))
+            local.activateWindow()
+            settle(app)
+            assert not view.captured, 'covered video must not resume remote input'
+        finally:
+            local.close()
+            local.deleteLater()
+            view.release()
+            view.activateWindow()
+            settle(app)
+
+        view.open_controls()
+        center = view.control_menu
+        center.mouse_button.click()
+        settle(app)
+        QTest.mouseClick(center.modes['local'], Qt.MouseButton.LeftButton)
+        assert center.isVisible() and center.mouse_options.isVisible()
+        events.clear()
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=view.rect_image.bottomLeft() + QPoint(20, -20))
+        settle(app)
+        assert not center.isVisible() and not center.mouse_options.isVisible()
+        assert not any(kind == 'input' and value.get('type') == 'button' for kind, value in events)
+        view.release()
+
         # Fullscreen games retain continuous relative input and release on F8.
         view.showFullScreen()
         settle(app)
@@ -194,7 +252,8 @@ def check(app, renderer):
         QApplication.sendEvent(view, QEvent(QEvent.Type.WindowDeactivate))
         assert not view.captured and not view.raw_mouse.active and clip_bounds() == before
         return dict(renderer=renderer, windowed=windowed, fullscreen_confined=True,
-                    f8_release=True, focus_release=True, offscreen_unconfined=True)
+                    f8_release=True, focus_release=True, offscreen_unconfined=True,
+                    local_window_return=True, covered_video_ignored=True, outside_click_dismisses=True)
     finally:
         view.close()
         settle(app)

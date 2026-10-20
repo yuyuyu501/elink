@@ -6,6 +6,7 @@ import pytest
 
 from elink import __version__
 from elink.logging_setup import configure_logging, exception_details
+from elink import logging_setup
 
 
 @pytest.fixture
@@ -67,3 +68,27 @@ def test_reconfigure_logging_closes_previous_file_and_does_not_duplicate(tmp_pat
     logging.getLogger('elink.core.media').error('one diagnostic')
     assert 'one diagnostic' not in first.read_text(encoding='utf-8')
     assert second.read_text(encoding='utf-8').count('one diagnostic') == 1
+
+
+def test_windows_metadata_does_not_query_wmi_or_platform(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(logging_setup, 'sys', SimpleNamespace(platform='win32',
+                         getwindowsversion=lambda: SimpleNamespace(major=10, minor=0, build=26200)))
+    def blocked_query():
+        raise AssertionError('platform.platform can block in Windows WMI')
+    monkeypatch.setattr(logging_setup.platform, 'platform', blocked_query)
+    logging_setup.environment_details.cache_clear()
+    try:
+        assert logging_setup.environment_details()['system'] == 'Windows-10.0.26200'
+    finally:
+        logging_setup.environment_details.cache_clear()
+
+
+def test_startup_log_is_written_before_collecting_environment(tmp_path, monkeypatch, application_logger):
+    def failed_metadata():
+        raise RuntimeError('metadata unavailable')
+    monkeypatch.setattr(logging_setup, 'environment_details', failed_metadata)
+    with pytest.raises(RuntimeError, match='metadata unavailable'):
+        configure_logging(tmp_path)
+    text = (tmp_path / 'logs/elink.log').read_text(encoding='utf-8')
+    assert f'Elink {__version__} file logging ready' in text
