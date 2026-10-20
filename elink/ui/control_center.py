@@ -1,15 +1,26 @@
 """Session controls that stay open while users adjust multiple options."""
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QPoint, QSize
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout, QFrame,
-                               QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton,
+                               QRadioButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from ..core.mouse import MOUSE_MODES
 from .controls import OptionRow
 from .icons import icon
 
 
-class ControlCenter(QFrame):
+class LocalPanel(QFrame):
+    def mousePressEvent(self, event):
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+
+    def wheelEvent(self, event):
+        event.accept()
+
+
+class ControlCenter(LocalPanel):
     def __init__(self, player):
         super().__init__(player)
         self.player = player
@@ -30,9 +41,15 @@ class ControlCenter(QFrame):
         self.quality.setEnabled(player.client.pc is not None)
         self.mouse_button = self.command('鼠标设置', self.toggle_mouse, 'mouse')
         self.mouse_button.setCheckable(True)
-        self.mouse_options = QWidget()
+        self.mouse_options = LocalPanel(player)
+        self.mouse_options.setObjectName('mouseSubmenu')
+        self.mouse_options.setFixedWidth(280)
         mouse_rows = QVBoxLayout(self.mouse_options)
-        mouse_rows.setContentsMargins(38, 4, 10, 12)
+        mouse_rows.setContentsMargins(16, 14, 16, 14)
+        mouse_rows.setSpacing(8)
+        title = QLabel('鼠标设置')
+        title.setObjectName('sectionTitle')
+        mouse_rows.addWidget(title)
         self.modes = {}
         for label, mode, hint in MOUSE_MODES:
             radio = QRadioButton(label)
@@ -40,17 +57,40 @@ class ControlCenter(QFrame):
             radio.clicked.connect(lambda checked=False, mode=mode: self.select_mode(mode))
             mouse_rows.addWidget(radio)
             self.modes[mode] = radio
-        form = QFormLayout()
-        self.sensitivity = QDoubleSpinBox()
-        self.sensitivity.setRange(-5, 5)
-        self.sensitivity.setDecimals(1)
-        self.sensitivity.setSingleStep(.1)
-        self.sensitivity.setKeyboardTracking(False)
+        mouse_rows.addSpacing(8)
+        sensitivity_row = QHBoxLayout()
+        sensitivity_row.addWidget(QLabel('灵敏度'))
+        sensitivity_row.addStretch()
+        self.sensitivity_value = QLabel('0.0')
+        self.sensitivity_value.setFixedWidth(40)
+        self.sensitivity_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        sensitivity_row.addWidget(self.sensitivity_value)
+        self.reset_sensitivity = QToolButton()
+        self.reset_sensitivity.setObjectName('resetSensitivity')
+        self.reset_sensitivity.setIcon(icon('refresh-cw'))
+        self.reset_sensitivity.setFixedSize(28, 28)
+        self.reset_sensitivity.setToolTip('恢复默认灵敏度')
+        self.reset_sensitivity.setAccessibleName('恢复默认灵敏度')
+        sensitivity_row.addWidget(self.reset_sensitivity)
+        mouse_rows.addLayout(sensitivity_row)
+        self.sensitivity = QSlider(Qt.Orientation.Horizontal)
+        self.sensitivity.setAccessibleName('鼠标灵敏度')
+        self.sensitivity.setRange(-50, 50)
+        self.sensitivity.setSingleStep(1)
+        self.sensitivity.setPageStep(10)
+        self.sensitivity.setMinimumHeight(24)
         self.sensitivity.setToolTip('0.0 保持默认速率；-5.0 为 0.5 倍，+5.0 为 2 倍。')
-        self.sensitivity.valueChanged.connect(player.set_mouse_sensitivity)
-        form.addRow('灵敏度', self.sensitivity)
-        mouse_rows.addLayout(form)
-        self.rows.addWidget(self.mouse_options)
+        self.sensitivity.valueChanged.connect(self.change_sensitivity)
+        self.reset_sensitivity.clicked.connect(lambda: self.sensitivity.setValue(0))
+        mouse_rows.addWidget(self.sensitivity)
+        limits = QHBoxLayout()
+        for index, text in enumerate(('-5.0', '0.0', '+5.0')):
+            label = QLabel(text)
+            label.setObjectName('muted')
+            limits.addWidget(label)
+            if index < 2:
+                limits.addStretch()
+        mouse_rows.addLayout(limits)
         self.mouse_options.hide()
         self.controllers = self.check('转发手柄与震动', player.set_controllers, 'gamepad-2')
         self.muted = self.check('本机静音', player.set_muted, 'volume-2')
@@ -63,11 +103,16 @@ class ControlCenter(QFrame):
         self.command('释放键鼠输入', player.release, 'keyboard')
         self.separator()
         self.command('断开连接', player.close, 'power').setObjectName('danger')
-        for key, callback in (('F8', player.open_controls), ('F10', self.statistics.click),
-                              ('F11', player.toggle_fullscreen)):
-            shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(callback)
+        for panel in (self, self.mouse_options):
+            for key, callback in (('F8', player.open_controls), ('F10', self.statistics.click),
+                                  ('F11', player.toggle_fullscreen)):
+                shortcut = QShortcut(QKeySequence(key), panel)
+                shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                shortcut.activated.connect(callback)
+        dismiss = QShortcut(QKeySequence('Esc'), self.mouse_options)
+        dismiss.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        dismiss.activated.connect(self.dismiss_mouse)
+        self.scroll.verticalScrollBar().valueChanged.connect(lambda _: self.place())
 
     def command(self, label, callback, icon_name):
         widget = QPushButton(label)
@@ -97,8 +142,16 @@ class ControlCenter(QFrame):
         self.rows.addWidget(line)
 
     def toggle_mouse(self):
-        self.mouse_options.setVisible(self.mouse_button.isChecked())
         self.place()
+
+    def dismiss_mouse(self):
+        self.mouse_button.setChecked(False)
+        self.place()
+        self.mouse_button.setFocus()
+
+    def change_sensitivity(self, value):
+        self.sensitivity_value.setText(f'{value / 10:+.1f}' if value else '0.0')
+        self.player.set_mouse_sensitivity(value / 10)
 
     def sync(self):
         player = self.player
@@ -107,7 +160,9 @@ class ControlCenter(QFrame):
             radio.setEnabled(supported or mode == 'remote')
             radio.setChecked(player.mouse_mode == mode)
         self.sensitivity.blockSignals(True)
-        self.sensitivity.setValue(player.mouse_sensitivity.value)
+        value = round(player.mouse_sensitivity.value * 10)
+        self.sensitivity.setValue(value)
+        self.sensitivity_value.setText(f'{value / 10:+.1f}' if value else '0.0')
         self.sensitivity.blockSignals(False)
         self.controllers.setChecked(player.controllers)
         self.muted.setChecked(player.muted)
@@ -118,15 +173,19 @@ class ControlCenter(QFrame):
         player = self.player
         top = player.toolbar.height()
         right = player.controls_button.mapTo(player, player.controls_button.rect().topRight()).x() + 1
-        self.setGeometry(max(8, min(right - self.width(), player.width() - self.width() - 8)), top + 8,
-                         self.width(), min(self.scroll.widget().sizeHint().height() + 2, player.height() - top - 16))
+        expanded = self.mouse_button.isChecked() and self.isVisible()
+        left = self.mouse_options.width() + 16 if expanded else 8
+        self.setGeometry(max(left, min(right - self.width(), player.width() - self.width() - 8)), top + 8,
+                         self.width(), min(self.scroll.widget().sizeHint().height() + 4, player.height() - top - 16))
         self.raise_()
+        self.mouse_options.setVisible(expanded)
+        if expanded:
+            height = min(self.mouse_options.sizeHint().height(), player.height() - top - 16)
+            y = min(self.mouse_button.mapTo(player, QPoint()).y(), player.height() - height - 8)
+            self.mouse_options.setGeometry(self.x() - self.mouse_options.width() - 8, max(top + 8, y),
+                                           self.mouse_options.width(), height)
+            self.mouse_options.raise_()
 
-    def mousePressEvent(self, event):
-        event.accept()
-
-    def mouseReleaseEvent(self, event):
-        event.accept()
-
-    def wheelEvent(self, event):
-        event.accept()
+    def hideEvent(self, event):
+        self.mouse_options.hide()
+        super().hideEvent(event)

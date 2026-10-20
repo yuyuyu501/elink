@@ -90,9 +90,11 @@ def validate_gpu_test(report):
         raise RuntimeError('Packaged GPU native display checks have not passed.')
 
 
-def package():
+def package(dist_dir=None):
     if os.name != 'nt' or sys.maxsize <= 2**32:
         raise RuntimeError('Build this package using 64-bit Python on Windows.')
+    dist_dir = (ROOT / (dist_dir or 'dist')).resolve()
+    application = dist_dir / 'Elink'
     metadata = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))
     if metadata['project']['version'] != __version__:
         raise RuntimeError('pyproject.toml and elink.__version__ must match.')
@@ -100,30 +102,30 @@ def package():
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT))
     subprocess.run([sys.executable, '-m', 'pytest', '-q'], cwd=ROOT, check=True)
-    subprocess.run([sys.executable, '-m', 'scripts.build'], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, '-m', 'scripts.build', '--dist-dir', str(dist_dir)], cwd=ROOT, check=True)
     artifacts = ROOT / '.artifacts'
     artifacts.mkdir(exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     with tempfile.TemporaryDirectory(prefix='package-check-', dir=artifacts) as temp:
         temporary = Path(temp)
         diagnostics = temporary / 'self-test'
-        subprocess.run([str(ROOT / 'dist' / 'Elink' / 'Elink.exe'), '--self-test', str(diagnostics)],
+        subprocess.run([str(application / 'Elink.exe'), '--self-test', str(diagnostics)],
                        cwd=ROOT, env=native_environment(), check=True, timeout=120)
         report = json.loads((diagnostics / 'result.json').read_text(encoding='utf-8'))
         validate_self_test(report)
         gpu_result = artifacts / f'gpu-package-{stamp}.json'
         try:
-            subprocess.run([str(ROOT / 'dist' / 'Elink' / 'Elink.exe'), '--self-test-gpu', str(gpu_result)],
+            subprocess.run([str(application / 'Elink.exe'), '--self-test-gpu', str(gpu_result)],
                            cwd=ROOT, env=native_environment(), check=True, timeout=120)
         except subprocess.SubprocessError as exc:
             raise RuntimeError(f'Packaged GPU check failed; diagnostic report: {gpu_result}') from exc
         gpu_report = json.loads(gpu_result.read_text(encoding='utf-8'))
         validate_gpu_test(gpu_report)
-        upgrade = verify_portable_update(ROOT / 'dist' / 'Elink', temporary / 'update-check')
+        upgrade = verify_portable_update(application, temporary / 'update-check')
         if source_snapshot() != snapshot:
             raise RuntimeError('Source changed during packaging; rerun before distributing this build.')
         filename = f'Elink-{__version__}-windows-x64'
-        archive = Path(shutil.make_archive(str(temporary / filename), 'zip', ROOT / 'dist', 'Elink'))
+        archive = Path(shutil.make_archive(str(temporary / filename), 'zip', dist_dir, 'Elink'))
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         receipt = dict(version=__version__, built_at=stamp, commit=revision, source_dirty=dirty,
                        source_sha256=snapshot, package_sha256=digest, self_test=report,
@@ -131,20 +133,22 @@ def package():
                        signed=False, channel='preview', format='portable-folder')
         (temporary / 'verification.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
         (temporary / 'SHA256SUMS.txt').write_text(f'{digest}  {archive.name}\n', encoding='ascii')
-        destination = ROOT / 'dist' / 'releases' / f'v{__version__}' / stamp
+        destination = dist_dir / 'releases' / f'v{__version__}' / stamp
         destination.mkdir(parents=True, exist_ok=False)
         for path in (archive, temporary / 'verification.json', temporary / 'SHA256SUMS.txt'):
             shutil.copy2(path, destination / path.name)
     print(f'Verified preview package: {destination}')
-    print(f'Run: {ROOT / "dist" / "Elink" / "Elink.exe"}')
+    print(f'Run: {application / "Elink.exe"}')
     print('Unzip the whole portable folder; keep its DLLs. No Git push, tag, release upload or driver install performed.')
     return destination
 
 
 def main():
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dist-dir', type=Path, help='Output directory; defaults to dist.')
+    args = parser.parse_args()
     try:
-        package()
+        package(args.dist_dir)
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f'Packaging stopped: {exc}', file=sys.stderr)
         return 1

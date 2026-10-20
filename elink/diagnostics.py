@@ -79,16 +79,17 @@ def run(root: Path, desktop=False):
         app.processEvents()
         center = player.control_menu
         center.mouse_button.click()
-        center.sensitivity.setValue(-1.2)
-        assert player.mouse_sensitivity.value == -1.2 and center.isVisible()
+        center.sensitivity.setValue(-12)
+        assert player.mouse_sensitivity.value == -1.2 and center.isVisible() and center.mouse_options.isVisible()
+        assert center.mouse_options.geometry().right() < center.geometry().left()
         center.statistics.click()
         assert not player.show_statistics and center.isVisible()
         player.open_controls()
-        assert not center.isVisible()
+        assert not center.isVisible() and not center.mouse_options.isVisible()
         player.open_controls()
-        assert center.isVisible() and center.sensitivity.value() == -1.2
-        result['session_controls'] = dict(persistent=True, sensitivity=True, toggle=True)
-        player.control_menu.grab().save(str(root / "control-menu.png"))
+        assert center.isVisible() and center.sensitivity.value() == -12
+        result['session_controls'] = dict(persistent=True, sensitivity=True, toggle=True, side_panel=True)
+        player.grab().save(str(root / "control-menu.png"))
         player.control_menu.close()
         player.open_quality()
         from .ui.controls import StreamOptions

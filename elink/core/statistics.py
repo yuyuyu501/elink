@@ -78,7 +78,7 @@ class ReceiveSampler:
 
 
 def overlay_lines(snapshot, fps, rtt_ms, connected=True, fresh=True):
-    lines = [snapshot.route if connected else '已断开',
+    lines = [snapshot.route.removeprefix('Tailscale · ') if connected else '已断开',
              f'{fps:.0f} fps' if connected else '-- fps']
     def number(value, suffix, digits=1):
         return f'{value:.{digits}f} {suffix}' if connected and fresh and value is not None else f'-- {suffix}'

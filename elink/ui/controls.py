@@ -67,7 +67,7 @@ class StreamOptions(QWidget):
         self.resolution = QComboBox()
         for width, height in ((1920, 1080), (1600, 900), (1280, 720), (2560, 1440), (3840, 2160)):
             self.resolution.addItem(f'{width} × {height}', [width, height])
-        form.addRow('串流分辨率', self.resolution)
+        form.addRow('分辨率', self.resolution)
         self.fps = QComboBox()
         for fps in (60, 90, 120, 144, 165, 240, 30):
             self.fps.addItem(f'{fps} FPS', fps)
@@ -93,9 +93,8 @@ class StreamOptions(QWidget):
         self.bitrate = QSpinBox()
         self.bitrate.setRange(1, 80)
         self.bitrate.setValue(20)
-        self.bitrate.setSuffix(' Mbps')
-        for label, widget in [('目标帧率', self.fps),
-                              ('目标码率', self.bitrate), ('解码器', self.decoder), ('显示方式', self.renderer),
+        for label, widget in [('帧率', self.fps),
+                              ('码率(Mbps)', self.bitrate), ('解码器', self.decoder), ('显示方式', self.renderer),
                               ('超分采样', self.render_scale), ('超分算法', self.upscaler)]:
             form.addRow(label, widget)
         self.audio = QCheckBox('传输远端系统声音')

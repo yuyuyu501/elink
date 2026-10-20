@@ -41,3 +41,10 @@ def test_overlay_units_unknown_values_stale_and_disconnect():
     assert '-- Mbps' in overlay_lines(snapshot, 60, 0, fresh=False)
     assert overlay_lines(snapshot, 60, 13, connected=False) == [
         '已断开', '-- fps', '-- Mbps', '-- ms RTT', '-- ms decode', '编码 --', '解码 --', '-- % loss']
+
+
+def test_overlay_omits_tailnet_prefix_but_preserves_direct_and_relay_details():
+    for path in ('UDP P2P', 'DERP 中继', '节点中继', '路径待测'):
+        snapshot = StreamStats(route=f'Tailscale · {path}')
+        assert overlay_lines(snapshot, 60, 10)[0] == path
+        assert snapshot.route == f'Tailscale · {path}'

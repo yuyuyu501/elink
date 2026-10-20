@@ -51,6 +51,35 @@ def test_option_row_label_indicator_keyboard_and_disabled():
         row.close()
 
 
+def test_stream_dropdown_opens_below_field_and_commits_keyboard_selection():
+    app = QApplication.instance() or QApplication([])
+    apply_theme(app)
+    options = StreamOptions()
+    options.resize(500, 540)
+    options.move(40, 40)
+    options.show()
+    app.processEvents()
+    combo = options.decoder
+    try:
+        combo.showPopup()
+        app.processEvents()
+        popup = combo.view().window()
+        bottom = combo.mapToGlobal(combo.rect().bottomLeft()).y()
+        assert popup.geometry().top() >= bottom
+        assert popup.width() == combo.width()
+        QTest.keyClick(combo.view(), Qt.Key.Key_Down)
+        QTest.keyClick(combo.view(), Qt.Key.Key_Return)
+        app.processEvents()
+        assert combo.currentData() == 'software' and not popup.isVisible()
+        combo.showPopup()
+        QTest.keyClick(combo.view(), Qt.Key.Key_Down)
+        QTest.keyClick(combo.view(), Qt.Key.Key_Escape)
+        assert combo.currentData() == 'software'
+    finally:
+        combo.hidePopup()
+        options.close()
+
+
 def test_error_notice_dismiss_and_redisplay_preserves_log(tmp_path):
     app = QApplication.instance() or QApplication([])
     apply_theme(app)

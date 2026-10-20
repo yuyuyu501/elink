@@ -1,5 +1,6 @@
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
 from ..paths import resource_dir
 
 
@@ -55,7 +56,10 @@ QComboBox { padding-right: 30px; }
 QComboBox::drop-down { width: 28px; border: 0; }
 QComboBox::down-arrow { image: url('@RES@/chevron-down.svg'); width: 12px; height: 12px; }
 QComboBox QAbstractItemView { background: #ffffff; border: 1px solid #d5dfed; outline: 0;
-    selection-background-color: #eaf0ff; selection-color: #2855eb; padding: 4px; }
+    border-radius: 6px; selection-background-color: #eaf0ff; selection-color: #2855eb; padding: 4px; }
+QComboBox QAbstractItemView::item { min-height: 28px; padding: 4px 10px; border: 0; border-radius: 4px; }
+QComboBox QAbstractItemView::item:selected { color: #2855eb; background: #eaf0ff; }
+QComboBox QAbstractItemView::item:hover { background: #f0f4fc; }
 QSpinBox, QDoubleSpinBox { padding-right: 30px; }
 QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 24px; background: #f0f4fa; border: 0; }
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url('@RES@/chevron-up.svg'); width: 10px; height: 10px; }
@@ -86,11 +90,18 @@ QTabBar::tab { padding: 13px 24px; margin-right: 6px; background: transparent; c
 QTabBar::tab:selected { color: #2855eb; border-bottom-color: #2855eb; font-weight: 600; }
 QTabBar::tab:hover { color: #2855eb; background: #edf2ff; }
 QFrame#streamToolbar { background: #f0f4fa; border: 0; border-bottom: 1px solid #dce4ef; }
-QFrame#controlCenter { background: #ffffff; border: 1px solid #dce4ef; border-radius: 8px; }
+QFrame#controlCenter, QFrame#mouseSubmenu { background: #ffffff; border: 1px solid #dce4ef; border-radius: 8px; }
 QFrame#controlCenter QPushButton { text-align: left; min-height: 20px; border: 1px solid transparent; border-radius: 4px; padding: 7px 10px; }
 QFrame#controlCenter QPushButton:checked, QFrame#controlCenter QPushButton:focus { background: #eaf0ff; border-color: #cbd7fa; }
 QFrame#controlCenter QFrame#optionRow { border: 0; border-radius: 4px; }
-QFrame#controlCenter QRadioButton { min-height: 28px; spacing: 8px; }
+QFrame#mouseSubmenu QRadioButton { min-height: 28px; spacing: 8px; }
+QSlider::groove:horizontal { height: 4px; border: 0; border-radius: 2px; background: #dce4ef; }
+QSlider::sub-page:horizontal { background: #2855eb; border-radius: 2px; }
+QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; background: #2855eb;
+    border: 2px solid #ffffff; border-radius: 8px; }
+QSlider::handle:horizontal:hover, QSlider::handle:horizontal:focus { background: #1c45d4; border-color: #cbd7fa; }
+QToolButton#resetSensitivity { padding: 0; min-height: 0; border: 0; background: transparent; }
+QToolButton#resetSensitivity:hover { background: #eaf0ff; }
 QFrame#menuSeparator { background: #e1e7f0; min-height: 1px; max-height: 1px; border: 0; }
 QWidget#windowResizeHandle { background: transparent; }
 QFrame#streamToolbar QPushButton { min-height: 0; max-height: 40px; border: 0; border-radius: 0; padding: 0; background: transparent; }
@@ -107,8 +118,20 @@ QToolTip { background: #172b46; color: #ffffff; border: 0; padding: 7px; }
 """
 
 
+class AppStyle(QProxyStyle):
+    def __init__(self):
+        super().__init__('Fusion')
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        # List popups open below the field; menu popups cover the selected value.
+        if hint == QStyle.StyleHint.SH_ComboBox_Popup:
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
+
+
 def apply_theme(app: QApplication) -> None:
-    app.setStyle('Fusion')
+    app.setStyle(AppStyle())
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
     app.setFont(QFont('Microsoft YaHei UI', 10))
     palette = app.palette()
     palette.setColor(QPalette.ColorRole.Highlight, QColor('#2855eb'))

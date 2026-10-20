@@ -77,7 +77,7 @@ def test_desktop_sensitivity_tracks_fractional_motion_and_reaches_edges(monkeypa
         player.close()
 
 
-def test_control_center_keeps_choices_visible_and_f8_works_in_spinbox():
+def test_control_center_side_panel_slider_and_f8_stay_local():
     app, player, events = make_player()
     player.client.cursor_supported = True
     player.client.set_muted = lambda value: None
@@ -87,23 +87,29 @@ def test_control_center_keeps_choices_visible_and_f8_works_in_spinbox():
         center.mouse_button.click()
         app.processEvents()
         assert center.mouse_options.isVisible()
-        assert (center.sensitivity.minimum(), center.sensitivity.maximum()) == (-5, 5)
-        assert center.sensitivity.singleStep() == .1 and center.sensitivity.decimals() == 1
+        assert center.mouse_options.geometry().right() < center.geometry().left()
+        assert (center.sensitivity.minimum(), center.sensitivity.maximum()) == (-50, 50)
+        assert center.sensitivity.singleStep() == 1
         center.modes['local'].click()
         assert player.mouse_mode == 'local' and center.modes['local'].isChecked()
         center.muted.click()
         assert player.muted and center.muted.isChecked()
         center.statistics.click()
         assert not player.show_statistics and not center.statistics.isChecked()
-        center.sensitivity.setValue(1.7)
+        center.sensitivity.setValue(17)
         assert player.preferences['mouse_sensitivity'] == 1.7
+        assert center.sensitivity_value.text() == '+1.7'
+        QTest.keyClick(center.sensitivity, Qt.Key.Key_Left)
+        assert player.preferences['mouse_sensitivity'] == 1.6
+        center.reset_sensitivity.click()
+        assert player.preferences['mouse_sensitivity'] == 0 and center.sensitivity_value.text() == '0.0'
         assert center.isVisible()
         QTest.mouseClick(player, Qt.MouseButton.LeftButton, pos=QPoint(10, 100))
         assert center.isVisible() and not player.captured
         center.sensitivity.setFocus()
         QTest.keyClick(center.sensitivity, Qt.Key.Key_F8)
         app.processEvents()
-        assert not center.isVisible() and not player.captured
+        assert not center.isVisible() and not center.mouse_options.isVisible() and not player.captured
         player.controls_button.click()
         assert player.control_menu is center and center.isVisible()
         player.controls_button.click()
@@ -118,7 +124,14 @@ def test_control_center_keeps_choices_visible_and_f8_works_in_spinbox():
         player.resize(640, 400)
         app.processEvents()
         assert player.rect().contains(center.geometry())
+        assert player.rect().contains(center.mouse_options.geometry())
+        assert center.mouse_options.geometry().right() < center.geometry().left()
         assert center.scroll.verticalScrollBar().maximum() > 0
+        player.activateWindow()
+        center.sensitivity.setFocus()
+        app.processEvents()
+        QTest.keyClick(center.sensitivity, Qt.Key.Key_Escape)
+        assert center.isVisible() and not center.mouse_options.isVisible() and not center.mouse_button.isChecked()
         assert not any(kind == 'input' for kind, _ in events)
     finally:
         player.close()

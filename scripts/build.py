@@ -1,4 +1,5 @@
 """Build the independent Windows app and its generic native libraries."""
+import argparse
 import importlib.metadata
 import json
 import os
@@ -10,8 +11,9 @@ from pathlib import Path
 from elink.processes import native_environment
 
 
-def main():
+def main(dist_dir=None):
     project = Path(__file__).resolve().parent.parent
+    dist_dir = (project / (dist_dir or 'dist')).resolve()
     build_env = native_environment()
     from scripts.build_video import build
     video_library = build()
@@ -20,13 +22,14 @@ def main():
     # Only expose the Python environment and Windows system directories to collection.
     build_env["PATH"] = os.pathsep.join(map(str, (Path(sys.executable).parent, windows / "System32", windows)))
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
-                    "--name", "Elink", "--onedir", "--add-data", "elink/resources;elink/resources",
+                    "--name", "Elink", "--onedir", "--distpath", str(dist_dir),
+                    "--add-data", "elink/resources;elink/resources",
                     "--collect-data", "cryptography", "--collect-all", "av", "--collect-all", "aiortc",
                     "--collect-all", "pylibsrtp", "--collect-all", "dxcam", "--collect-all", "soundcard",
                     "--collect-all", "sounddevice", "--collect-all", "comtypes", "--hidden-import", "cv2",
                     "--exclude-module", "comtypes.test", "--exclude-module", "pytest",
                     "main.py"], cwd=project, env=build_env, check=True)
-    output = project / "dist" / "Elink"
+    output = dist_dir / "Elink"
     shutil.copy2(video_library, output / 'elink_video.dll')
     for name in ("README.md", "THIRD_PARTY_NOTICES.md"):
         shutil.copy2(project / name, output / name)
@@ -52,4 +55,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dist-dir', type=Path, help='Output directory; defaults to dist.')
+    main(parser.parse_args().dist_dir)

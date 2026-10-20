@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication
 from elink.core.media import FrameMailbox
 from elink.ui.player import Player
@@ -24,6 +25,8 @@ def preview_player(app, runtime, root):
     view.timer.stop()
     view.set_frame_pixels(np.full((720, 1280, 3), (48, 44, 36), dtype=np.uint8))
     view.show()
+    view.raise_()
+    view.activateWindow()
     try:
         for width, height in ((1120, 760), (640, 400)):
             view.resize(width, height)
@@ -34,6 +37,8 @@ def preview_player(app, runtime, root):
             center.toggle_mouse()
             app.processEvents()
             assert view.rect().contains(center.geometry())
+            assert view.rect().contains(center.mouse_options.geometry())
+            assert center.mouse_options.geometry().right() < center.geometry().left()
             view.grab().save(str(root / f"controls-{width}.png"))
             center.scroll.verticalScrollBar().setValue(center.scroll.verticalScrollBar().maximum())
             app.processEvents()
@@ -44,9 +49,30 @@ def preview_player(app, runtime, root):
         dialog.options.renderer.setCurrentIndex(1)
         dialog.options.render_scale.setCurrentIndex(2)
         app.processEvents()
+        if app.platformName() == 'windows':
+            from PySide6.QtTest import QTest
+            dialog.raise_()
+            dialog.activateWindow()
+            QTest.qWait(100)
         dialog.grab().save(str(root / 'quality.png'))
         for control in (dialog.options.upscaler, dialog.options.renderer):
             assert control.width() >= control.minimumSizeHint().width()
+        dialog.options.decoder.showPopup()
+        app.processEvents()
+        popup = dialog.options.decoder.view().window()
+        popup.grab().save(str(root / 'decoder-options.png'))
+        if app.platformName() == 'windows':
+            QTest.qWait(100)
+            assert popup.isVisible()
+            bottom = dialog.options.decoder.mapToGlobal(dialog.options.decoder.rect().bottomLeft()).y()
+            assert popup.geometry().top() >= bottom
+        # Compose only owned widgets; desktop capture can include an unrelated occluder.
+        preview = dialog.grab()
+        painter = QPainter(preview)
+        painter.drawPixmap(dialog.mapFromGlobal(popup.pos()), popup.grab())
+        painter.end()
+        preview.save(str(root / 'quality-dropdown.png'))
+        dialog.options.decoder.hidePopup()
         dialog.reject()
     finally:
         view.close()
@@ -83,6 +109,7 @@ def preview_window(app, root, config):
         window.connect_failed("连接失败：对端未响应，请检查设备是否在线。")
         app.processEvents()
         window.grab().save(str(root / "connection-error.png"))
+        window.hide()
         preview_player(app, window.runtime, root)
     finally:
         window.request_exit()
