@@ -86,20 +86,26 @@ def check(app, renderer, baseline):
             view.move(view.pos() + QPoint(25, 15))
             view.update_mouse()
             assert clip_bounds() != bounds, 'constraint must follow a moved window'
+            view.move(view.screen().geometry().topLeft() - QPoint(100, 20))
+            view.update_mouse()
         view.open_controls()
         settle(app)
         assert not view.captured and not view.raw_mouse.active and clip_bounds() == before
+        view.move(view.screen().availableGeometry().topLeft() + QPoint(30, 30))
         view.open_controls()
+        settle(app)
         # Return to desktop mapping. Crossing a letterbox border releases input.
         client.cursor_visible = True
         client.cursor_updated = time.monotonic()
         QCursor.setPos(view.mapToGlobal(view.rect_image.center()))
+        settle(app)
         view.capture()
         settle(app)
         assert view.captured and view.software_cursor and not view.game_mouse
         QCursor.setPos(view.mapToGlobal(view.rect_image.topLeft() + QPoint(10, 10)))
         settle(app)
-        assert view.captured
+        assert view.captured, (renderer, view.rect_image.getRect(), view.mapFromGlobal(QCursor.pos()),
+                               view.isActiveWindow(), events[-5:])
         QCursor.setPos(view.mapToGlobal(QPoint(view.width() + 40, view.height() // 2)))
         settle(app)
         assert not view.captured and not view.software_cursor and events[-1] == ('focus', False)
@@ -117,7 +123,7 @@ def check(app, renderer, baseline):
         QApplication.sendEvent(view, QEvent(QEvent.Type.WindowDeactivate))
         assert not view.captured and not view.raw_mouse.active and clip_bounds() == before
         return dict(renderer=renderer, baseline=baseline, pointer_escaped=escaped,
-                    desktop_exit=True, f8_release=True, focus_release=True)
+                    desktop_exit=True, f8_release=True, focus_release=True, offscreen_release=not baseline)
     finally:
         view.close()
         settle(app)

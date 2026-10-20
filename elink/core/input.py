@@ -67,6 +67,7 @@ class CursorConfinement:
 
     def __init__(self):
         self._bounds = None
+        self._requested = None
         self._user32 = None
         if os.name == 'nt':
             self._user32 = c.WinDLL('user32', use_last_error=True)
@@ -92,11 +93,19 @@ class CursorConfinement:
         if width <= 0 or height <= 0 or rect[2] <= rect[0] or rect[3] <= rect[1]:
             self.release()
             return
-        if rect != self._bounds:
+        if rect != self._requested:
             native = w.RECT(*rect)
             if not self._user32.ClipCursor(c.byref(native)):
                 raise c.WinError(c.get_last_error())
-            self._bounds = rect
+            # Windows intersects offscreen rectangles with the virtual desktop.
+            # Ownership must use the effective rectangle, or release can miss it.
+            actual = w.RECT()
+            if not self._user32.GetClipCursor(c.byref(actual)):
+                error = c.get_last_error()
+                self._user32.ClipCursor(None)
+                raise c.WinError(error)
+            self._requested = rect
+            self._bounds = (actual.left, actual.top, actual.right, actual.bottom)
 
     def release(self):
         if self._bounds is not None:
@@ -105,6 +114,7 @@ class CursorConfinement:
             if self._user32.GetClipCursor(c.byref(rect)) and (rect.left, rect.top, rect.right, rect.bottom) == self._bounds:
                 self._user32.ClipCursor(None)
             self._bounds = None
+            self._requested = None
 
 
 class RawMouseInput:
