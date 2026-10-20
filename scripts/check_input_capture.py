@@ -78,12 +78,30 @@ def check_windowed(app, view, client, events, before, mode, visible, fallback=Fa
                 'windowed capture changed', mode, visible, view.captured, QCursor.pos(),
                 view.rect_image.getRect(), view.isActiveWindow(), events[-5:])
         assert clip_bounds() == before, 'windowed sessions must not confine the system pointer'
-        if not visible or mode == 'remote':
+        if not visible:
             assert view.game_mouse and (fallback or view.raw_mouse.active)
+        else:
+            assert not view.game_mouse and not view.raw_mouse.active
         QCursor.setPos(view.mapToGlobal(inside))
-        settle(app, lambda: view.captured)
+        def desktop_aligned():
+            moves = [event for kind, event in events if kind == 'input' and event.get('type') == 'move']
+            if not moves or not moves[-1].get('absolute'):
+                return False
+            point = view.mapFromGlobal(QCursor.pos())
+            move = moves[-1]
+            x = rect.x() + move['x'] * (rect.width() - 1) / 65535
+            y = rect.y() + move['y'] * (rect.height() - 1) / 65535
+            # QCursor exposes integer logical coordinates; native Qt move
+            # events retain fractional positions at 125/150% Windows scaling.
+            return abs(x - point.x()) <= 1 and abs(y - point.y()) <= 1
+        settle(app, desktop_aligned if visible else lambda: view.captured)
         assert view.captured and view.cursor().shape() == Qt.CursorShape.BlankCursor, (
             mode, rect.getRect(), inside, view.mapFromGlobal(QCursor.pos()), events[-5:])
+        if visible:
+            assert desktop_aligned(), ('desktop pointer does not match controller', mode, events[-5:])
+            if mode == 'local':
+                delta = view.software_cursor_pos - view.mapFromGlobal(QCursor.pos())
+                assert abs(delta.x()) <= 1 and abs(delta.y()) <= 1
         assert all(not handle.isVisible() for handle in view.resize_handles)
         events.clear()
         QCursor.setPos(view.mapToGlobal(outside))
@@ -95,7 +113,12 @@ def check_windowed(app, view, client, events, before, mode, visible, fallback=Fa
             'pointer exit was not released', mode, visible, rect.getRect(), outside,
             view.mapFromGlobal(QCursor.pos()), view.isActiveWindow(), events[-5:])
         assert events[-1] == ('focus', False) and clip_bounds() == before
-    return dict(mode=mode, host_cursor_visible=visible, fallback=fallback, four_edges=True)
+        if visible:
+            final = events[-2][1]
+            assert final['absolute']
+            assert final['x'] in (0, 65535) or final['y'] in (0, 65535)
+    return dict(mode=mode, host_cursor_visible=visible, fallback=fallback, four_edges=True,
+                desktop_aligned=True if visible else None)
 
 
 def check(app, renderer):
@@ -103,7 +126,8 @@ def check(app, renderer):
     client = SimpleNamespace(pc=object(), mailbox=FrameMailbox(), rtt_ms=0, last_pong=time.monotonic(),
                              cursor_supported=True, cursor_visible=False, cursor_updated=time.monotonic(),
                              set_cursor_mode=lambda _: None, set_renderer=lambda _: None,
-                             focus=lambda value: events.append(('focus', value)), send=lambda e: events.append(('input', e)))
+                             focus=lambda value: events.append(('focus', value)),
+                             send=lambda e, reliable=False: events.append(('input', e)))
     view = Player(Runtime(), client, controllers=False, preferences={'renderer': renderer, 'mouse_mode': 'local'})
     view.resize(900, 620)
     view.move(view.screen().availableGeometry().topLeft() + QPoint(30, 30))
@@ -123,7 +147,7 @@ def check(app, renderer):
             present(view, renderer, source_size)
             settle(app)
             for mode, visible in (('smart', True), ('smart', False), ('local', True),
-                                  ('local', False), ('remote', True)):
+                                  ('local', False), ('remote', True), ('remote', False)):
                 result = check_windowed(app, view, client, events, before, mode, visible)
                 windowed.append(dict(size=size, source_size=source_size, **result))
         start = view.raw_mouse.start

@@ -420,8 +420,11 @@ class Player(QWidget):
         dialog.setMinimumWidth(max(500, dialog.minimumSizeHint().width()))
         dialog.open()
 
-    def send(self, event):
-        self.runtime.call(self.client.send, event)
+    def send(self, event, reliable=False):
+        if reliable:
+            self.runtime.call(self.client.send, event, True)
+        else:
+            self.runtime.call(self.client.send, event)
 
     def capture(self):
         if self.control_menu and self.control_menu.isVisible():
@@ -480,6 +483,11 @@ class Player(QWidget):
                 self.releaseMouse()
                 self.raw_mouse.stop()
             self.game_mouse = relative
+            if not relative:
+                position = (QPointF(self.software_cursor_pos) if force else
+                            QPointF(self.mapFromGlobal(QCursor.pos())))
+                self._absolute_last = self._absolute_pos = QPointF(position)
+                self.send_absolute_motion(position, reliable=True, adjust=False)
         if force or local != self.local_cursor:
             self.setCursor(Qt.CursorShape.ArrowCursor if local else Qt.CursorShape.BlankCursor)
             self.local_cursor = local
@@ -700,15 +708,22 @@ class Player(QWidget):
                         QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
             event.accept()
             return
-        elif not self.rect_image.isEmpty():
-            position = self.absolute_position(event.position())
-            self.software_cursor_pos = position.toPoint()
-            if self.software_cursor:
-                self.refresh_video()
-            rect = self.rect_image
-            x = max(0, min(65535, int((position.x() - rect.x()) * 65535 / max(1, rect.width() - 1))))
-            y = max(0, min(65535, int((position.y() - rect.y()) * 65535 / max(1, rect.height() - 1))))
-            self.send({"type": "move", "absolute": True, "x": x, "y": y})
+        else:
+            self.send_absolute_motion(event.position())
+
+    def send_absolute_motion(self, position, reliable=False, adjust=True):
+        rect = self.rect_image
+        if rect.isEmpty():
+            return
+        position = self.absolute_position(position) if adjust else position
+        position = QPointF(max(rect.left(), min(rect.right(), position.x())),
+                           max(rect.top(), min(rect.bottom(), position.y())))
+        self.software_cursor_pos = position.toPoint()
+        if self.software_cursor:
+            self.refresh_video()
+        x = int((position.x() - rect.x()) * 65535 / max(1, rect.width() - 1))
+        y = int((position.y() - rect.y()) * 65535 / max(1, rect.height() - 1))
+        self.send({'type': 'move', 'absolute': True, 'x': x, 'y': y}, reliable)
 
     def absolute_position(self, position):
         factor = self.mouse_sensitivity.factor
@@ -762,6 +777,8 @@ class Player(QWidget):
             return
         name = {Qt.MouseButton.LeftButton: "left", Qt.MouseButton.RightButton: "right", Qt.MouseButton.MiddleButton: "middle"}.get(event.button())
         if name:
+            if not self.game_mouse:
+                self.send_absolute_motion(event.position(), reliable=True)
             self.send({"type": "button", "button": name, "down": down})
 
     def wheelEvent(self, event):
@@ -776,6 +793,10 @@ class Player(QWidget):
 
     def release_outside_video(self, position):
         if not (self.game_mouse and self.isFullScreen()) and not self.video_contains(position):
+            if not self.game_mouse:
+                # The last move can jump over an edge or arrive after the poll.
+                # Order the final desktop position before the focus epoch ends.
+                self.send_absolute_motion(position, reliable=True, adjust=False)
             self.release()
             return True
         return False

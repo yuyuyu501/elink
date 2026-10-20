@@ -31,7 +31,7 @@ def test_smart_switch_local_ack_and_stale_state():
         assert not player.game_mouse
         player.set_mouse_mode('remote')
         player.capture()
-        assert player.game_mouse
+        assert not player.game_mouse and not player.raw_mouse.active
         player.set_mouse_mode('local')
         player.capture()
         assert not player.game_mouse and player.cursor().shape() == Qt.CursorShape.BlankCursor
@@ -136,6 +136,7 @@ def test_desktop_pointer_only_releases_outside_video_and_cannot_click_both_sides
         QApplication.sendEvent(player, mouse_event(player, outside))
         assert not player.captured and not player.software_cursor
         assert events[-1] == ('focus', False)
+        assert events[-2][1]['absolute'] and events[-2][1]['y'] == 65535
         events.clear()
         QApplication.sendEvent(player, mouse_event(player, outside, QEvent.Type.MouseButtonPress))
         assert not player.captured and not events, 'black bars must not start remote input'
@@ -143,7 +144,9 @@ def test_desktop_pointer_only_releases_outside_video_and_cannot_click_both_sides
         player.capture()
         events.clear()
         QApplication.sendEvent(player, mouse_event(player, outside, QEvent.Type.MouseButtonPress))
-        assert events == [('focus', False)], 'release input instead of forwarding an outside click'
+        assert events[-1] == ('focus', False) and len(events) == 2
+        assert events[0][1]['absolute'] and events[0][1]['y'] == 65535
+        assert not any(value.get('type') == 'button' for kind, value in events if kind == 'input')
     finally:
         player.close()
 
@@ -192,9 +195,11 @@ def test_windowed_pointer_releases_at_each_video_edge_without_warp_or_constraint
             events.clear()
             QApplication.sendEvent(player, mouse_event(player, exit_point))
             assert not player.captured and not player.software_cursor and not player.raw_mouse.active
-            assert events == [('focus', False)], 'crossing an edge must release before forwarding movement'
+            assert events[-1] == ('focus', False)
+            assert len(events) == (1 if player.game_mouse else 2)
+            released_events = list(events)
             QApplication.sendEvent(player, mouse_event(player, exit_point, QEvent.Type.MouseButtonPress))
-            assert events == [('focus', False)], 'an outside click must not control both computers'
+            assert events == released_events, 'an outside click must not control both computers'
     finally:
         player.close()
 
@@ -263,7 +268,8 @@ def test_video_boundary_uses_fractional_coordinates_without_rounding_inside_pixe
         assert player.captured and player.software_cursor
         events.clear()
         QApplication.sendEvent(player, mouse_event(player, QPointF(rect.x() - .1, rect.y() + .1)))
-        assert not player.captured and events == [('focus', False)]
+        assert not player.captured and events[-1] == ('focus', False)
+        assert events[0][1]['absolute'] and events[0][1]['x'] == 0
     finally:
         player.close()
 
@@ -289,5 +295,100 @@ def test_only_fullscreen_relative_mouse_is_confined_and_fallback_recenters(monke
         player.showNormal()
         app.processEvents()
         assert not player.captured
+    finally:
+        player.close()
+
+
+@pytest.mark.parametrize('mode', ['smart', 'local', 'remote'])
+@pytest.mark.parametrize('size', [(640, 400), (1000, 650)])
+@pytest.mark.parametrize('frame_size', [(1920, 1080), (2560, 1440)])
+def test_default_desktop_speed_follows_controller_position_at_any_video_scale(monkeypatch, mode, size, frame_size):
+    from PySide6.QtGui import QImage
+    app, player, events = make_player()
+    warps = []
+    monkeypatch.setattr(QCursor, 'setPos', lambda point: warps.append(point))
+    try:
+        player.image = QImage(*frame_size, QImage.Format.Format_RGB32)
+        player.resize(*size)
+        player.show()
+        app.processEvents()
+        rect = player.rect_image
+        point = rect.center()
+        monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(point))
+        player.client.cursor_supported = True
+        player.client.cursor_visible = True
+        player.client.cursor_updated = time.monotonic()
+        player.set_mouse_mode(mode)
+        player.capture()
+        assert not player.game_mouse and not player.raw_mouse.active
+        events.clear()
+        for dx, dy in [(1, 0), (-12, 7), (rect.width() // 2 - 2, -rect.height() // 2 + 2)]:
+            point = rect.center() + QPoint(dx, dy)
+            QApplication.sendEvent(player, mouse_event(player, point))
+            move = events[-1][1]
+            assert move['absolute'] is True
+            mapped = QPointF(rect.x() + move['x'] * (rect.width() - 1) / 65535,
+                             rect.y() + move['y'] * (rect.height() - 1) / 65535)
+            assert abs(mapped.x() - point.x()) < .02 and abs(mapped.y() - point.y()) < .02
+            assert player.software_cursor_pos == point and player.captured
+        assert not warps, 'default speed must use controller positions without altering its pointer'
+    finally:
+        player.close()
+
+
+@pytest.mark.parametrize('mode', ['smart', 'local', 'remote'])
+@pytest.mark.parametrize('via_poll', [False, True])
+def test_fast_desktop_exit_sends_reliable_edge_position_before_release(monkeypatch, mode, via_poll):
+    app, player, events = make_player()
+    client = player.client
+    reliable_moves = []
+    def send(event, reliable=False):
+        events.append(('input', event))
+        reliable_moves.append(reliable)
+    client.send = send
+    rect = player.rect_image
+    point = rect.center()
+    monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(point))
+    monkeypatch.setattr(QApplication, 'platformName', lambda: 'windows')
+    client.cursor_supported, client.cursor_visible = True, True
+    client.cursor_updated = time.monotonic()
+    try:
+        player.set_mouse_mode(mode)
+        player.capture()
+        assert reliable_moves[-1], 'entry must align the host before any later clicks'
+        for point, axis, expected in [(rect.topLeft() - QPoint(600, 0), 'x', 0),
+                                      (rect.topRight() + QPoint(600, 0), 'x', 65535),
+                                      (rect.bottomLeft() + QPoint(0, 600), 'y', 65535),
+                                      (rect.topLeft() - QPoint(0, 600), 'y', 0)]:
+            point_outside = point
+            point = rect.center()
+            player.capture()
+            events.clear()
+            reliable_moves.clear()
+            point = point_outside
+            if via_poll:
+                player.update_mouse()
+            else:
+                QApplication.sendEvent(player, mouse_event(player, point))
+            assert not player.captured and len(events) == 2
+            assert events[0][1]['absolute'] and events[0][1][axis] == expected
+            assert reliable_moves == [True] and events[1] == ('focus', False)
+    finally:
+        player.close()
+
+
+def test_desktop_click_aligns_host_over_reliable_channel(monkeypatch):
+    app, player, events = make_player()
+    delivered = []
+    player.client.send = lambda event, reliable=False: delivered.append((event, reliable))
+    rect = player.rect_image
+    monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(rect.center()))
+    try:
+        player.set_mouse_mode('local')
+        player.capture()
+        delivered.clear()
+        QApplication.sendEvent(player, mouse_event(player, rect.topLeft(), QEvent.Type.MouseButtonPress))
+        assert delivered == [(dict(type='move', absolute=True, x=0, y=0), True),
+                             (dict(type='button', button='left', down=True), False)]
     finally:
         player.close()

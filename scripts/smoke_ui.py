@@ -20,7 +20,7 @@ from elink.discovery import DiscoveredHost
 
 def preview_player(app, runtime, root):
     client = SimpleNamespace(pc=object(), mailbox=FrameMailbox(), rtt_ms=0, last_pong=0,
-                             cursor_supported=True, focus=lambda _: None, send=lambda _: None)
+                             cursor_supported=True, focus=lambda _: None, send=lambda _, reliable=False: None)
     view = Player(runtime, client, controllers=False, preferences={'renderer': 'cpu'})
     view.timer.stop()
     view.set_frame_pixels(np.full((720, 1280, 3), (48, 44, 36), dtype=np.uint8))

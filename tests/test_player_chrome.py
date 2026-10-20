@@ -30,7 +30,7 @@ def make_player():
     events = []
     client = SimpleNamespace(pc=object(), mailbox=FrameMailbox(), rtt_ms=0, last_pong=time.monotonic(),
                              focus=lambda active: events.append(('focus', active)),
-                             send=lambda event: events.append(('input', event)))
+                             send=lambda event, reliable=False: events.append(('input', event)))
     player = Player(Runtime(), client, game_mouse=False, controllers=False)
     player.timer.stop()
     player.image = QImage(1280, 720, QImage.Format.Format_RGB32)

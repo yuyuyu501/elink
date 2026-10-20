@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import aiohttp
 import pytest
@@ -48,6 +49,32 @@ def test_raw_mouse_input_decodes_relative_payload_without_mouse_attribute():
     assert RawMouseInput._relative_delta(raw) is None
 
 
+def test_reliable_desktop_position_orders_before_click_and_release_despite_late_motion():
+    backend = RecordingInput()
+    session = InputSession(backend)
+    control, motion = [], []
+    client = Client.__new__(Client)
+    client.pc, client.active, client.epoch, client.sequence = object(), False, 0, 0
+    client.control = SimpleNamespace(readyState='open', bufferedAmount=0, send=control.append)
+    client.motion = SimpleNamespace(readyState='open', bufferedAmount=0, send=motion.append)
+    client.focus(True)
+    client.send(dict(type='move', absolute=True, x=12000, y=20000))
+    client.send(dict(type='move', absolute=True, x=60000, y=20000), True)
+    client.send(dict(type='button', button='left', down=True))
+    client.send(dict(type='move', absolute=True, x=65535, y=20000), True)
+    client.focus(False)
+    for raw in control:
+        assert session.receive(raw, True)
+    assert backend.events == [
+        dict(type='move', absolute=True, x=60000, y=20000, epoch=1, seq=3),
+        dict(type='button', button='left', down=True, epoch=1, seq=4),
+        dict(type='move', absolute=True, x=65535, y=20000, epoch=1, seq=5),
+        dict(type='button', button='left', down=False),
+    ]
+    assert not session.active
+    assert len(motion) == 1 and not session.receive(motion[0], False)
+
+
 async def until(predicate, timeout=15):
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -80,8 +107,10 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         client.send({"type": "key", "vk": 65, "scan": 30, "extended": False, "down": True})
         await until(lambda: bool(backend.events))
         assert backend.events[-1]["down"] is True
+        client.send({'type': 'move', 'absolute': True, 'x': 65535, 'y': 32767}, True)
         client.focus(False)
         await until(lambda: backend.events[-1].get("down") is False)
+        assert backend.events[-2]['type'] == 'move' and backend.events[-2]['x'] == 65535
         client.focus(True)
         await until(lambda: host.input.active)
         client.send({"type": "pad", "index": 0, "values": [4096, 0, 0, 100, 0, 0, 0]})

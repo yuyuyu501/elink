@@ -877,10 +877,10 @@ class Client:
         if self.output:
             self.output.muted = self.muted or not self.config['audio']
 
-    def send(self, event):
+    def send(self, event, reliable=False):
         if not self.pc:
             return
-        channel = self.motion if event.get("type") in ("move", "pad") else self.control
+        channel = self.motion if not reliable and event.get("type") in ("move", "pad") else self.control
         if not channel or channel.readyState != "open":
             return
         if channel.bufferedAmount > 65536:

@@ -79,7 +79,7 @@ class ControlCenter(LocalPanel):
         self.sensitivity.setSingleStep(1)
         self.sensitivity.setPageStep(10)
         self.sensitivity.setMinimumHeight(24)
-        self.sensitivity.setToolTip('0.0 保持默认速率；-5.0 为 0.5 倍，+5.0 为 2 倍。')
+        self.sensitivity.setToolTip('0.0 使用主控端默认速率；-5.0 为 0.5 倍，+5.0 为 2 倍。')
         self.sensitivity.valueChanged.connect(self.change_sensitivity)
         self.reset_sensitivity.clicked.connect(lambda: self.sensitivity.setValue(0))
         mouse_rows.addWidget(self.sensitivity)

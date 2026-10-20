@@ -37,7 +37,7 @@ class Runtime(QObject):
 def player(app, mode, *, statistics=True, render_scale=100, upscaler='fsr'):
     client = SimpleNamespace(profile=PipelineProfile(), pc=None, mailbox=FrameMailbox(), rtt_ms=0,
                              last_pong=0, focus=lambda _: None, set_renderer=lambda _: None,
-                             send=lambda _: None)
+                             send=lambda _, reliable=False: None)
     view = Player(Runtime(), client, controllers=False,
                   preferences={'renderer': mode, 'render_scale': render_scale, 'upscaler': upscaler,
                                'resolution': [960, 540]})
