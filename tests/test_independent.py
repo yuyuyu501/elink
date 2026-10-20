@@ -135,6 +135,10 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         assert performance['schema'] == 1 and performance['host_error'] is None
         assert {'capture_read_cursor', 'capture_convert', 'encode', 'rtp_pacer_wait'} <= performance['host']['stages'].keys()
         assert {'decode_queue_wait', 'decode', 'prepare_display', 'mailbox_wait'} <= performance['client']['stages'].keys()
+        host.profile.exception('capture', RuntimeError('test calibration failure'), width=width, height=height)
+        exported = await client.performance_report()
+        assert exported['host']['failures'][-1]['message'] == 'test calibration failure'
+        assert exported['host']['failures'][-1]['context'] == dict(width=width, height=height)
         old_host_profile, old_client_profile = host.profile, client.profile
         import av
         client.set_renderer('gpu')

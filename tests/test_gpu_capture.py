@@ -61,7 +61,7 @@ def test_native_cursor_reconfiguration_and_worker_cleanup(monkeypatch):
     assert captures[1].closed and track.gpu_capture is None
 
 
-def test_native_failure_falls_back_once_and_forced_mode_reports_failure(monkeypatch):
+def test_native_failure_falls_back_once_and_forced_mode_reports_failure(monkeypatch, caplog):
     attempts, notices = [], []
     def fail(*args):
         attempts.append(True)
@@ -85,6 +85,14 @@ def test_native_failure_falls_back_once_and_forced_mode_reports_failure(monkeypa
         assert attempts == [True] and len(notices) == 1
         assert track.gpu_capture_disabled
         assert track.profile.snapshot()['metadata']['capture_backend'] == 'dxcam'
+        failures = track.profile.snapshot()['failures']
+        assert len(failures) == 1
+        assert failures[0]['type'] == 'RuntimeError'
+        assert failures[0]['message'] == 'unsupported video processor'
+        assert 'raise RuntimeError' in failures[0]['traceback']
+        assert failures[0]['context'] == dict(width=64, height=36, fps=60,
+                                             requested_backend='auto', draw_mouse=False)
+        assert 'unsupported video processor' in caplog.text
     finally:
         track.com_initialized = False
         track.stop()
@@ -95,6 +103,29 @@ def test_native_failure_falls_back_once_and_forced_mode_reports_failure(monkeypa
         with pytest.raises(RuntimeError, match='unsupported'):
             track.capture()
         assert track.camera is None
+        assert track.profile.snapshot()['failures'][0]['context']['requested_backend'] == 'gpu'
     finally:
         track.stop()
         track.release_future.result(5)
+
+
+@pytest.mark.parametrize('stage', ['calibration_graph', 'calibration_frames', 'calibration_colors', 'capture_graph'])
+def test_native_failure_reports_exact_initialization_stage(monkeypatch, stage):
+    def build(capture, reference=False):
+        if stage == ('calibration_graph' if reference else 'capture_graph'):
+            raise RuntimeError('graph unavailable')
+        video = av.VideoFrame(64, 36, 'nv12')
+        video.pts = 1
+        rgb = av.VideoFrame(64, 36, 'bgra')
+        rgb.pts = 2 if stage == 'calibration_frames' else 1
+        capture.sink = SimpleNamespace(pull=lambda: video)
+        capture.reference_sink = SimpleNamespace(pull=lambda: rgb)
+    def calibrate(*args):
+        if stage == 'calibration_colors':
+            raise RuntimeError('not enough colors')
+        return 1, 1
+    monkeypatch.setattr(gpu_capture.D3D11Capture, '_build', build)
+    monkeypatch.setattr(gpu_capture, 'calibrated_color_space', calibrate)
+    with pytest.raises(RuntimeError) as raised:
+        gpu_capture.D3D11Capture(64, 36, False)
+    assert any(f'stage={stage}' in note and 'output=64x36' in note for note in raised.value.__notes__)

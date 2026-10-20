@@ -4,6 +4,7 @@ import asyncio
 import collections
 import ctypes
 import fractions
+import logging
 import os
 import threading
 import time
@@ -17,6 +18,9 @@ from aiortc.mediastreams import MediaStreamError
 from .codecs import metrics
 from .profiling import PipelineProfile
 from .pacing import FrameClock
+
+
+log = logging.getLogger(__name__)
 
 
 def bgr_pixels(frame):
@@ -72,6 +76,7 @@ class DesktopTrack(MediaStreamTrack):
                 self.profile.describe(capture_backend='ddagrab-scale_d3d11', capture_format='nv12')
                 return self.finish_capture(frame, started)
             except (av.FFmpegError, RuntimeError, ValueError, OSError) as exc:
+                self.record_capture_error('capture', exc, self.width, self.height, self.fps)
                 if self.gpu_capture:
                     self.gpu_capture.close()
                     self.gpu_capture = None
@@ -130,6 +135,12 @@ class DesktopTrack(MediaStreamTrack):
         self.profile.describe(capture_backend='synthetic' if self.synthetic else 'dxcam', capture_format=pixel_format)
         return self.finish_capture(frame, started)
 
+    def record_capture_error(self, stage, exc, width, height, fps):
+        self.profile.exception(stage, exc, width=width, height=height, fps=fps,
+                               requested_backend=self.capture_backend, draw_mouse=self.cursor_mode != 'local')
+        log.error('D3D11 %s failed: output=%sx%s fps=%s requested_backend=%s',
+                  stage, width, height, fps, self.capture_backend, exc_info=exc)
+
     def finish_capture(self, frame, started):
         frame.opaque = {"profile": self.profile, "captured_at": started, 'network_budget': self.network_budget,
                         'stream_fps': self.fps}
@@ -153,12 +164,15 @@ class DesktopTrack(MediaStreamTrack):
                 try:
                     self.gpu_capture = D3D11Capture(width, height, draw_mouse)
                     self.gpu_capture.read()
-                except BaseException:
+                except BaseException as exc:
+                    if isinstance(exc, Exception):
+                        self.record_capture_error('capture_reconfigure', exc, width, height, fps)
                     if self.gpu_capture:
                         self.gpu_capture.close()
                     try:
                         self.gpu_capture = D3D11Capture(self.width, self.height, draw_mouse)
-                    except Exception:
+                    except Exception as restore_error:
+                        self.record_capture_error('capture_restore', restore_error, self.width, self.height, self.fps)
                         self.gpu_capture = None
                         self.gpu_capture_disabled = True
                         self.notify('D3D11 采集恢复失败，已回退兼容采集。')

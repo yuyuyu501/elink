@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt, Signal, QObject
 from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtGui import QDesktopServices
 
 from elink import updates
 from elink.core.media import FrameMailbox
@@ -23,6 +24,22 @@ def close(window, app):
     window.close()
     pump(app, lambda: window._closed)
     assert not window.runtime.thread.is_alive()
+
+
+def test_about_opens_actual_data_log_directory_and_reports_open_failure(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
+    opened = []
+    monkeypatch.setattr(QDesktopServices, 'openUrl', lambda url: opened.append(url.toLocalFile()) or True)
+    try:
+        window.about.logs_button.click()
+        assert (tmp_path / 'logs').is_dir()
+        assert opened == [str((tmp_path / 'logs').resolve()).replace('\\', '/')]
+        monkeypatch.setattr(QDesktopServices, 'openUrl', lambda url: False)
+        window.about.logs_button.click()
+        assert '无法打开日志目录' in window.notice.text()
+    finally:
+        close(window, app)
 
 
 def test_about_check_channel_error_and_no_network_at_start(tmp_path, monkeypatch):

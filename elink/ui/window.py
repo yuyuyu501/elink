@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
 import time
 from pathlib import Path
@@ -354,6 +355,7 @@ class MainWindow(QMainWindow):
             self.report_error(message)
 
     def append_log(self, message):
+        logging.getLogger(__name__).info('%s', message)
         self.log.appendPlainText(f"{time.strftime('%H:%M:%S')}  {message}")
 
     def report_error(self, message):

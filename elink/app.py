@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import threading
 import traceback
 
 from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .paths import data_dir, ensure_dirs
+from .logging_setup import configure_logging
 from . import __version__
 from .ui.theme import apply_theme
 from .ui.window import MainWindow
@@ -49,17 +52,24 @@ def main() -> int:
         if not lock.tryLock(0):
             QMessageBox.information(None, "Elink", "此数据目录已有 Elink 实例正在运行。")
             return 1
+        configure_logging(root)
         window = MainWindow(root)
         window.shutdown_complete.connect(app.quit)
     except Exception as exc:
+        logging.getLogger(__name__).exception('Application startup failed')
         QMessageBox.critical(None, "Elink", f"启动失败：{exc}")
         return 1
 
     def exception_hook(kind, value, tb):
+        logging.getLogger(__name__).error('Unhandled GUI exception', exc_info=(kind, value, tb))
         window.append_log("".join(traceback.format_exception(kind, value, tb)))
         window.report_error(f"操作失败：{value}")
 
     sys.excepthook = exception_hook
+    def thread_exception_hook(args):
+        logging.getLogger(__name__).error('Unhandled worker exception: %s', getattr(args.thread, 'name', 'unknown'),
+                                         exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    threading.excepthook = thread_exception_hook
     if '--startup' in sys.argv:
         window.show_startup()
     else:

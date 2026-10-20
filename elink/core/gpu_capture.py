@@ -16,7 +16,8 @@ def calibrated_color_space(frame, reference):
     expected = color_blocks(reference)
     colored = np.ptp(expected, axis=2) > 8
     if np.count_nonzero(colored) < 16:
-        raise RuntimeError('D3D11 color calibration needs more colored samples')
+        raise RuntimeError(f'D3D11 color calibration needs more colored samples '
+                           f'(colored_blocks={int(np.count_nonzero(colored))}, required=16)')
     candidates = []
     for space, label in ((5, 'ITU601'), (1, 'ITU709')):
         for color_range in (1, 2):
@@ -35,15 +36,24 @@ class D3D11Capture:
     def __init__(self, width, height, draw_mouse):
         self.width, self.height, self.draw_mouse = width, height, draw_mouse
         try:
-            self._build(reference=True)
-            frame, reference = self.sink.pull(), self.reference_sink.pull()
-            if frame.pts != reference.pts:
-                raise RuntimeError('D3D11 calibration frames are not synchronized')
-            self.colorspace, self.color_range = calibrated_color_space(frame, reference)
-        finally:
-            self.close()
-        try:
+            self.stage = 'calibration_graph'
+            try:
+                self._build(reference=True)
+                self.stage = 'calibration_frames'
+                frame, reference = self.sink.pull(), self.reference_sink.pull()
+                if frame.pts != reference.pts:
+                    raise RuntimeError(f'D3D11 calibration frames are not synchronized '
+                                       f'(video_pts={frame.pts}, reference_pts={reference.pts})')
+                self.stage = 'calibration_colors'
+                self.colorspace, self.color_range = calibrated_color_space(frame, reference)
+            finally:
+                self.close()
+            self.stage = 'capture_graph'
             self._build()
+        except Exception as exc:
+            exc.add_note(f'D3D11 stage={self.stage} output={width}x{height} draw_mouse={draw_mouse}')
+            self.close()
+            raise
         except BaseException:
             self.close()
             raise
@@ -75,9 +85,15 @@ class D3D11Capture:
         self.sink = stages[-1]
 
     def read(self):
-        frame = self.sink.pull()
-        if frame.format.name != 'nv12' or (frame.width, frame.height) != (self.width, self.height):
-            raise RuntimeError('Unexpected D3D11 capture output')
+        try:
+            frame = self.sink.pull()
+            if frame.format.name != 'nv12' or (frame.width, frame.height) != (self.width, self.height):
+                raise RuntimeError(f'Unexpected D3D11 capture output: '
+                                   f'{frame.width}x{frame.height} {frame.format.name}')
+        except Exception as exc:
+            exc.add_note(f'D3D11 stage=capture_read output={self.width}x{self.height} '
+                         f'draw_mouse={self.draw_mouse}')
+            raise
         frame.colorspace, frame.color_range = self.colorspace, self.color_range
         return frame
 

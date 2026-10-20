@@ -5,7 +5,8 @@ import shutil
 import threading
 import time
 
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtCore import Qt, QSize, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QCheckBox, QLabel, QMessageBox, QProgressBar,
                                QPushButton, QHBoxLayout, QVBoxLayout, QWidget)
 
@@ -55,7 +56,15 @@ class AboutPage(QWidget):
         layout.addWidget(description)
         link = QLabel(f'<a href="{updates.RELEASES_URL}">查看 GitHub Releases / 手动下载</a>')
         link.setOpenExternalLinks(True)
-        layout.addWidget(link)
+        links = QHBoxLayout()
+        links.addWidget(link)
+        links.addStretch()
+        self.logs_button = QPushButton('打开日志目录')
+        self.logs_button.setIcon(icon('activity'))
+        self.logs_button.setToolTip(str(window.root / 'logs'))
+        self.logs_button.clicked.connect(self.open_logs)
+        links.addWidget(self.logs_button)
+        layout.addLayout(links)
         layout.addSpacing(12)
         layout.addWidget(section_heading('应用更新', 'refresh-cw'))
         self.previews = QCheckBox("包括预览版本（当前为预览版，建议开启）")
@@ -88,6 +97,15 @@ class AboutPage(QWidget):
         layout.addWidget(note)
         layout.addStretch()
         self.progress.connect(self.show_progress)
+
+    def open_logs(self):
+        directory = self.window.root / 'logs'
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory.resolve()))):
+                raise OSError('系统未能打开日志目录')
+        except OSError as exc:
+            self.window.report_error(f'无法打开日志目录：{exc}')
 
     def set_busy(self, busy):
         self.check_button.setEnabled(not busy)

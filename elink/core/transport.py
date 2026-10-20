@@ -767,6 +767,7 @@ class Client:
                 host = await request(self.endpoint, self.fp, 'GET', f'/v1/session/{identifier}/performance')
             except Exception as exc:
                 error = type(exc).__name__
+                self.profile.exception('host_performance_report', exc)
         if identifier != self.session_id:
             raise ValidationError('会话已变化，请重新导出。')
         return dict(schema=1, client=self.profile.snapshot(), host=host, host_error=error,

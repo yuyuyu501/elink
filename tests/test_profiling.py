@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import math
+import json
 from types import SimpleNamespace
 
 import av
@@ -53,6 +54,24 @@ def test_profile_thread_safety_clock_and_snapshot_isolation():
     assert snapshot['counters']['frames'] == snapshot['stages']['thread']['total'] == 400
     snapshot['counters']['frames'] = 0
     assert profile.snapshot()['counters']['frames'] == 400
+
+
+def test_failure_reports_are_bounded_isolated_and_include_version():
+    from elink import __version__
+    profile = PipelineProfile()
+    assert profile.snapshot()['metadata']['elink_version'] == __version__
+    try:
+        raise RuntimeError('采集错误' * 5000)
+    except RuntimeError as exc:
+        for width in range(30):
+            profile.exception('capture', exc, width=width)
+    report = profile.snapshot()
+    assert 1 <= len(report['failures']) <= 8
+    assert len(json.dumps(report['failures'])) <= 32768
+    assert len(json.dumps(report)) < 131072
+    assert report['failures'][-1]['context']['width'] == 29
+    report['failures'][-1]['context']['width'] = -1
+    assert profile.snapshot()['failures'][-1]['context']['width'] == 29
 
 
 def test_receive_metrics_count_overflow_and_mailbox_drops():
@@ -150,6 +169,9 @@ def test_report_old_peer_failure_and_session_change(tmp_path, monkeypatch):
         monkeypatch.setattr(transport, 'request', failed)
         report = await client.performance_report()
         assert report['host_error'] == 'OSError' and report['client']
+        failure = report['client']['failures'][-1]
+        assert failure['stage'] == 'host_performance_report'
+        assert failure['message'] == 'unreachable' and 'OSError' in failure['traceback']
         async def changed(*args):
             client.session_id = 'second'
             return {}

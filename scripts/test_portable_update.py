@@ -122,6 +122,9 @@ def verify_portable_update(bundle, root):
         if old.poll() is not None or not old_ready.exists():
             raise RuntimeError('Frozen app exited before startup confirmation.')
         wait_for(host_ready, 'Frozen app did not automatically accept host connections.')
+        logfile = data / 'logs' / 'elink.log'
+        if not logfile.is_file() or __version__ not in logfile.read_text(encoding='utf-8'):
+            raise RuntimeError('Frozen app did not create its versioned diagnostic log.')
         plan = workspace / 'plan.json'
         plan.write_text(json.dumps(dict(target=str(target), workspace=str(workspace),
                                        parent_pid=old.pid, data_root=str(data))), encoding='utf-8')
@@ -154,8 +157,10 @@ def verify_portable_update(bundle, root):
             raise RuntimeError('User configuration was not preserved.')
         close_app(executable, wait=True)
         wait_for(lambda: not app_windows(executable), 'Updated app did not close normally.', timeout=15)
+        if logfile.read_text(encoding='utf-8').count('Application started:') < 2:
+            raise RuntimeError('Diagnostic logging did not append across the frozen update/restart.')
         return dict(ok=True, frozen=True, directory_replacement=True, restart_confirmed=True, automatic_host_ready=True,
-                    configuration_preserved=True, backup_retained=True,
+                    configuration_preserved=True, backup_retained=True, persistent_logs=True,
                     note='Same-version replacement using two isolated copies; not a manual game test.')
     finally:
         close_app(executable)

@@ -1,8 +1,12 @@
 import asyncio
 import concurrent.futures
+import logging
 import threading
 
 from PySide6.QtCore import QObject, Signal, Qt
+
+
+log = logging.getLogger(__name__)
 
 
 class Runtime(QObject):
@@ -13,12 +17,17 @@ class Runtime(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.loop = asyncio.new_event_loop()
+        self.loop.set_exception_handler(self.handle_loop_exception)
         self.thread = threading.Thread(target=self.run, name="elink-network", daemon=True)
         # A future may finish before add_done_callback, which then calls done
         # on the UI thread. Always queue delivery so callers can first save the
         # returned future; inline callbacks could clear it before assignment.
         self.completed.connect(self.deliver, Qt.ConnectionType.QueuedConnection)
         self.thread.start()
+
+    def handle_loop_exception(self, loop, context):
+        log.error('Background task failed: %s', context.get('message', 'unknown task'),
+                  exc_info=context.get('exception'))
 
     def run(self):
         asyncio.set_event_loop(self.loop)
@@ -39,6 +48,7 @@ class Runtime(QObject):
             except concurrent.futures.CancelledError:
                 return
             except Exception as exc:
+                log.exception('Async operation failed')
                 self.completed.emit(failure, str(exc), True)
             else:
                 self.completed.emit(success, value, False)

@@ -23,6 +23,11 @@ workflow:
   remaining limitations; a passing unit suite alone does not prove a performance
   problem is resolved. No further permission is needed for a verified fix under
   this standing authorization, unless the user marks the task local-only.
+- For an unresolved reported failure, repair missing diagnostics before publishing
+  a related build: persist exception messages, stacks and failure stages, and
+  verify a real failure reaches both file logs and the exported report. Clearly
+  label a user-requested diagnostic Preview; it is not a fix for the underlying
+  failure. Do not use an unrelated UI fix as evidence that the failure is resolved.
 - Development-only native compilation and rendering benchmarks are allowed when
   required to validate the requested implementation; they are not app packaging.
 - No server deployment is enabled. Git synchronization is not deployment.

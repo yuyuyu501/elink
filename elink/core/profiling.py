@@ -1,8 +1,11 @@
 """Bounded, session-local timings. Durations never compare peer clocks."""
 from collections import Counter, deque
+import json
 import math
 import threading
 import time
+
+from ..logging_setup import environment_details, exception_details
 
 
 class PipelineProfile:
@@ -16,8 +19,9 @@ class PipelineProfile:
         self.samples = {}
         self.counts = Counter()
         self.last = {}
-        self.metadata = {}
+        self.metadata = dict(environment_details())
         self.events = deque(maxlen=64)
+        self.failures = deque(maxlen=8)
 
     def observe(self, stage, milliseconds):
         if not math.isfinite(milliseconds) or milliseconds < 0:
@@ -54,11 +58,21 @@ class PipelineProfile:
         with self.lock:
             self.events.append(dict(event=name, at_ms=round((self.clock() - self.started) * 1000, 3), **values))
 
+    def exception(self, stage, exc, **context):
+        failure = dict(stage=stage, at_ms=round((self.clock() - self.started) * 1000, 3),
+                       **exception_details(exc), context=context)
+        with self.lock:
+            self.failures.append(failure)
+            # Keep reports below the existing 128 KiB peer response limit.
+            while len(self.failures) > 1 and len(json.dumps(list(self.failures))) > 32768:
+                self.failures.popleft()
+
     def snapshot(self):
         with self.lock:
             samples = {key: list(values) for key, values in self.samples.items()}
             counts, metadata = dict(self.counts), dict(self.metadata)
             events = [dict(value) for value in self.events]
+            failures = [dict(value, context=dict(value['context'])) for value in self.failures]
         summary = {}
         for key, values in samples.items():
             values.sort()
@@ -67,4 +81,5 @@ class PipelineProfile:
             summary[key] = dict(samples=len(values), total=counts[key], p50_ms=percentile(.5),
                                 p95_ms=percentile(.95), p99_ms=percentile(.99), max_ms=round(values[-1], 4))
         return dict(elapsed_seconds=round(self.clock() - self.started, 3),
-                    window_samples=self.capacity, stages=summary, counters=counts, metadata=metadata, events=events)
+                    window_samples=self.capacity, stages=summary, counters=counts, metadata=metadata,
+                    events=events, failures=failures)
