@@ -1,10 +1,12 @@
 """Session controls that stay open while users adjust multiple options."""
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout, QFrame,
                                QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ..core.mouse import MOUSE_MODES
+from .controls import OptionRow
+from .icons import icon
 
 
 class ControlCenter(QFrame):
@@ -12,7 +14,7 @@ class ControlCenter(QFrame):
         super().__init__(player)
         self.player = player
         self.setObjectName('controlCenter')
-        self.setFixedWidth(310)
+        self.setFixedWidth(320)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(1, 1, 1, 1)
         self.scroll = QScrollArea()
@@ -21,16 +23,16 @@ class ControlCenter(QFrame):
         outer.addWidget(self.scroll)
         body = QWidget()
         self.rows = QVBoxLayout(body)
-        self.rows.setContentsMargins(12, 10, 12, 10)
-        self.rows.setSpacing(7)
+        self.rows.setContentsMargins(8, 8, 8, 8)
+        self.rows.setSpacing(4)
         self.scroll.setWidget(body)
-        self.quality = self.command('画质与传输设置…', player.open_quality)
+        self.quality = self.command('画质与传输设置…', player.open_quality, 'sliders-horizontal')
         self.quality.setEnabled(player.client.pc is not None)
-        self.mouse_button = self.command('鼠标设置', self.toggle_mouse)
+        self.mouse_button = self.command('鼠标设置', self.toggle_mouse, 'mouse')
         self.mouse_button.setCheckable(True)
         self.mouse_options = QWidget()
         mouse_rows = QVBoxLayout(self.mouse_options)
-        mouse_rows.setContentsMargins(8, 0, 0, 4)
+        mouse_rows.setContentsMargins(38, 4, 10, 12)
         self.modes = {}
         for label, mode, hint in MOUSE_MODES:
             radio = QRadioButton(label)
@@ -50,35 +52,38 @@ class ControlCenter(QFrame):
         mouse_rows.addLayout(form)
         self.rows.addWidget(self.mouse_options)
         self.mouse_options.hide()
-        self.controllers = self.check('转发手柄与震动', player.set_controllers)
-        self.muted = self.check('本机静音', player.set_muted)
+        self.controllers = self.check('转发手柄与震动', player.set_controllers, 'gamepad-2')
+        self.muted = self.check('本机静音', player.set_muted, 'volume-2')
         self.separator()
-        self.statistics = self.check('显示连接统计    F10', player.set_statistics)
-        self.export = self.command('导出性能报告…', player.export_performance)
+        self.statistics = self.check('显示连接统计    F10', player.set_statistics, 'chart-column')
+        self.export = self.command('导出性能报告…', player.export_performance, 'file-down')
         self.export.setEnabled(hasattr(player.client, 'performance_report'))
-        self.fullscreen = self.command('全屏    F11', player.toggle_fullscreen)
-        self.command('释放键鼠输入', player.release)
         self.separator()
-        self.command('断开连接', player.close).setObjectName('danger')
+        self.fullscreen = self.command('全屏    F11', player.toggle_fullscreen, 'maximize')
+        self.command('释放键鼠输入', player.release, 'keyboard')
+        self.separator()
+        self.command('断开连接', player.close, 'power').setObjectName('danger')
         for key, callback in (('F8', player.open_controls), ('F10', self.statistics.click),
                               ('F11', player.toggle_fullscreen)):
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(callback)
 
-    def command(self, label, callback):
+    def command(self, label, callback, icon_name):
         widget = QPushButton(label)
+        widget.setIcon(icon(icon_name, '#d33c51' if icon_name == 'power' else '#172b46'))
+        widget.setIconSize(QSize(18, 18))
         widget.clicked.connect(callback)
         self.rows.addWidget(widget)
         return widget
 
-    def check(self, label, callback):
-        widget = QCheckBox(label)
+    def check(self, label, callback, icon_name):
+        widget = QCheckBox()
         def changed(checked):
             callback(checked)
             self.sync()
         widget.clicked.connect(changed)
-        self.rows.addWidget(widget)
+        self.rows.addWidget(OptionRow(label, widget, icon_name))
         return widget
 
     def select_mode(self, mode):
@@ -87,6 +92,7 @@ class ControlCenter(QFrame):
 
     def separator(self):
         line = QFrame()
+        line.setObjectName('menuSeparator')
         line.setFrameShape(QFrame.Shape.HLine)
         self.rows.addWidget(line)
 
@@ -112,8 +118,8 @@ class ControlCenter(QFrame):
         player = self.player
         top = player.toolbar.height()
         right = player.controls_button.mapTo(player, player.controls_button.rect().topRight()).x() + 1
-        self.setGeometry(max(0, min(right - self.width(), player.width() - self.width())), top,
-                         self.width(), min(self.scroll.widget().sizeHint().height() + 2, player.height() - top))
+        self.setGeometry(max(8, min(right - self.width(), player.width() - self.width() - 8)), top + 8,
+                         self.width(), min(self.scroll.widget().sizeHint().height() + 2, player.height() - top - 16))
         self.raise_()
 
     def mousePressEvent(self, event):

@@ -5,12 +5,14 @@ import shutil
 import threading
 import time
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtWidgets import (QCheckBox, QLabel, QMessageBox, QProgressBar,
-                               QPushButton, QVBoxLayout, QWidget)
+                               QPushButton, QHBoxLayout, QVBoxLayout, QWidget)
 
 from .. import __version__
 from .. import updates
+from .controls import OptionRow, section_heading
+from .icons import icon, icon_label
 
 
 class AboutPage(QWidget):
@@ -29,24 +31,44 @@ class AboutPage(QWidget):
         self._download_started = None
         self._download_speed = 0.0
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 20, 12, 10)
-        title = QLabel(f"Elink {__version__} · Windows x64 预览版")
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
+        layout.setContentsMargins(4, 20, 4, 10)
+        layout.setSpacing(14)
+        heading = QHBoxLayout()
+        heading.setSpacing(14)
+        symbol = icon_label('link', 48, '#ffffff', glyph_size=30)
+        symbol.setObjectName('brandMark')
+        heading.addWidget(symbol)
+        name = QVBoxLayout()
+        name.setSpacing(2)
+        title = QLabel('Elink')
+        title.setObjectName('brandTitle')
+        name.addWidget(title)
+        version = QLabel(f'{__version__} · Windows x64 预览版')
+        version.setObjectName('muted')
+        name.addWidget(version)
+        heading.addLayout(name, 1)
+        layout.addLayout(heading)
         description = QLabel("独立远程桌面与游戏串流。由 Elink 负责采集、编码、连接和控制。\n"
                              "当前仍是预览版，游戏性能与手柄兼容性仍在完善。")
         description.setWordWrap(True)
+        description.setObjectName('muted')
         layout.addWidget(description)
         link = QLabel(f'<a href="{updates.RELEASES_URL}">查看 GitHub Releases / 手动下载</a>')
         link.setOpenExternalLinks(True)
         layout.addWidget(link)
+        layout.addSpacing(12)
+        layout.addWidget(section_heading('应用更新', 'refresh-cw'))
         self.previews = QCheckBox("包括预览版本（当前为预览版，建议开启）")
         self.previews.setChecked(True)
-        layout.addWidget(self.previews)
+        layout.addWidget(OptionRow('包括预览版本', self.previews))
         self.check_button = QPushButton("检测更新")
+        self.check_button.setObjectName('primary')
+        self.check_button.setIcon(icon('refresh-cw', '#ffffff'))
+        self.check_button.setIconSize(QSize(18, 18))
         self.check_button.clicked.connect(self.check)
         layout.addWidget(self.check_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.status = QLabel("仅在点击检测时访问 GitHub；安装前会询问，不会自动更新。")
+        self.status.setObjectName('muted')
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.status)
@@ -54,6 +76,7 @@ class AboutPage(QWidget):
         self.bar.hide()
         layout.addWidget(self.bar)
         self.cancel_button = QPushButton("取消下载")
+        self.cancel_button.setIcon(icon('x'))
         self.cancel_button.clicked.connect(self.cancel)
         self.cancel_button.hide()
         layout.addWidget(self.cancel_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -61,6 +84,7 @@ class AboutPage(QWidget):
                       "更新会断开当前串流；新版启动后自动恢复等待连接。\n"
                       "旧程序会保留在应用旁的 .Elink-update-* 文件夹，确认新版正常后可删除该备份。")
         note.setWordWrap(True)
+        note.setObjectName('muted')
         layout.addWidget(note)
         layout.addStretch()
         self.progress.connect(self.show_progress)

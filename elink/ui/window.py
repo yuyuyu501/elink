@@ -6,9 +6,8 @@ import socket
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout,
+from PySide6.QtCore import Qt, QSize, QTimer, Signal
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QScrollArea, QFrame,
                                QVBoxLayout, QWidget, QSystemTrayIcon, QMenu)
@@ -19,19 +18,22 @@ from ..models import Endpoint
 from ..network import netcheck, tailnet_ping, tailscale_path
 from ..discovery import NetworkScope, discover, machine_id
 from ..storage import atomic_json
-from ..paths import resource_dir
 from .. import startup
 from .player import Player
 from .about import AboutPage
-from .controls import StreamOptions, DeviceCard
+from .controls import StreamOptions, DeviceCard, OptionRow, section_heading
 from .chrome import window_icon
+from .icons import icon, icon_label
 from .. import __version__
 
 
-def button(text, action, primary=False):
+def button(text, action, primary=False, icon_name=None):
     widget = QPushButton(text)
     if primary:
         widget.setObjectName("primary")
+    if icon_name:
+        widget.setIcon(icon(icon_name, '#ffffff' if primary else '#172b46'))
+        widget.setIconSize(QSize(18, 18))
     widget.clicked.connect(action)
     return widget
 
@@ -81,12 +83,21 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(outer)
         layout = QVBoxLayout(outer)
         layout.setContentsMargins(28, 22, 28, 18)
+        layout.setSpacing(16)
         title = QHBoxLayout()
-        title.addWidget(text_label("Elink", "pageTitle"))
+        title.setSpacing(14)
+        brand = icon_label('link', 44, '#ffffff', glyph_size=28)
+        brand.setObjectName('brandMark')
+        title.addWidget(brand)
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(2)
+        brand_text.addWidget(text_label('Elink', 'brandTitle'))
+        brand_text.addWidget(text_label('你的设备，随时连接。', 'muted'))
+        title.addLayout(brand_text)
         title.addStretch()
-        title.addWidget(text_label(f"WINDOWS  /  {__version__} PREVIEW", "muted"))
+        title.addWidget(text_label(f'WINDOWS  /  {__version__}\nPREVIEW', 'versionLabel'), 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(title)
-        layout.addWidget(text_label("你的设备，随时连接。", "muted"))
+        self.setWindowIcon(icon('link', '#2855eb'))
         self.notice_bar = QFrame()
         self.notice_bar.setObjectName('errorNotice')
         notice_row = QHBoxLayout(self.notice_bar)
@@ -147,28 +158,38 @@ class MainWindow(QMainWindow):
     def make_remote(self):
         layout = self.page("设备")
         heading = QHBoxLayout()
-        heading.addWidget(text_label("全部设备", "pageTitle"))
-        heading.addStretch()
-        self.refresh_button = button("刷新", self.refresh_network)
+        heading.setSpacing(10)
+        introduction = QVBoxLayout()
+        introduction.setSpacing(5)
+        introduction.addWidget(text_label('全部设备', 'pageTitle'))
+        self.discovery_state = text_label('正在寻找同局域网 / Tailscale 中的设备…', 'muted')
+        introduction.addWidget(self.discovery_state)
+        heading.addLayout(introduction, 1)
+        self.refresh_button = button('刷新', self.refresh_network, icon_name='refresh-cw')
         heading.addWidget(self.refresh_button)
-        self.manual_button = button("通过地址连接", self.manual_connect)
+        self.manual_button = button('通过地址连接', self.manual_connect, icon_name='link')
         heading.addWidget(self.manual_button)
-        self.network_button = button("网络诊断", self.show_network_diagnostics)
+        self.network_button = button('网络诊断', self.show_network_diagnostics, icon_name='activity')
         heading.addWidget(self.network_button)
         layout.addLayout(heading)
-        self.discovery_state = text_label("正在寻找同局域网 / Tailscale 中的设备…", "muted")
-        layout.addWidget(self.discovery_state)
+        layout.addSpacing(12)
+        self.device_count = text_label('', 'muted')
+        layout.addWidget(section_heading('设备列表', 'monitor', self.device_count))
         local = QFrame()
         local.setObjectName("localDevice")
         local_layout = QHBoxLayout(local)
+        local_layout.setContentsMargins(20, 16, 20, 16)
+        local_layout.setSpacing(18)
+        local_layout.addWidget(icon_label('monitor', 34, '#6c7b90'))
         labels = QVBoxLayout()
-        labels.addWidget(text_label(f"{socket.gethostname()}  ·  本机", "sectionTitle"))
-        self.host_status = text_label("正在准备…", "muted")
+        labels.setSpacing(4)
+        labels.addWidget(text_label(f'{socket.gethostname()}  ·  本机', 'deviceName'))
+        self.host_status = text_label('正在准备…', 'hostStatus')
         labels.addWidget(self.host_status)
         self.session_status = text_label("等待连接", "muted")
         labels.addWidget(self.session_status)
         local_layout.addLayout(labels, 1)
-        self.end_session_button = button("断开当前控制端", self.end_host_session)
+        self.end_session_button = button('断开当前控制端', self.end_host_session, icon_name='power')
         self.end_session_button.setObjectName("danger")
         self.end_session_button.hide()
         local_layout.addWidget(self.end_session_button)
@@ -196,32 +217,39 @@ class MainWindow(QMainWindow):
 
     def make_host(self):
         layout = self.page("设置", scroll=True)
-        layout.addWidget(text_label("常规", "sectionTitle"))
+        layout.setSpacing(0)
+        layout.addWidget(section_heading('常规', 'settings'))
         self.startup_enabled = QCheckBox("开机时自启动")
         self.close_to_tray = QCheckBox("关闭时最小化到托盘")
-        layout.addWidget(self.startup_enabled)
-        layout.addWidget(self.close_to_tray)
-        layout.addSpacing(18)
-        layout.addWidget(text_label("本机连接设置", "sectionTitle"))
+        layout.addWidget(OptionRow('开机时自启动', self.startup_enabled))
+        layout.addWidget(OptionRow('关闭时最小化到托盘', self.close_to_tray))
+        layout.addSpacing(24)
+        layout.addWidget(section_heading('本机连接设置', 'monitor'))
         self.options = StreamOptions(self)
         self.options.hide()
         for name in StreamOptions.fields:
             setattr(self, name, getattr(self.options, name))
         self.advanced = QWidget()
         advanced_layout = QVBoxLayout(self.advanced)
-        form = QFormLayout()
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(0)
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
         self.port.setValue(49200)
-        form.addRow("本机监听端口", self.port)
+        self.port.setMinimumWidth(360)
+        self.port.setMaximumWidth(480)
+        advanced_layout.addWidget(OptionRow('本机监听端口', self.port))
         self.pad_backend = QComboBox()
         self.pad_backend.addItem("ViGEmBus（需已安装）", "vigem")
         self.pad_backend.addItem("ElinkPad（实验驱动，单手柄）", "elinkpad")
         self.pad_backend.addItem("禁用虚拟手柄", "disabled")
-        form.addRow("本机手柄后端", self.pad_backend)
-        advanced_layout.addLayout(form)
-        self.apply_host_button = button("应用连接设置", self.apply_host_settings)
+        self.pad_backend.setMinimumWidth(360)
+        self.pad_backend.setMaximumWidth(480)
+        advanced_layout.addWidget(OptionRow('本机手柄后端', self.pad_backend))
+        advanced_layout.addSpacing(16)
+        self.apply_host_button = button('应用连接设置', self.apply_host_settings, primary=True, icon_name='save')
         advanced_layout.addWidget(self.apply_host_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        advanced_layout.addSpacing(12)
         advanced_layout.addWidget(text_label("ElinkPad 尚未签名或完成游戏验证。更改本机连接设置前需结束被控会话。", "muted"))
         layout.addWidget(self.advanced)
         layout.addStretch()
@@ -240,9 +268,8 @@ class MainWindow(QMainWindow):
     def make_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        icon = QIcon(str(resource_dir() / 'monitor.svg'))
-        self.setWindowIcon(icon)
-        self.tray = QSystemTrayIcon(icon, self)
+        tray_icon = icon('link', '#2855eb')
+        self.tray = QSystemTrayIcon(tray_icon, self)
         self.tray.setToolTip('Elink')
         menu = QMenu(self)
         menu.addAction('打开 Elink').triggered.connect(self.restore_window)
@@ -552,6 +579,7 @@ class MainWindow(QMainWindow):
             empty.setMinimumHeight(160)
             self.devices_layout.insertWidget(0, empty)
         self.discovery_state.setText(f"{len(self.device_buttons)} 台可连接设备 · 点击即可连接 · 自动刷新")
+        self.device_count.setText(f'{len(self.device_buttons) + 1} 台设备')
 
     def refresh_network(self):
         if self.discovery_pending or self._closing:

@@ -5,6 +5,7 @@ Elink 0.4 uses generic media, networking and UI libraries. Sunshine and Moonligh
 | Component | Version | License / source |
 | --- | --- | --- |
 | PySide6 / Qt | 6.10.2 | LGPL-3.0 / GPL-3.0 / commercial, component dependent; https://code.qt.io/ |
+| Lucide icons | lucide-static 0.468.0 | ISC, with Feather MIT attribution; https://github.com/lucide-icons/lucide/tree/0.468.0 |
 | aiortc | 1.14.0 | BSD-3-Clause; https://github.com/aiortc/aiortc/tree/1.14.0 |
 | PyAV | 16.1.0 | BSD-3-Clause; https://github.com/PyAV-Org/PyAV/tree/v16.1.0 |
 | FFmpeg and codec dependencies | PyAV wheel build | LGPL/GPL depending on configured libraries; https://ffmpeg.org/ and https://github.com/PyAV-Org/pyav-ffmpeg |
@@ -20,6 +21,11 @@ Elink 0.4 uses generic media, networking and UI libraries. Sunshine and Moonligh
 | ViGEmClient | x64 DLL from vgamepad 0.1.0 source archive | MIT, Benjamin Höglinger-Stelzer; https://github.com/nefarius/ViGEmClient |
 | HIDMaestro XUSB layout reference | 00b7303f8533c3fe10687a765c84e929b34a5e9c | MIT, 2026 HIDMaestro Contributors; https://github.com/hifihedgehog/HIDMaestro |
 | Python / PyInstaller bootloader | Build-specific / 6.16.0 | PSF / GPL with distribution exception; https://python.org/ and https://pyinstaller.org/ |
+
+Selected Lucide SVGs are bundled in `elink/resources/lucide/`, with the upstream
+notice in `licenses/Lucide-LICENSE.txt`. The checked indicator is recolored white;
+other icon colors are applied at render time. These assets require no runtime
+download or web service.
 
 ViGEmClient.dll was extracted without running setup.py from the pinned vgamepad source archive:
 https://files.pythonhosted.org/packages/8a/54/0eaddc33f84247963af078f364b37153d09fcd6cdc398f243ec3e8842c56/vgamepad-0.1.0.tar.gz

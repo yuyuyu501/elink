@@ -1,10 +1,56 @@
 """Shared stream preferences and keyboard-accessible device rows."""
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
-                               QLabel, QPushButton, QDoubleSpinBox, QSpinBox, QVBoxLayout, QWidget)
-from ..paths import resource_dir
+                               QFrame, QLabel, QPushButton, QDoubleSpinBox, QSpinBox, QVBoxLayout, QWidget)
+from .icons import icon_label
 from ..core.mouse import MOUSE_MODES, mouse_mode, sensitivity_value
+
+
+def section_heading(title, icon_name, aside=None):
+    heading = QFrame()
+    heading.setObjectName('sectionHeading')
+    row = QHBoxLayout(heading)
+    row.setContentsMargins(12, 12, 12, 12)
+    row.setSpacing(12)
+    row.addWidget(icon_label(icon_name))
+    label = QLabel(title)
+    label.setObjectName('sectionTitle')
+    row.addWidget(label)
+    row.addStretch()
+    if aside is not None:
+        row.addWidget(aside)
+    return heading
+
+
+class OptionRow(QFrame):
+    """Aligned label/control row; checkbox rows also accept clicks on the label."""
+
+    def __init__(self, label, control, icon_name=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName('optionRow')
+        self.control = control
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 8, 14, 8)
+        row.setSpacing(12)
+        if icon_name:
+            row.addWidget(icon_label(icon_name, 18))
+        self.label = QLabel(label)
+        self.label.setWordWrap(True)
+        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        row.addWidget(self.label, 1)
+        control.setAccessibleName(label)
+        row.addWidget(control)
+        if isinstance(control, QCheckBox):
+            control.setText('')
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and isinstance(self.control, QCheckBox):
+            if self.control.isEnabled() and self.rect().contains(event.position().toPoint()):
+                self.control.click()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
 
 
 class StreamOptions(QWidget):
@@ -13,7 +59,11 @@ class StreamOptions(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         form = QFormLayout(self)
-        form.setSpacing(14)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(20)
+        form.setVerticalSpacing(12)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.resolution = QComboBox()
         for width, height in ((1920, 1080), (1600, 900), (1280, 720), (2560, 1440), (3840, 2160)):
             self.resolution.addItem(f'{width} × {height}', [width, height])
@@ -101,14 +151,11 @@ class DeviceCard(QPushButton):
         self.setAccessibleName(f'连接 {name}')
         self.setToolTip(description)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 14, 22, 14)
+        layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(18)
-        icon = QLabel()
-        icon.setPixmap(QIcon(str(resource_dir() / 'monitor.svg')).pixmap(28, 28))
-        icon.setObjectName('deviceIcon')
-        icon.setFixedSize(44, 44)
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(icon)
+        symbol = icon_label('monitor', 44, '#ffffff', glyph_size=26)
+        symbol.setObjectName('deviceIcon')
+        layout.addWidget(symbol)
         text = QVBoxLayout()
         text.setSpacing(5)
         title = QLabel(name)
@@ -120,8 +167,15 @@ class DeviceCard(QPushButton):
             label.setWordWrap(True)
             text.addWidget(label)
         layout.addLayout(text, 1)
-        arrow = QLabel('连接  ›')
+        action = QFrame()
+        action.setObjectName('connectAction')
+        action_row = QHBoxLayout(action)
+        action_row.setContentsMargins(14, 9, 12, 9)
+        action_row.setSpacing(8)
+        arrow = QLabel('连接')
         arrow.setObjectName('deviceAction')
-        layout.addWidget(arrow)
+        action_row.addWidget(arrow)
+        action_row.addWidget(icon_label('chevron-right', 16, '#ffffff'))
+        layout.addWidget(action, 0, Qt.AlignmentFlag.AlignVCenter)
         for child in self.findChildren(QWidget):
             child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)

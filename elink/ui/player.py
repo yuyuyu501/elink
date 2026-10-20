@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushBu
 from .controls import StreamOptions
 from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_resize_handles
 from .control_center import ControlCenter
+from .icons import icon
 
 from ..core.statistics import StreamStats, overlay_lines
 from ..core.input import CursorConfinement, RawMouseInput, RemoteKeyboardHook, XInput
@@ -362,9 +363,11 @@ class Player(QWidget):
             return
         dialog = self.settings_dialog = QualityDialog(self)
         dialog.setWindowTitle("画质与传输设置")
-        dialog.setMinimumWidth(460)
+        dialog.setWindowIcon(icon('sliders-horizontal', '#2855eb'))
+        dialog.setMinimumWidth(500)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(20)
         options = StreamOptions()
         dialog.options = options
         options.restore(self.preferences)
@@ -413,6 +416,7 @@ class Player(QWidget):
             self.settings_dialog = None
             dialog.deleteLater()
         dialog.finished.connect(finished)
+        dialog.setMinimumWidth(max(500, dialog.minimumSizeHint().width()))
         dialog.open()
 
     def send(self, event):

@@ -8,13 +8,13 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
 
 from elink.core.input import RecordingInput
 from elink.core.media import AudioOutput
 from elink.core.transport import HostServer
 from elink.discovery import DiscoveredHost
-from elink.ui.controls import StreamOptions
+from elink.ui.controls import OptionRow, StreamOptions
 from elink.ui.window import MainWindow
 from elink.ui.theme import apply_theme
 from test_window import pump
@@ -23,6 +23,32 @@ from test_window import pump
 def close(window, app):
     window.close()
     pump(app, lambda: window._closed)
+
+
+def test_option_row_label_indicator_keyboard_and_disabled():
+    app = QApplication.instance() or QApplication([])
+    apply_theme(app)
+    checkbox = QCheckBox()
+    row = OptionRow('显示连接统计', checkbox, 'chart-column')
+    row.resize(320, 50)
+    row.show()
+    app.processEvents()
+    try:
+        changes = []
+        checkbox.toggled.connect(changes.append)
+        QTest.mouseClick(row.label, Qt.MouseButton.LeftButton)
+        assert checkbox.isChecked() and changes == [True]
+        QTest.mouseClick(checkbox, Qt.MouseButton.LeftButton)
+        assert not checkbox.isChecked() and changes == [True, False]
+        checkbox.setFocus()
+        QTest.keyClick(checkbox, Qt.Key.Key_Space)
+        assert checkbox.isChecked() and changes == [True, False, True]
+        checkbox.setEnabled(False)
+        QTest.mouseClick(row.label, Qt.MouseButton.LeftButton)
+        assert changes == [True, False, True]
+        assert checkbox.accessibleName() == '显示连接统计'
+    finally:
+        row.close()
 
 
 def test_error_notice_dismiss_and_redisplay_preserves_log(tmp_path):

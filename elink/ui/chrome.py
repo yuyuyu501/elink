@@ -1,7 +1,7 @@
 """Compact Qt window chrome using Windows' system move/resize operations."""
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QWidget
+from .icons import icon, icon_label
 
 
 TITLE_HEIGHT = 40
@@ -9,25 +9,7 @@ RESIZE_MARGIN = 5
 
 
 def window_icon(kind):
-    pixmap = QPixmap(32, 32)
-    pixmap.setDevicePixelRatio(2)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setPen(QPen(QColor('#182743'), 1))
-    if kind == 'minimize':
-        painter.drawLine(3, 8, 13, 8)
-    elif kind == 'maximize':
-        painter.drawRect(3, 3, 10, 10)
-    elif kind == 'restore':
-        painter.drawRect(5, 3, 8, 8)
-        painter.fillRect(3, 5, 8, 8, QColor('#edf2fa'))
-        painter.drawRect(3, 5, 8, 8)
-    else:
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.drawLine(3, 3, 13, 13)
-        painter.drawLine(3, 13, 13, 3)
-    painter.end()
-    return QIcon(pixmap)
+    return icon({'minimize': 'minus', 'maximize': 'square', 'restore': 'copy'}.get(kind, 'x'))
 
 
 class StreamTitleBar(QFrame):
@@ -36,15 +18,18 @@ class StreamTitleBar(QFrame):
         self.player = player
         self.setObjectName('streamToolbar')
         row = QHBoxLayout(self)
-        row.setContentsMargins(14, 0, 0, 0)
-        row.setSpacing(0)
-        self.title = QLabel('ELINK  /  远程桌面')
+        row.setContentsMargins(12, 0, 0, 0)
+        row.setSpacing(10)
+        row.addWidget(icon_label('link', 18, '#2855eb'))
+        self.title = QLabel('Elink  /  远程桌面')
         self.title.setObjectName('streamTitle')
         self.title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         row.addWidget(self.title)
         row.addStretch()
-        self.controls = QPushButton('控制中心  F8  ▾')
+        self.controls = QPushButton('控制中心  F8')
         self.controls.setObjectName('titleControl')
+        self.controls.setIcon(icon('sliders-horizontal'))
+        self.controls.setIconSize(QSize(16, 16))
         self.controls.setToolTip('打开控制中心并释放远端输入')
         self.controls.clicked.connect(player.open_controls)
         row.addWidget(self.controls)
@@ -52,8 +37,11 @@ class StreamTitleBar(QFrame):
         self.maximize = self.window_button('最大化', 'maximize', player.toggle_maximized)
         self.close_button = self.window_button('关闭远控', 'close', player.close)
         self.close_button.setObjectName('titleClose')
+        window_buttons = QHBoxLayout()
+        window_buttons.setSpacing(0)
         for button in (self.minimize, self.maximize, self.close_button):
-            row.addWidget(button)
+            window_buttons.addWidget(button)
+        row.addLayout(window_buttons)
 
     def window_button(self, label, icon, callback):
         button = QPushButton()
@@ -61,6 +49,7 @@ class StreamTitleBar(QFrame):
         button.setToolTip(label)
         button.setAccessibleName(label)
         button.setIcon(window_icon(icon))
+        button.setIconSize(QSize(15, 15))
         button.setFixedSize(46, TITLE_HEIGHT)
         button.clicked.connect(callback)
         return button

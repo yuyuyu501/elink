@@ -21,7 +21,7 @@ elink = "elink.app:main"
 include = ["elink*"]
 
 [tool.setuptools.package-data]
-elink = ["resources/*", "resources/fsr/*.h"]
+elink = ["resources/*", "resources/fsr/*.h", "resources/lucide/*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
