@@ -1,4 +1,4 @@
-# Elink 0.4.31 Preview
+# Elink 0.4.32 Preview
 
 Windows 独立远程桌面与游戏串流原型。Elink 自己负责采集、发现、会话、播放器和输入；不需要 Sunshine 或 Moonlight，不下载或启动它们。
 
