@@ -50,6 +50,7 @@ def main() -> int:
             QMessageBox.information(None, "Elink", "此数据目录已有 Elink 实例正在运行。")
             return 1
         window = MainWindow(root)
+        window.shutdown_complete.connect(app.quit)
     except Exception as exc:
         QMessageBox.critical(None, "Elink", f"启动失败：{exc}")
         return 1

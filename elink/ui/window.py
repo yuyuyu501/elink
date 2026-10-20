@@ -6,7 +6,7 @@ import socket
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -44,6 +44,8 @@ def text_label(text, style=""):
 
 
 class MainWindow(QMainWindow):
+    shutdown_complete = Signal()
+
     def __init__(self, root: Path, *, auto_refresh=True, auto_host=True):
         super().__init__()
         self.root = root
@@ -671,4 +673,5 @@ class MainWindow(QMainWindow):
             self.runtime.stop()
             self._closed = True
             self.close()
+            self.shutdown_complete.emit()
         self.runtime.submit(cleanup(), finished, finished)

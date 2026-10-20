@@ -2,6 +2,8 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
+import textwrap
 import uuid
 
 import pytest
@@ -138,8 +140,12 @@ def test_startup_hidden_only_when_tray_is_available_and_updates_exit(tmp_path, m
     finally:
         window.request_exit()
         pump(app, lambda: window._closed)
+
+
+def test_startup_without_tray_shows_window_and_close_exits(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(QSystemTrayIcon, 'isSystemTrayAvailable', lambda: False)
-    window = MainWindow(tmp_path / 'no-tray', auto_host=False, auto_refresh=False)
+    window = MainWindow(tmp_path, auto_host=False, auto_refresh=False)
     try:
         window.show_startup()
         assert window.isVisible() and window.tray is None
@@ -149,3 +155,37 @@ def test_startup_hidden_only_when_tray_is_available_and_updates_exit(tmp_path, m
     finally:
         window.request_exit()
         pump(app, lambda: window._closed)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows application entrypoint')
+def test_hidden_startup_tray_exit_terminates_the_real_application_loop(tmp_path):
+    program = textwrap.dedent('''
+        import json
+        import sys
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+        from elink import app as entry
+        original = entry.MainWindow
+        windows, expired = [], []
+        def create(root):
+            window = original(root, auto_host=False, auto_refresh=False)
+            window.close_to_tray.setChecked(True)
+            windows.append(window)
+            QTimer.singleShot(50, window.request_exit)
+            def timeout():
+                expired.append(True)
+                QApplication.instance().quit()
+            QTimer.singleShot(3000, timeout)
+            return window
+        entry.MainWindow = create
+        QSystemTrayIcon.isSystemTrayAvailable = lambda: True
+        sys.argv = ['Elink', '--startup']
+        result = entry.main()
+        window = windows[0]
+        print(json.dumps(dict(result=result, watchdog=bool(expired),
+                              closed=window._closed, alive=window.runtime.thread.is_alive())))
+    ''')
+    result = subprocess.run([sys.executable, '-c', program],
+                            env=dict(os.environ, ELINK_DATA_DIR=str(tmp_path), QT_QPA_PLATFORM='offscreen'),
+                            capture_output=True, text=True, timeout=15, check=True)
+    assert json.loads(result.stdout) == dict(result=0, watchdog=False, closed=True, alive=False)
