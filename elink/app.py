@@ -59,7 +59,10 @@ def main() -> int:
         window.report_error(f"操作失败：{value}")
 
     sys.excepthook = exception_hook
-    window.show()
+    if '--startup' in sys.argv:
+        window.show_startup()
+    else:
+        window.show()
     ready = os.environ.pop("ELINK_UPDATE_READY", "")
     failure = os.environ.pop("ELINK_UPDATE_FAILURE", "")
     if ready:

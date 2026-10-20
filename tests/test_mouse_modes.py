@@ -62,10 +62,9 @@ def test_smart_switch_local_ack_and_stale_state():
         assert player.cursor().shape() != Qt.CursorShape.BlankCursor and not player.software_cursor
         client.cursor_supported = False
         player.open_controls()
-        actions = player.control_menu.actions()
-        menu = next(a.menu() for a in actions if a.text() == '鼠标模式')
-        assert [a.text() for a in menu.actions()] == ['智能鼠标', '使用被控端鼠标', '使用主控端鼠标']
-        assert [a.isEnabled() for a in menu.actions()] == [False, True, False]
+        modes = list(player.control_menu.modes.values())
+        assert [a.text() for a in modes] == ['智能鼠标', '使用被控端鼠标', '使用主控端鼠标']
+        assert [a.isEnabled() for a in modes] == [False, True, False]
     finally:
         player.close()
 

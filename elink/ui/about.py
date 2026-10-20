@@ -162,7 +162,7 @@ class AboutPage(QWidget):
             return
         self.status.setText("正在退出，随后自动更新并重启…")
         self.handoff_complete = True
-        self.window.close()
+        self.window.request_exit()
 
     def failed(self, message):
         self.installing = False

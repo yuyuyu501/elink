@@ -77,6 +77,17 @@ def run(root: Path, desktop=False):
         result['single_titlebar'] = True
         player.open_controls()
         app.processEvents()
+        center = player.control_menu
+        center.mouse_button.click()
+        center.sensitivity.setValue(-1.2)
+        assert player.mouse_sensitivity.value == -1.2 and center.isVisible()
+        center.statistics.click()
+        assert not player.show_statistics and center.isVisible()
+        player.open_controls()
+        assert not center.isVisible()
+        player.open_controls()
+        assert center.isVisible() and center.sensitivity.value() == -1.2
+        result['session_controls'] = dict(persistent=True, sensitivity=True, toggle=True)
         player.control_menu.grab().save(str(root / "control-menu.png"))
         player.control_menu.close()
         player.open_quality()
@@ -92,6 +103,14 @@ def run(root: Path, desktop=False):
             window.tabs.setCurrentIndex(index)
             app.processEvents()
             window.grab().save(str(root / f"{name}.png"))
+        if window.tray:
+            window.close_to_tray.setChecked(True)
+            window.close()
+            app.processEvents()
+            assert not window.isVisible() and window.runtime.thread.is_alive() and not window._closing
+            window.restore_window()
+            assert window.isVisible()
+            result['tray_controls'] = dict(hide=True, restore=True)
     except Exception:
         result.update(ok=False, error=traceback.format_exc())
     finally:
@@ -103,7 +122,7 @@ def run(root: Path, desktop=False):
             future.result()
         except Exception:
             result.update(ok=False, shutdown_error=traceback.format_exc())
-        window.close()
+        window.request_exit()
         pump(lambda: window._closed)
         result["runtime_stopped"] = not runtime.thread.is_alive()
         atomic_json(root / "result.json", result)

@@ -4,17 +4,18 @@ import time
 import av
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPolygon, QActionGroup
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QMenu, QDialog, QApplication, QFileDialog
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPolygon
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QDialog, QApplication, QFileDialog
 
 from .controls import StreamOptions
 from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_resize_handles
+from .control_center import ControlCenter
 
 from ..core.statistics import StreamStats, overlay_lines
 from ..core.input import RawMouseInput, RemoteKeyboardHook, XInput
 from ..core import codecs
-from ..core.mouse import MOUSE_MODES, mouse_mode, relative_mouse
+from ..core.mouse import MouseSensitivity, mouse_mode, relative_mouse
 
 
 _DIRECTION_KEYS = {
@@ -73,6 +74,8 @@ class Player(QWidget):
         self.controllers = controllers
         self.preferences = dict(preferences or {})
         self.mouse_mode = mouse_mode(self.preferences.get('mouse_mode', 'remote' if game_mouse else 'smart'))
+        self.mouse_sensitivity = MouseSensitivity(self.preferences.get('mouse_sensitivity', 0))
+        self._absolute_last = self._absolute_pos = None
         self.game_mouse = False  # Effective input mapping; independent of cursor rendering.
         self.local_cursor = False
         self.software_cursor = False
@@ -263,6 +266,9 @@ class Player(QWidget):
         if self.gpu_overlay:
             self.gpu_overlay.setGeometry(self.rect())
         place_resize_handles(self)
+        if self.control_menu and self.control_menu.isVisible():
+            self.control_menu.sync()
+            self.control_menu.place()
         self.refresh_video()
 
     def resizeEvent(self, event):
@@ -299,48 +305,22 @@ class Player(QWidget):
     def open_controls(self):
         if self._closed:
             return
+        if self.control_menu and self.control_menu.isVisible():
+            self.control_menu.hide()
+            self.setFocus()
+            return
         self.release()
-        if self.control_menu:
-            self.control_menu.close()
-            self.control_menu.deleteLater()
-        menu = self.control_menu = QMenu(self)
-        menu.setMinimumWidth(250)
-        quality = menu.addAction("画质与传输设置…")
-        quality.triggered.connect(self.open_quality)
-        quality.setEnabled(self.client.pc is not None)
-        mouse = self.mouse_menu = menu.addMenu("鼠标模式")
-        group = QActionGroup(mouse)
-        mouse.setToolTipsVisible(True)
-        for label, mode, hint in MOUSE_MODES:
-            action = mouse.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(self.mouse_mode == mode)
-            supported = getattr(self.client, 'cursor_supported', False)
-            action.setEnabled(supported or mode == 'remote')
-            action.setToolTip(hint if supported else '请将被控端更新至 0.4.7 或更高版本以使用完整鼠标模式。')
-            group.addAction(action)
-            action.triggered.connect(lambda checked=False, mode=mode: self.set_mouse_mode(mode))
-        pad = menu.addAction("转发手柄与震动")
-        pad.setCheckable(True)
-        pad.setChecked(self.controllers)
-        pad.triggered.connect(self.set_controllers)
-        sound = menu.addAction("本机静音")
-        sound.setCheckable(True)
-        sound.setChecked(self.muted)
-        sound.triggered.connect(self.set_muted)
-        menu.addSeparator()
-        stats = menu.addAction("显示连接统计    F10")
-        stats.setCheckable(True)
-        stats.setChecked(self.show_statistics)
-        stats.triggered.connect(self.set_statistics)
-        export = menu.addAction('导出性能报告…')
-        export.setEnabled(hasattr(self.client, 'performance_report'))
-        export.triggered.connect(self.export_performance)
-        menu.addAction("退出全屏    F11" if self.isFullScreen() else "全屏    F11").triggered.connect(self.toggle_fullscreen)
-        menu.addAction("释放键鼠输入").triggered.connect(self.release)
-        menu.addSeparator()
-        menu.addAction("断开连接").triggered.connect(self.close)
-        menu.popup(self.controls_button.mapToGlobal(QPoint(0, self.controls_button.height())))
+        if not self.control_menu:
+            self.control_menu = ControlCenter(self)
+        self.control_menu.sync()
+        self.control_menu.show()
+        self.control_menu.place()
+
+    def set_mouse_sensitivity(self, value):
+        self.mouse_sensitivity = MouseSensitivity(value)
+        self.preferences['mouse_sensitivity'] = self.mouse_sensitivity.value
+        self._absolute_last = self._absolute_pos = None
+        self.settings_changed.emit({'mouse_sensitivity': self.mouse_sensitivity.value})
 
     def set_mouse_mode(self, mode):
         self.release()
@@ -438,6 +418,8 @@ class Player(QWidget):
         self.runtime.call(self.client.send, event)
 
     def capture(self):
+        if self.control_menu and self.control_menu.isVisible():
+            return
         self.setFocus()
         self.captured = True
         self.layout_chrome()
@@ -451,6 +433,8 @@ class Player(QWidget):
         self.software_cursor_pos = self.mapFromGlobal(QCursor.pos())
         if not self.rect_image.contains(self.software_cursor_pos):
             self.software_cursor_pos = self.rect_image.center()
+        self._absolute_last = self._absolute_pos = QPointF(self.software_cursor_pos)
+        self.mouse_sensitivity.remainder = [0.0, 0.0]
         self.update_mouse(force=True)
 
     def update_mouse(self, force=False):
@@ -471,6 +455,8 @@ class Player(QWidget):
             self.software_cursor = software
             self.refresh_video()
         if force or relative != self.game_mouse:
+            self._absolute_last = self._absolute_pos = None
+            self.mouse_sensitivity.remainder = [0.0, 0.0]
             if relative:
                 self.grabMouse()
                 QCursor.setPos(self.mapToGlobal(self.rect().center()))
@@ -680,24 +666,48 @@ class Player(QWidget):
                 center = self.rect().center()
                 delta = event.position().toPoint() - center
                 if not delta.isNull():
-                    self.send({"type": "move", "absolute": False, "x": delta.x(), "y": delta.y()})
+                    self.send_relative_motion(delta.x(), delta.y())
                     QCursor.setPos(self.mapToGlobal(center))
             event.accept()
             return
         elif not self.rect_image.isEmpty():
-            self.software_cursor_pos = event.position().toPoint()
+            position = self.absolute_position(event.position())
+            self.software_cursor_pos = position.toPoint()
             if self.software_cursor:
                 self.refresh_video()
             rect = self.rect_image
-            x = max(0, min(65535, int((event.position().x() - rect.x()) * 65535 / max(1, rect.width() - 1))))
-            y = max(0, min(65535, int((event.position().y() - rect.y()) * 65535 / max(1, rect.height() - 1))))
+            x = max(0, min(65535, int((position.x() - rect.x()) * 65535 / max(1, rect.width() - 1))))
+            y = max(0, min(65535, int((position.y() - rect.y()) * 65535 / max(1, rect.height() - 1))))
             self.send({"type": "move", "absolute": True, "x": x, "y": y})
+
+    def absolute_position(self, position):
+        factor = self.mouse_sensitivity.factor
+        if factor == 1 or self._absolute_last is None:
+            self._absolute_last = self._absolute_pos = QPointF(position)
+            return position
+        delta = position - self._absolute_last
+        rect = self.rect_image
+        point = self._absolute_pos + delta * factor
+        point = QPointF(max(rect.left(), min(rect.right(), point.x())),
+                        max(rect.top(), min(rect.bottom(), point.y())))
+        self._absolute_pos = point
+        # Keep the hidden OS pointer aligned with the adjusted desktop pointer
+        # so slow movement can still reach both edges of the remote desktop.
+        self._absolute_last = QPointF(point.toPoint())
+        if point.toPoint() != position.toPoint():
+            QCursor.setPos(self.mapToGlobal(point.toPoint()))
+        return point
+
+    def send_relative_motion(self, x, y):
+        x, y = self.mouse_sensitivity.relative(x, y)
+        if x or y:
+            self.send({'type': 'move', 'absolute': False, 'x': x, 'y': y})
 
     def nativeEvent(self, event_type, message):
         if self.captured and self.game_mouse:
             delta = self.raw_mouse.delta(message)
             if delta and (delta[0] or delta[1]):
-                self.send({"type": "move", "absolute": False, "x": delta[0], "y": delta[1]})
+                self.send_relative_motion(*delta)
                 return True, 0
         return super().nativeEvent(event_type, message)
 

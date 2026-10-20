@@ -28,14 +28,14 @@ QPushButton#deviceCard { background: white; border: 1px solid #dfe6f1; border-ra
 QPushButton#deviceCard:hover, QPushButton#deviceCard:focus { background: #f0f4ff; border-color: #7596f1; }
 QLabel#deviceIcon { background: #3565ed; color: white; font-size: 32px; border-radius: 9px; }
 QLabel#deviceAction { color: #244ede; }
-QLineEdit, QSpinBox, QComboBox { background: #ffffff; border: 1px solid #dfe6f1;
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #ffffff; border: 1px solid #dfe6f1;
     border-radius: 7px; min-height: 28px; padding: 4px 10px; selection-background-color: #244ede; }
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border-color: #244ede; }
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border-color: #244ede; }
 QComboBox::drop-down { width: 24px; border: 0; }
 QComboBox::down-arrow { image: url('@RES@/chevron-down.svg'); width: 12px; height: 12px; }
-QSpinBox::up-button, QSpinBox::down-button { width: 24px; background: #edf2fa; border: 0; }
-QSpinBox::up-arrow { image: url('@RES@/chevron-up.svg'); width: 10px; height: 10px; }
-QSpinBox::down-arrow { image: url('@RES@/chevron-down.svg'); width: 10px; height: 10px; }
+QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 24px; background: #edf2fa; border: 0; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url('@RES@/chevron-up.svg'); width: 10px; height: 10px; }
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url('@RES@/chevron-down.svg'); width: 10px; height: 10px; }
 QListWidget { background: #ffffff; border: 1px solid #dfe6f1; border-radius: 8px; }
 QListWidget::item { padding: 12px; border-bottom: 1px solid #edf1f8; }
 QListWidget::item:selected { background: #eaf0ff; color: #244ede; }
@@ -52,6 +52,10 @@ QTabBar::tab { padding: 12px 22px; margin-right: 8px; background: transparent; c
 QTabBar::tab:selected { color: #244ede; border-bottom: 3px solid #244ede; }
 QTabBar::tab:hover { color: #244ede; background: #edf2ff; }
 QFrame#streamToolbar { background: #edf2fa; border: 0; border-bottom: 1px solid #dfe6f1; }
+QFrame#controlCenter { background: #ffffff; border: 1px solid #dfe6f1; border-radius: 6px; }
+QFrame#controlCenter QPushButton { text-align: left; border: 0; border-radius: 4px; padding: 6px 8px; }
+QFrame#controlCenter QPushButton:checked { background: #eaf0ff; }
+QFrame#controlCenter QRadioButton { min-height: 25px; spacing: 8px; }
 QWidget#windowResizeHandle { background: transparent; }
 QFrame#streamToolbar QPushButton { min-height: 0; max-height: 40px; border: 0; border-radius: 0; padding: 0; background: transparent; }
 QFrame#streamToolbar QPushButton#titleControl { padding: 0 18px; min-height: 40px; }

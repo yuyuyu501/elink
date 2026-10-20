@@ -2,13 +2,13 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
-                               QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget)
+                               QLabel, QPushButton, QDoubleSpinBox, QSpinBox, QVBoxLayout, QWidget)
 from ..paths import resource_dir
-from ..core.mouse import MOUSE_MODES, mouse_mode
+from ..core.mouse import MOUSE_MODES, mouse_mode, sensitivity_value
 
 
 class StreamOptions(QWidget):
-    fields = ('resolution', 'renderer', 'render_scale', 'upscaler', 'fps', 'decoder', 'bitrate', 'audio', 'mouse_mode', 'controllers')
+    fields = ('resolution', 'renderer', 'render_scale', 'upscaler', 'fps', 'decoder', 'bitrate', 'audio', 'mouse_mode', 'mouse_sensitivity', 'controllers')
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,6 +56,10 @@ class StreamOptions(QWidget):
         # Mouse settings are available only from the session's dedicated menu.
         self.mouse_mode.setParent(self)
         self.mouse_mode.hide()
+        self.mouse_sensitivity = QDoubleSpinBox(self)
+        self.mouse_sensitivity.setRange(-5, 5)
+        self.mouse_sensitivity.setDecimals(1)
+        self.mouse_sensitivity.hide()
         self.controllers = QCheckBox('转发 XInput 手柄与震动')
         for widget in (self.audio, self.controllers):
             widget.setChecked(True)
@@ -78,6 +82,8 @@ class StreamOptions(QWidget):
                 widget.setCurrentIndex(max(0, widget.findData(value)))
             elif name == 'mouse_mode':
                 widget.setCurrentIndex(widget.findData(mouse_mode(value)))
+            elif name == 'mouse_sensitivity':
+                widget.setValue(sensitivity_value(value))
             elif isinstance(widget, QComboBox):
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value)))
             elif isinstance(widget, QCheckBox):

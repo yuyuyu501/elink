@@ -7,10 +7,11 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout,
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QScrollArea, QFrame,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QSystemTrayIcon, QMenu)
 
 from ..core.runtime import Runtime
 from ..core.transport import Client, HostServer
@@ -18,6 +19,8 @@ from ..models import Endpoint
 from ..network import netcheck, tailnet_ping, tailscale_path
 from ..discovery import NetworkScope, discover, machine_id
 from ..storage import atomic_json
+from ..paths import resource_dir
+from .. import startup
 from .player import Player
 from .about import AboutPage
 from .controls import StreamOptions, DeviceCard
@@ -63,6 +66,8 @@ class MainWindow(QMainWindow):
         self.discovery_pending = False
         self.busy = False
         self._closing = self._closed = False
+        self._exit_requested = False
+        self.tray = None
         self.poll_pending = False
         self.config_path = root / "desktop-v3.json"
         self.config_error = False
@@ -94,6 +99,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在准备本机连接…" if auto_host else "诊断模式")
         self.statusBar().hide()
         self.load_config()
+        self.make_tray()
+        self.startup_enabled.toggled.connect(self.change_startup)
+        self.close_to_tray.toggled.connect(lambda _: self.save_config())
+        if self.startup_enabled.isChecked():
+            self.change_startup(True)  # Refresh the path after moving a portable installation.
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_host)
         self.timer.start(1000)
@@ -170,8 +180,13 @@ class MainWindow(QMainWindow):
 
     def make_host(self):
         layout = self.page("设置", scroll=True)
-        layout.addWidget(text_label("本机连接设置", "pageTitle"))
-        layout.addWidget(text_label("画质与传输设置请在远控窗口的控制中心调整。这里仅设置本机接入方式。", "muted"))
+        layout.addWidget(text_label("常规", "sectionTitle"))
+        self.startup_enabled = QCheckBox("开机时自启动")
+        self.close_to_tray = QCheckBox("关闭时最小化到托盘")
+        layout.addWidget(self.startup_enabled)
+        layout.addWidget(self.close_to_tray)
+        layout.addSpacing(18)
+        layout.addWidget(text_label("本机连接设置", "sectionTitle"))
         self.options = StreamOptions(self)
         self.options.hide()
         for name in StreamOptions.fields:
@@ -194,6 +209,54 @@ class MainWindow(QMainWindow):
         advanced_layout.addWidget(text_label("ElinkPad 尚未签名或完成游戏验证。更改本机连接设置前需结束被控会话。", "muted"))
         layout.addWidget(self.advanced)
         layout.addStretch()
+
+    def change_startup(self, enabled):
+        try:
+            startup.set_enabled(enabled)
+        except OSError as exc:
+            self.startup_enabled.blockSignals(True)
+            self.startup_enabled.setChecked(not enabled)
+            self.startup_enabled.blockSignals(False)
+            self.report_error(f"无法修改开机自启：{exc}")
+            return
+        self.save_config()
+
+    def make_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        icon = QIcon(str(resource_dir() / 'monitor.svg'))
+        self.setWindowIcon(icon)
+        self.tray = QSystemTrayIcon(icon, self)
+        self.tray.setToolTip('Elink')
+        menu = QMenu(self)
+        menu.addAction('打开 Elink').triggered.connect(self.restore_window)
+        menu.addSeparator()
+        menu.addAction('退出 Elink').triggered.connect(self.request_exit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self.tray_activated)
+        self.tray.show()
+
+    def tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.restore_window()
+
+    def restore_window(self):
+        if self._closing:
+            return
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def show_startup(self):
+        if not self.tray or not self.tray.isVisible():
+            self.show()
+
+    def request_exit(self):
+        self._exit_requested = True
+        self.close()
 
     def make_network(self):
         self.network_dialog = QDialog(self)
@@ -532,11 +595,14 @@ class MainWindow(QMainWindow):
                 widget = getattr(self, name)
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value.get(name, 0))))
             self.options.restore({'mouse_mode': value.get('mouse_mode', 'smart'),
+                                  'mouse_sensitivity': value.get('mouse_sensitivity', 0),
                                   'resolution': value.get('stream_resolution', [1920, 1080]),
                                   'renderer': value.get('renderer', 'cpu'), 'render_scale': value.get('render_scale', 100),
                                   'upscaler': value.get('upscaler', 'rtx')})
             for name in ("audio", "controllers"):
                 getattr(self, name).setChecked(value.get(name, True))
+            self.startup_enabled.setChecked(value.get('startup_enabled') is True)
+            self.close_to_tray.setChecked(value.get('close_to_tray') is True)
         except (ValueError, TypeError, OSError, AttributeError) as exc:
             self.config_error = True
             self.report_error(f"设置文件读取失败，保留原文件：{exc}")
@@ -550,6 +616,9 @@ class MainWindow(QMainWindow):
         for name in ("fps", "decoder"):
             value[name] = getattr(self, name).currentIndex()
         value['mouse_mode'] = self.mouse_mode.currentData()
+        value['mouse_sensitivity'] = self.mouse_sensitivity.value()
+        value['startup_enabled'] = self.startup_enabled.isChecked()
+        value['close_to_tray'] = self.close_to_tray.isChecked()
         value['stream_resolution'] = self.resolution.currentData()
         value['renderer'] = self.renderer.currentData()
         value['render_scale'] = self.options.render_scale.currentData()
@@ -570,7 +639,14 @@ class MainWindow(QMainWindow):
             return
         if self._closing:
             return
+        if (self.close_to_tray.isChecked() and not self._exit_requested and not self.about.handoff_complete
+                and self.tray and self.tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable()):
+            self.save_config()
+            self.hide()
+            return
         self._closing = True
+        if self.tray:
+            self.tray.hide()
         self.about.shutdown()
         self.timer.stop()
         self.save_config()
