@@ -69,11 +69,32 @@ def screen_image(app, view):
     return image
 
 
-def verify_pixels(view, image, expected):
+SAMPLE_POINTS = ((.25, .25), (.75, .25), (.25, .75), (.75, .75))
+
+
+def stream_sample_points(expected):
+    # A moving synthetic stripe can land exactly on a quadrant boundary.
+    # Resampling blends that edge; compare flat interiors with the same strict
+    # color tolerance instead of comparing a blended pixel to a single texel.
+    height, width = expected.shape[:2]
+    points = []
+    for nx, ny in SAMPLE_POINTS:
+        for offset in (0, .03, -.03, .06, -.06):
+            x, y = int((nx + offset) * width), int(ny * height)
+            patch = expected[y - 8:y + 9, x - 8:x + 9].astype(int)
+            if np.max(patch.max(axis=(0, 1)) - patch.min(axis=(0, 1))) <= 2:
+                points.append((nx + offset, ny))
+                break
+        else:
+            raise AssertionError('Synthetic stream has no flat color sample in a quadrant')
+    return points
+
+
+def verify_pixels(view, image, expected, points=SAMPLE_POINTS):
     rect = view.rect_image
     ratio = image.width() / view.width()
     errors = []
-    for nx, ny in ((.25, .25), (.75, .25), (.25, .75), (.75, .75)):
+    for nx, ny in points:
         actual = image.pixelColor(round((rect.x() + nx * rect.width()) * ratio),
                                   round((rect.y() + ny * rect.height()) * ratio)).getRgb()[:3]
         reference = expected[int(ny * expected.shape[0]), int(nx * expected.shape[1])].astype(int)
@@ -268,10 +289,11 @@ def verify_stream(app, root, decoder, render_scale=100, upscaler='fsr'):
         surface = view.gpu_surface
         frame = surface.frame
         reference = bgr_pixels(frame)
-        verify_pixels(view, screen_image(app, view), reference[:, :, ::-1])
+        points = stream_sample_points(reference)
+        verify_pixels(view, screen_image(app, view), reference[:, :, ::-1], points)
         image = view.grab().toImage()
         rect, ratio = view.rect_image, surface.devicePixelRatioF()
-        for nx, ny in ((.25, .25), (.75, .25), (.25, .75), (.75, .75)):
+        for nx, ny in points:
             actual = image.pixelColor(round((rect.x() + nx * rect.width()) * ratio),
                                       round((rect.y() + ny * rect.height()) * ratio)).getRgb()[:3]
             expected = reference[int(ny * frame.height), int(nx * frame.width), ::-1].astype(int)
