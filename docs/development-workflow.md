@@ -32,7 +32,7 @@ git add <本次修改的具体文件>
 2. `package_windows`：重跑测试，构建 PyInstaller 便携目录，运行真实 EXE 音视频/退出自测，再用隔离副本验证目录替换、重启与配置保留，检查源码未变，最后生成 ZIP 与校验报告。
 3. `publish_release`：确认包与干净工作区、远端 main 提交一致，且对应 push 的 GitHub Windows CI 成功。先创建预览版草稿，上传并核对所有资产大小及 SHA-256，再公开发布。已发布版本不覆盖；同一提交的未完成草稿可继续上传缺失的资产。
 
-GitHub Actions 补跑 Windows 单元测试，不直接打包。构建仍在本地 Windows 桌面环境进行，需要项目 `.venv`、`pip install -e ".[dev]"` 和可用音频输出设备。发布使用 Git Credential Manager 内已有的 GitHub HTTPS 凭据，只在内存读取，不写入仓库或产物。
+GitHub Actions 补跑 Windows 单元测试并编译 D3D11 视频桥接库，不直接打包。构建仍在本地 Windows 桌面环境进行，需要项目 `.venv`、`pip install -e ".[dev]"`、Visual Studio C++ Build Tools、Windows SDK、CMake 和可用音频输出设备。RTX 实机自测还需支持的显卡和已开启的 NVIDIA 视频超分。发布使用 Git Credential Manager 内已有的 GitHub HTTPS 凭据，只在内存读取，不写入仓库或产物。
 
 ## 发布阶段失败后独立重试
 

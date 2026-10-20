@@ -150,7 +150,8 @@ def main(argv=None):
     parser.add_argument('--width', type=int, default=1920)
     parser.add_argument('--height', type=int, default=1080)
     parser.add_argument('--bitrate', type=int, default=20)
-    parser.add_argument('--render-scale', type=int, choices=(100, 75, 67), default=100)
+    parser.add_argument('--render-scale', type=int, choices=(100, 75, 67, 50), default=100)
+    parser.add_argument('--upscaler', choices=('fsr', 'rtx'), default='fsr')
     parser.add_argument('--capture-backend', choices=('auto', 'dxcam', 'gpu'), default='auto')
     parser.add_argument('--seconds', type=float, default=10)
     parser.add_argument('--warmup', type=float, default=3)
@@ -243,7 +244,8 @@ def main(argv=None):
                 visibility_timer.start(250)
 
                 def connected(_):
-                    view = Player(runtime, client, controllers=False, preferences={'renderer': args.renderer})
+                    view = Player(runtime, client, controllers=False,
+                                  preferences={'renderer': args.renderer, 'upscaler': args.upscaler})
                     state['view'] = view
                     view.setWindowTitle('Elink streaming benchmark')
                     view.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)

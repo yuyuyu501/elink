@@ -46,10 +46,14 @@ def package_fixture(tmp_path, monkeypatch):
                    gpu_test=dict(colors=[dict(native_rgb_error=2)] * 5,
                                  streams=[dict(decoder=d, native_video=True, cpu_fallback=True)
                                           for d in ('software-h264', 'D3D11VA')],
-                                 super_resolution={str(s): [dict(native_rgb_error=2)] * 5 for s in (75, 67)},
+                                 super_resolution={str(s): [dict(native_rgb_error=2)] * 5 for s in (75, 67, 50)},
                                  super_resolution_streams=[dict(render_scale=s, upscaler='FSR1-EASU-RCAS',
                                                                 native_video=True, cpu_fallback=True,
-                                                                fsr_gpu=dict(samples=20)) for s in (75, 67)],
+                                                                fsr_gpu=dict(samples=20)) for s in (75, 67, 50)],
+                                 rtx_colors=[dict(native_rgb_error=2)] * 5,
+                                 rtx_stream=dict(render_scale=50, upscaler='RTX-VSR', native_video=True,
+                                                 cpu_fallback=True, rtx_gpu=dict(samples=20), rtx_probe_mae=.5),
+                                 rtx_fallback=dict(fsr_fallback=True, native_video=True, notice=True),
                                  native_capture=[dict(width=w, height=h, format='nv12', max_rgb_error=2,
                                                       colorspace=1, decoded_colorspace=1,
                                                       color_range=2, decoded_color_range=2)
@@ -63,7 +67,8 @@ def package_fixture(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('problem', ['checksum', 'commit', 'updater', 'source', 'gpu_missing', 'gpu_black',
-                                   'fsr_missing', 'fsr_black', 'fsr_timer', 'capture_missing', 'capture_color'])
+                                   'fsr_missing', 'fsr_black', 'fsr_timer', 'capture_missing', 'capture_color',
+                                   'rtx_missing', 'rtx_fallback', 'rtx_timer', 'rtx_inactive', 'rtx_notice'])
 def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypatch, problem):
     _, receipt, archive = package_fixture(tmp_path, monkeypatch)
     if problem == 'checksum':
@@ -82,6 +87,16 @@ def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypa
         receipt['gpu_test']['super_resolution']['67'][0]['native_rgb_error'] = 240
     elif problem == 'fsr_timer':
         receipt['gpu_test']['super_resolution_streams'][0]['fsr_gpu'] = None
+    elif problem == 'rtx_missing':
+        receipt['gpu_test'].pop('rtx_colors')
+    elif problem == 'rtx_fallback':
+        receipt['gpu_test']['rtx_stream']['upscaler'] = 'FSR1-EASU-RCAS'
+    elif problem == 'rtx_timer':
+        receipt['gpu_test']['rtx_stream']['rtx_gpu'] = None
+    elif problem == 'rtx_inactive':
+        receipt['gpu_test']['rtx_stream']['rtx_probe_mae'] = 0
+    elif problem == 'rtx_notice':
+        receipt['gpu_test']['rtx_fallback']['notice'] = False
     elif problem == 'capture_missing':
         receipt['gpu_test'].pop('native_capture')
     elif problem == 'capture_color':

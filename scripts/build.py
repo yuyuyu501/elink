@@ -13,6 +13,8 @@ from elink.processes import native_environment
 def main():
     project = Path(__file__).resolve().parent.parent
     build_env = native_environment()
+    from scripts.build_video import build
+    video_library = build()
     windows = Path(os.environ["SystemRoot"])
     # Developer toolchains can carry incompatible copies of Windows' ICU/UCRT DLLs.
     # Only expose the Python environment and Windows system directories to collection.
@@ -25,6 +27,7 @@ def main():
                     "--exclude-module", "comtypes.test", "--exclude-module", "pytest",
                     "main.py"], cwd=project, env=build_env, check=True)
     output = project / "dist" / "Elink"
+    shutil.copy2(video_library, output / 'elink_video.dll')
     for name in ("README.md", "THIRD_PARTY_NOTICES.md"):
         shutil.copy2(project / name, output / name)
     shutil.copytree(project / "docs", output / "docs", dirs_exist_ok=True)

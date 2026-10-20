@@ -1,5 +1,5 @@
 """Separate presentation dimensions from the encoded pixel dimensions."""
-RATIOS = {100: (1, 1), 75: (3, 4), 67: (2, 3)}
+RATIOS = {100: (1, 1), 75: (3, 4), 67: (2, 3), 50: (1, 2)}
 
 
 def encoding_size(config):

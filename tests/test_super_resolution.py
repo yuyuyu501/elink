@@ -12,7 +12,8 @@ from elink.models import ValidationError
 @pytest.mark.parametrize('size,scale,expected', [
     ((1920, 1080), 67, (1280, 720)), ((3840, 2160), 67, (2560, 1440)),
     ((1920, 1080), 75, (1440, 810)), ((2560, 1440), 67, (1706, 960)),
-    ((3840, 2160), 100, (3840, 2160))])
+    ((3840, 2160), 100, (3840, 2160)), ((1920, 1080), 50, (960, 540)),
+    ((3840, 2160), 50, (1920, 1080))])
 def test_encoded_size_and_codec_budget(size, scale, expected):
     config = settings(dict(width=size[0], height=size[1], render_scale=scale))
     assert encoding_size(config) == expected
@@ -27,7 +28,7 @@ def test_validation_uses_encoded_macroblocks_without_silently_changing_fps():
             settings(dict(render_scale=scale))
 
 
-@pytest.mark.parametrize('scale,size', [(75, (1440, 810)), (67, (1280, 720))])
+@pytest.mark.parametrize('scale,size', [(75, (1440, 810)), (67, (1280, 720)), (50, (960, 540))])
 def test_scaled_pixels_really_cross_webrtc_without_changing_output_dimensions(tmp_path, scale, size):
     async def run():
         host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput)
@@ -72,13 +73,16 @@ def test_preferences_keep_scale_and_renderer_consistent():
     from elink.ui.controls import StreamOptions
     app = QApplication.instance() or QApplication([])
     options = StreamOptions()
-    options.render_scale.setCurrentIndex(options.render_scale.findData(67))
+    options.render_scale.setCurrentIndex(options.render_scale.findData(50))
+    options.upscaler.setCurrentIndex(options.upscaler.findData('fsr'))
     assert options.renderer.currentData() == 'gpu'
     restored = StreamOptions()
     restored.restore(options.values())
-    assert restored.render_scale.currentData() == 67 and restored.renderer.currentData() == 'gpu'
+    assert restored.render_scale.currentData() == 50 and restored.renderer.currentData() == 'gpu'
+    assert restored.upscaler.currentData() == 'fsr' and restored.upscaler.isEnabled()
     restored.renderer.setCurrentIndex(restored.renderer.findData('cpu'))
     assert restored.render_scale.currentData() == 100
+    assert not restored.upscaler.isEnabled()
     options.deleteLater()
     restored.deleteLater()
     app.processEvents()

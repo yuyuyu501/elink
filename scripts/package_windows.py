@@ -39,15 +39,23 @@ def validate_gpu_test(report):
     streams = report.get('streams', [])
     scaled_streams = report.get('super_resolution_streams', [])
     capture = report.get('native_capture', [])
+    rtx = report.get('rtx_stream', {})
     if (not colors_ok(colors)
             or {s.get('decoder') for s in streams} != {'software-h264', 'D3D11VA'}
             or any(s.get('native_video') is not True or s.get('cpu_fallback') is not True for s in streams)
-            or any(not colors_ok(report.get('super_resolution', {}).get(str(scale), [])) for scale in (75, 67))
-            or {s.get('render_scale') for s in scaled_streams} != {75, 67}
+            or any(not colors_ok(report.get('super_resolution', {}).get(str(scale), [])) for scale in (75, 67, 50))
+            or {s.get('render_scale') for s in scaled_streams} != {75, 67, 50}
             or any(s.get('upscaler') != 'FSR1-EASU-RCAS' or s.get('native_video') is not True
                    or s.get('cpu_fallback') is not True or not isinstance(s.get('fsr_gpu'), dict)
                    or s['fsr_gpu'].get('samples', 0) <= 0
                    for s in scaled_streams)
+            or not colors_ok(report.get('rtx_colors', []))
+            or rtx.get('render_scale') != 50 or rtx.get('upscaler') != 'RTX-VSR'
+            or rtx.get('native_video') is not True or rtx.get('cpu_fallback') is not True
+            or not isinstance(rtx.get('rtx_probe_mae'), (int, float)) or not rtx['rtx_probe_mae'] >= .01
+            or not isinstance(rtx.get('rtx_gpu'), dict) or rtx['rtx_gpu'].get('samples', 0) <= 0
+            or any(report.get('rtx_fallback', {}).get(key) is not True
+                   for key in ('fsr_fallback', 'native_video', 'notice'))
             or {(s.get('width'), s.get('height')) for s in capture} != {(1920, 1080), (1440, 810), (1280, 720)}
             or any(s.get('format') != 'nv12' or not isinstance(s.get('max_rgb_error'), (int, float))
                    or not 0 <= s['max_rgb_error'] <= 6

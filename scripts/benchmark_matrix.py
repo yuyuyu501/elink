@@ -47,7 +47,8 @@ def main(argv=None):
     parser.add_argument('--warmup', type=float, default=3)
     parser.add_argument('--bitrate', type=int, default=20)
     parser.add_argument('--source', choices=('motion', 'desktop'), default='motion')
-    parser.add_argument('--render-scale', type=int, choices=(100, 75, 67), default=100)
+    parser.add_argument('--render-scale', type=int, choices=(100, 75, 67, 50), default=100)
+    parser.add_argument('--upscaler', choices=('fsr', 'rtx'), default='fsr')
     parser.add_argument('--capture-backend', choices=('auto', 'dxcam', 'gpu'), default='auto')
     parser.add_argument('--output', type=Path, default=Path('.artifacts/fps-matrix'))
     args = parser.parse_args(argv)
@@ -70,7 +71,8 @@ def main(argv=None):
                        '--source', args.source,
                        '--width', str(case['width']), '--height', str(case['height']),
                        '--fps', str(case['fps']), '--bitrate', str(args.bitrate),
-                       '--render-scale', str(args.render_scale), '--capture-backend', args.capture_backend,
+                       '--render-scale', str(args.render_scale), '--upscaler', args.upscaler,
+                       '--capture-backend', args.capture_backend,
                        '--seconds', str(args.seconds), '--warmup', str(args.warmup), '--output', str(report)]
             print('START ' + stem, flush=True)
             # The child owns its host cleanup. No timeout that kills just the

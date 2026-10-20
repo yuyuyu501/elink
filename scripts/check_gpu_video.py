@@ -34,12 +34,13 @@ class Runtime(QObject):
         fn(*args)
 
 
-def player(app, mode, *, statistics=True, render_scale=100):
+def player(app, mode, *, statistics=True, render_scale=100, upscaler='fsr'):
     client = SimpleNamespace(profile=PipelineProfile(), pc=None, mailbox=FrameMailbox(), rtt_ms=0,
                              last_pong=0, focus=lambda _: None, set_renderer=lambda _: None,
                              send=lambda _: None)
     view = Player(Runtime(), client, controllers=False,
-                  preferences={'renderer': mode, 'render_scale': render_scale, 'resolution': [960, 540]})
+                  preferences={'renderer': mode, 'render_scale': render_scale, 'upscaler': upscaler,
+                               'resolution': [960, 540]})
     view.timer.stop()
     view.show_statistics = statistics
     prepare_visible(view)
@@ -89,8 +90,8 @@ def settle(app, seconds=.1):
         time.sleep(.001)
 
 
-def verify_colors(app, render_scale=100):
-    view = player(app, 'gpu', render_scale=render_scale)
+def verify_colors(app, render_scale=100, upscaler='fsr'):
+    view = player(app, 'gpu', render_scale=render_scale, upscaler=upscaler)
     results = []
     try:
         for fmt, space, full in [('yuv420p', 5, False), ('nv12', 5, False),
@@ -117,8 +118,11 @@ def verify_colors(app, render_scale=100):
                 settle(app, .03)
             if surface.broken or not surface.isValid() or view.gpu_surface is None:
                 raise RuntimeError('GPU renderer unavailable: ' + view.error_label.text())
-            if render_scale != 100 and surface.fsr is None:
-                raise AssertionError('FSR was requested but is not active')
+            if render_scale != 100 and surface.upscaler is None:
+                raise AssertionError('Super resolution was requested but is not active')
+            actual_upscaler = view.client.profile.snapshot()['metadata'].get('upscaler', 'native')
+            if render_scale != 100 and actual_upscaler != ('RTX-VSR' if upscaler == 'rtx' else 'FSR1-EASU-RCAS'):
+                raise AssertionError('Requested upscaler fell back: ' + view.error_label.text())
             expected = frame.to_ndarray(format='rgb24', src_colorspace='ITU709' if space == 1 else 'ITU601',
                                         dst_colorspace='ITU601', src_color_range=2 if full else 1)
             # Read native output BEFORE grab(): QWidget.grab renders internally
@@ -127,7 +131,7 @@ def verify_colors(app, render_scale=100):
             error = verify_pixels(view, view.grab().toImage(), expected)
             results.append(dict(format=fmt, colorspace=space, full_range=full,
                                 max_rgb_error=error, native_rgb_error=native_error,
-                                upscaler='FSR1-EASU-RCAS' if surface.fsr else 'native'))
+                                upscaler=actual_upscaler))
         # Resource reconstruction when moving between a window and fullscreen.
         view.toggle_fullscreen()
         settle(app)
@@ -225,7 +229,7 @@ def benchmark(app, mode, frames, width, height):
         app.processEvents()
 
 
-def verify_stream(app, root, decoder, render_scale=100):
+def verify_stream(app, root, decoder, render_scale=100, upscaler='fsr'):
     """Real H.264/WebRTC/GUI handoff using only local synthetic video."""
     from elink.core.runtime import Runtime as NetworkRuntime
     from elink.core.transport import Client, HostServer
@@ -248,7 +252,7 @@ def verify_stream(app, root, decoder, render_scale=100):
 
     try:
         runtime.submit(connect()).result(25)
-        view = Player(runtime, client, controllers=False, preferences={'renderer': 'gpu'})
+        view = Player(runtime, client, controllers=False, preferences={'renderer': 'gpu', 'upscaler': upscaler})
         prepare_visible(view)
         view.show()
         deadline = time.perf_counter() + 12
@@ -291,7 +295,9 @@ def verify_stream(app, root, decoder, render_scale=100):
             raise AssertionError('Fallback left an overlay over the CPU video or hid its notice')
         return dict(decoder=metadata['decoder'], pixel_format=frame.format.name,
                     composed_video=True, native_video=True, cpu_fallback=True, render_scale=render_scale,
-                    upscaler=metadata.get('upscaler', 'native'), fsr_gpu=client.profile.snapshot()['stages'].get('fsr_gpu'))
+                    upscaler=metadata.get('upscaler', 'native'), fsr_gpu=client.profile.snapshot()['stages'].get('fsr_gpu'),
+                    rtx_gpu=client.profile.snapshot()['stages'].get('rtx_gpu'),
+                    rtx_probe_mae=metadata.get('rtx_probe_mae'))
     finally:
         if view:
             view.close()
@@ -301,6 +307,32 @@ def verify_stream(app, root, decoder, render_scale=100):
             runtime.submit(close()).result(15)
         finally:
             runtime.stop()
+
+
+def verify_rtx_fallback(app):
+    """An inactive driver must retain GPU video via FSR and explain the fallback."""
+    from unittest.mock import patch
+    from elink.ui import rtx_video
+
+    with patch.object(rtx_video, 'RtxProcessor', side_effect=RuntimeError('injected inactive RTX driver')):
+        view = player(app, 'gpu', render_scale=50, upscaler='rtx')
+        try:
+            rgb = np.full((270, 480, 3), 128, dtype=np.uint8)
+            frame = av.VideoFrame.from_ndarray(rgb, format='rgb24').reformat(format='nv12')
+            view.client.mailbox.put(frame)
+            settle(app)
+            metadata = view.client.profile.snapshot()['metadata']
+            if (view.gpu_surface is None or view.gpu_surface.broken
+                    or metadata.get('upscaler') != 'FSR1-EASU-RCAS'
+                    or 'inactive RTX driver' not in metadata.get('upscaler_fallback', '')
+                    or not view.error_label.isVisible()):
+                raise AssertionError('Inactive RTX driver did not fall back to FSR with a notice')
+            verify_pixels(view, screen_image(app, view), frame.to_ndarray(format='rgb24'))
+            return dict(fsr_fallback=True, native_video=True, notice=True)
+        finally:
+            view.close()
+            view.deleteLater()
+            app.processEvents()
 
 
 def main(argv=None):
@@ -317,7 +349,9 @@ def main(argv=None):
     apply_theme(app)
     result = dict(colors=verify_colors(app), benchmarks=[benchmark(app, mode, args.frames, 1920, 1080)
                                                       for mode in ('cpu', 'gpu')],
-                  super_resolution={str(scale): verify_colors(app, scale) for scale in (75, 67)},
+                  super_resolution={str(scale): verify_colors(app, scale) for scale in (75, 67, 50)},
+                  rtx_colors=verify_colors(app, 50, 'rtx'),
+                  rtx_fallback=verify_rtx_fallback(app),
                   limitations='Synthetic CPU submission benchmark, not game FPS, GPU time or input-to-photon latency.')
     if args.stream_check:
         from scripts.check_gpu_capture import verify as verify_capture
@@ -327,7 +361,8 @@ def main(argv=None):
             result['streams'] = [verify_stream(app, Path(temp) / decoder, decoder)
                                  for decoder in ('software', 'hardware')]
             result['super_resolution_streams'] = [verify_stream(app, Path(temp) / str(scale), 'hardware', scale)
-                                                   for scale in (75, 67)]
+                                                   for scale in (75, 67, 50)]
+            result['rtx_stream'] = verify_stream(app, Path(temp) / 'rtx', 'hardware', 50, 'rtx')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(json.dumps(result, indent=2))

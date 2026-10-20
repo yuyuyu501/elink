@@ -500,7 +500,7 @@ class Client:
                 raise ValidationError("主机不支持自动连接，请将两端更新至 0.4.2 或更高版本。")
             if config['render_scale'] != 100:
                 if self.renderer != 'gpu':
-                    raise ValidationError('FSR 超分需要 GPU 纹理显示。')
+                    raise ValidationError('超分需要 GPU 纹理显示。')
                 if 'spatial-upscale-v1' not in info.get('features', []):
                     raise ValidationError('主机不支持超分采样，请更新被控端或选择原生 100%。')
             self.performance_supported = "performance-v1" in info.get("features", [])

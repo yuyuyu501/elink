@@ -91,7 +91,7 @@ class YuvSurface(QOpenGLWidget):
         self.program = self.vbo = self.vao = None
         self.textures = []
         self.layout_key = None
-        self.fsr = None
+        self.upscaler = None
         self.setFormat(fmt)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -130,9 +130,13 @@ class YuvSurface(QOpenGLWidget):
             profile = getattr(self.player.client, 'profile', None)
             metadata = profile.snapshot()['metadata'] if profile else {}
             if self.player.preferences.get('render_scale', metadata.get('render_scale', 100)) != 100:
-                from .super_resolution import FsrUpscaler
                 size = self.player.preferences.get('resolution') or [metadata['output_width'], metadata['output_height']]
-                self.fsr = FsrUpscaler(self, size)
+                if self.player.preferences.get('upscaler', 'rtx') == 'rtx':
+                    from .rtx_video import RtxUpscaler
+                    self.upscaler = RtxUpscaler(self, size)
+                else:
+                    from .super_resolution import FsrUpscaler
+                    self.upscaler = FsrUpscaler(self, size)
         except Exception as exc:
             self.fail(exc)
 
@@ -189,12 +193,13 @@ class YuvSurface(QOpenGLWidget):
             gl.glClear(0x4000)
             if self.frame is not None:
                 viewport = self.player.video_viewport()
-                output = self.fsr.output_size if self.fsr else (self.frame.width, self.frame.height)
+                output = self.upscaler.output_size if self.upscaler else (self.frame.width, self.frame.height)
                 size = QSize(*output).scaled(viewport.size(), Qt.AspectRatioMode.KeepAspectRatio)
                 rect = QRect((self.width() - size.width()) // 2,
                              viewport.top() + (viewport.height() - size.height()) // 2, size.width(), size.height())
                 self.player.rect_image = rect
-                if self.pending:
+                from .rtx_video import RtxUpscaler
+                if self.pending and not isinstance(self.upscaler, RtxUpscaler):
                     upload_at = time.perf_counter()
                     self.upload()
                     error = gl.glGetError()
@@ -205,8 +210,22 @@ class YuvSurface(QOpenGLWidget):
                 ratio = self.devicePixelRatioF()
                 target = (round(rect.x() * ratio), round((self.height() - rect.y() - rect.height()) * ratio),
                           round(rect.width() * ratio), round(rect.height() * ratio))
-                if self.fsr:
-                    self.fsr.render(target, profile, self.pending)
+                if self.upscaler:
+                    try:
+                        self.upscaler.render(target, profile, self.pending)
+                    except Exception as exc:
+                        if not isinstance(self.upscaler, RtxUpscaler):
+                            raise
+                        size = self.upscaler.output_size
+                        self.upscaler.cleanup()
+                        self.upscaler = None
+                        from .super_resolution import FsrUpscaler
+                        self.upscaler = FsrUpscaler(self, size)
+                        self.upload()
+                        self.upscaler.render(target, profile, True)
+                        if profile:
+                            profile.describe(upscaler_fallback=str(exc)[:240])
+                        self.player.show_error('RTX VSR 不可用，已回退 FSR 1：' + str(exc)[:160])
                 else:
                     gl.glViewport(*target)
                     self.draw_video()
@@ -255,9 +274,9 @@ class YuvSurface(QOpenGLWidget):
         if self.context() is None:
             return
         self.makeCurrent()
-        if self.fsr:
-            self.fsr.cleanup()
-            self.fsr = None
+        if self.upscaler:
+            self.upscaler.cleanup()
+            self.upscaler = None
         for texture in self.textures:
             texture.destroy()
         self.textures = []

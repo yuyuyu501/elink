@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(elink_video LANGUAGES CXX)
+add_library(elink_video SHARED rtx_video.cpp)
+target_compile_features(elink_video PRIVATE cxx_std_17)
+target_compile_definitions(elink_video PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+set_property(TARGET elink_video PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+target_compile_options(elink_video PRIVATE /W4 /EHsc /O2)
+target_link_libraries(elink_video PRIVATE d3d11 dxgi opengl32)

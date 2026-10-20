@@ -537,7 +537,8 @@ class MainWindow(QMainWindow):
                 widget.setCurrentIndex(max(0, min(widget.count() - 1, value.get(name, 0))))
             self.options.restore({'mouse_mode': value.get('mouse_mode', 'smart'),
                                   'resolution': value.get('stream_resolution', [1920, 1080]),
-                                  'renderer': value.get('renderer', 'cpu'), 'render_scale': value.get('render_scale', 100)})
+                                  'renderer': value.get('renderer', 'cpu'), 'render_scale': value.get('render_scale', 100),
+                                  'upscaler': value.get('upscaler', 'rtx')})
             for name in ("audio", "controllers"):
                 getattr(self, name).setChecked(value.get(name, True))
         except (ValueError, TypeError, OSError, AttributeError) as exc:
@@ -556,6 +557,7 @@ class MainWindow(QMainWindow):
         value['stream_resolution'] = self.resolution.currentData()
         value['renderer'] = self.renderer.currentData()
         value['render_scale'] = self.options.render_scale.currentData()
+        value['upscaler'] = self.options.upscaler.currentData()
         for name in ("audio", "controllers"):
             value[name] = getattr(self, name).isChecked()
         try:
