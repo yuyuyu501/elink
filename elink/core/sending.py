@@ -61,6 +61,16 @@ def install_video_pipeline(sender, profile, budget=None):
     sender._next_encoded_frame = pipeline.get
     sender._run_rtp = run
     sender._elink_encode_ahead = pipeline
+    original_stop = getattr(sender, 'stop', None)
+    if original_stop is not None:
+        async def stop():
+            try:
+                await original_stop()
+            finally:
+                # aiortc signals RTP exit before our run() finally completes.
+                # Keep pc.close() from returning with prefetch cleanup pending.
+                await pipeline.close()
+        sender.stop = stop
     if budget is not None:
         from aiortc.rtp import RtcpRrPacket, RtcpSrPacket, RtcpPsfbPacket
         original_feedback = sender._handle_rtcp_packet

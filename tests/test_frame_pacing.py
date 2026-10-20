@@ -167,6 +167,29 @@ def test_sender_adapter_cleans_prefetch_on_transport_failure_and_skips_audio():
     asyncio.run(run())
 
 
+def test_sender_stop_waits_for_prefetch_cleanup_after_rtp_exit():
+    async def run():
+        calls = []
+        pending = asyncio.Event()
+        async def encode(codec):
+            calls.append(codec)
+            if len(calls) > 1:
+                await pending.wait()
+            return object()
+        async def finished(*args):
+            return
+        sender = SimpleNamespace(kind='video', _next_encoded_frame=encode, _run_rtp=finished, stop=finished)
+        install_video_pipeline(sender, PipelineProfile())
+        await sender._next_encoded_frame('h264')
+        await asyncio.sleep(0)
+        task = sender._elink_encode_ahead.task
+        assert task is not None and not task.done()
+        await sender.stop()
+        assert sender._elink_encode_ahead.closed and sender._elink_encode_ahead.task is None
+        assert task.done()
+    asyncio.run(run())
+
+
 def test_frame_mailbox_coalesces_notifications_and_detaches():
     from elink.core.media import FrameMailbox
     from concurrent.futures import ThreadPoolExecutor
