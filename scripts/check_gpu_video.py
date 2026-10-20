@@ -413,7 +413,6 @@ def verify_live_settings(app, root):
                  ([1920, 1080], 60, 'hardware', 'gpu', 100, 'rtx', True),
                  ([1280, 720], 30, 'software', 'cpu', 100, 'fsr', False)]
         for size, fps, decoder, renderer, scale, upscaler, audio in cases:
-            print(f'Live settings: {size}, {fps} FPS, {decoder}, {renderer}, {scale}%, {upscaler}', flush=True)
             view.open_quality()
             dialog = view.settings_dialog
             options = dialog.findChild(StreamOptions)
@@ -425,11 +424,13 @@ def verify_live_settings(app, root):
             options.upscaler.setCurrentIndex(options.upscaler.findData(upscaler))
             options.audio.setChecked(audio)
             options.bitrate.setValue(12)
-            count = client.profile.snapshot()['counters'].get('presented_frames', 0)
             dialog.apply_button.click()
             wait(lambda: not view.quality_applying)
             if view.settings_dialog:
                 raise AssertionError('Live application failed: ' + dialog.note.text())
+            # Frames displayed while the HTTP request was pending still use
+            # the previous renderer. Count only after application completes.
+            count = client.profile.snapshot()['counters'].get('presented_frames', 0)
             wait(lambda: client.profile.snapshot()['counters'].get('presented_frames', 0) > count + 15)
             if renderer == 'gpu' and view.gpu_surface is None:
                 raise AssertionError('Live GPU switch fell back: ' + view.error_label.text())
@@ -454,7 +455,7 @@ def verify_live_settings(app, root):
                 client.mailbox.set_notifier(view.frame_ready.emit)
             if renderer == 'gpu' and scale != 100:
                 algorithm = client.profile.snapshot()['metadata'].get('upscaler')
-                assert algorithm == ('RTX-VSR' if upscaler == 'rtx' else 'FSR1-EASU-RCAS'), algorithm
+                assert algorithm == ('RTX-VSR' if upscaler == 'rtx' else 'FSR1-EASU-RCAS'), (algorithm, view.error_label.text())
             from elink.core.scaling import encoding_size
             assert (width, height) == encoding_size(client.config)
             results.append(dict(resolution=size, fps=fps, decoder=decoder, renderer=renderer,
