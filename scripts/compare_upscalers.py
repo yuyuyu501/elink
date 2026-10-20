@@ -10,15 +10,16 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import av
-from av.codec.hwaccel import HWAccel
 import cv2
 import numpy as np
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication
 
-from elink.core.codecs import CodecPolicy, make_encoder
+from elink.core.codecs import CodecPolicy, DesktopDecoder, make_encoder
+from elink.core.media import bgr_pixels
 from elink.ui.rtx_video import RtxProcessor
 from scripts.check_gpu_video import player, settle
 
@@ -76,13 +77,13 @@ def compressed_frame(rgb, scale, fps, bitrate):
     source.colorspace, source.color_range = 1, 1
     codec = make_encoder('h264_nvenc', width, height, CodecPolicy(fps=fps, bitrate=bitrate*1_000_000),
                          colorspace=1, color_range=1)
-    decoder = av.CodecContext.create('h264', 'r', hwaccel=HWAccel('d3d11va', allow_software_fallback=False))
+    decoder = DesktopDecoder(CodecPolicy(decoder='hardware'))
     decoded = None
     # Compare a settled inter-frame stream, rather than differently budgeted IDRs.
     for index in range(30):
         source.pts, source.time_base = index*90000//fps, fractions.Fraction(1,90000)
         for packet in codec.encode(source):
-            for decoded in decoder.decode(packet):
+            for decoded in decoder.decode(SimpleNamespace(data=bytes(packet), timestamp=source.pts)):
                 pass
     if decoded is None:
         raise RuntimeError('NVENC/D3D11VA did not produce a comparison frame')
@@ -125,7 +126,7 @@ def render(app, frame, upscaler, scale):
             raise RuntimeError('Comparison upscaler fell back: '+view.error_label.text())
         surface.makeCurrent()
         if scale==100:
-            result = frame.to_ndarray(format='rgb24')
+            result = bgr_pixels(frame)[:, :, ::-1].copy()
         elif upscaler=='fsr':
             result = pixels(surface.upscaler.buffers[2].toImage())
         surface.doneCurrent()

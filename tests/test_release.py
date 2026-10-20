@@ -6,6 +6,7 @@ import pytest
 
 from scripts import publish_release as publisher
 from scripts import release_windows as workflow
+from scripts.check_decoder_colors import CASES as DECODER_COLOR_CASES
 
 
 @pytest.mark.parametrize('failure', ['sync', 'package', None])
@@ -44,6 +45,13 @@ def package_fixture(tmp_path, monkeypatch):
     receipt = dict(version=publisher.__version__, source_dirty=False, commit='abc', source_sha256={'source': 'hash'},
                    self_test=dict(ok=True, runtime_stopped=True, audio_frames=10, video_frames=90),
                    gpu_test=dict(colors=[dict(native_rgb_error=2)] * 5,
+                                 decoder_colors=[dict(width=w, height=h, colorspace=space, color_range=color_range,
+                                                      input_format=fmt, hardware_format='nv12',
+                                                      software_colorspace=space, hardware_colorspace=space,
+                                                      software_color_range=color_range, hardware_color_range=color_range,
+                                                      software_rgb_error=2, hardware_rgb_error=2,
+                                                      decoder_rgb_difference=0, native_rgb_error=2, composed_rgb_error=2)
+                                                 for w, h, space, color_range, fmt in DECODER_COLOR_CASES],
                                  streams=[dict(decoder=d, native_video=True, cpu_fallback=True)
                                           for d in ('software-h264', 'D3D11VA')],
                                  super_resolution={str(s): [dict(native_rgb_error=2)] * 5 for s in (75, 67, 50)},
@@ -68,7 +76,8 @@ def package_fixture(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('problem', ['checksum', 'commit', 'updater', 'source', 'gpu_missing', 'gpu_black',
                                    'fsr_missing', 'fsr_black', 'fsr_timer', 'capture_missing', 'capture_color',
-                                   'rtx_missing', 'rtx_fallback', 'rtx_timer', 'rtx_inactive', 'rtx_notice'])
+                                   'rtx_missing', 'rtx_fallback', 'rtx_timer', 'rtx_inactive', 'rtx_notice',
+                                   'decoder_colors_missing', 'decoder_clipped', 'decoder_range', 'decoder_native'])
 def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypatch, problem):
     _, receipt, archive = package_fixture(tmp_path, monkeypatch)
     if problem == 'checksum':
@@ -101,6 +110,14 @@ def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypa
         receipt['gpu_test'].pop('native_capture')
     elif problem == 'capture_color':
         receipt['gpu_test']['native_capture'][0]['decoded_colorspace'] = 5
+    elif problem == 'decoder_colors_missing':
+        receipt['gpu_test'].pop('decoder_colors')
+    elif problem == 'decoder_clipped':
+        receipt['gpu_test']['decoder_colors'][0]['hardware_rgb_error'] = 18
+    elif problem == 'decoder_range':
+        receipt['gpu_test']['decoder_colors'][0]['hardware_color_range'] = 0
+    elif problem == 'decoder_native':
+        receipt['gpu_test']['decoder_colors'][0]['native_rgb_error'] = 18
     else:
         receipt['source_sha256'] = {}
     (tmp_path / 'verification.json').write_text(json.dumps(receipt), encoding='utf-8')

@@ -14,6 +14,7 @@ import tomllib
 from elink import __version__
 from elink.processes import native_environment
 from scripts.test_portable_update import verify_portable_update
+from scripts.check_decoder_colors import CASES as DECODER_COLOR_CASES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,6 +41,20 @@ def validate_gpu_test(report):
     scaled_streams = report.get('super_resolution_streams', [])
     capture = report.get('native_capture', [])
     rtx = report.get('rtx_stream', {})
+    decoded_colors = report.get('decoder_colors', [])
+    if ({(c.get('width'), c.get('height'), c.get('colorspace'), c.get('color_range'), c.get('input_format'))
+         for c in decoded_colors} != DECODER_COLOR_CASES
+            or any(c.get('hardware_format') != 'nv12'
+                   or c.get('software_colorspace') != c.get('colorspace')
+                   or c.get('hardware_colorspace') != c.get('colorspace')
+                   or c.get('software_color_range') != c.get('color_range')
+                   or c.get('hardware_color_range') != c.get('color_range')
+                   or any(not isinstance(c.get(key), (int, float)) or not 0 <= c[key] <= limit
+                          for key, limit in (('software_rgb_error', 6), ('hardware_rgb_error', 6),
+                                             ('decoder_rgb_difference', 3), ('native_rgb_error', 5),
+                                             ('composed_rgb_error', 5)))
+                   for c in decoded_colors)):
+        raise RuntimeError('Packaged software/D3D11VA color parity checks have not passed.')
     if (not colors_ok(colors)
             or {s.get('decoder') for s in streams} != {'software-h264', 'D3D11VA'}
             or any(s.get('native_video') is not True or s.get('cpu_fallback') is not True for s in streams)

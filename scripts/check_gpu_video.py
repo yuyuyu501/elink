@@ -357,6 +357,26 @@ def verify_rtx_fallback(app):
             app.processEvents()
 
 
+def verify_decoder_colors(app):
+    from scripts.check_decoder_colors import POINTS, verify
+
+    view = player(app, 'gpu', statistics=False)
+    try:
+        def present(frame, reference):
+            view.client.mailbox.put(frame)
+            settle(app, .03)
+            if view.gpu_surface is None or view.gpu_surface.broken:
+                raise AssertionError('Decoded color check lost its GPU renderer: ' + view.error_label.text())
+            native_error = verify_pixels(view, screen_image(app, view), reference, POINTS)
+            composed_error = verify_pixels(view, view.grab().toImage(), reference, POINTS)
+            return dict(native_rgb_error=native_error, composed_rgb_error=composed_error)
+        return verify(present)
+    finally:
+        view.close()
+        view.deleteLater()
+        app.processEvents()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=Path('.artifacts/gpu-video-check.json'))
@@ -378,6 +398,7 @@ def main(argv=None):
     if args.stream_check:
         from scripts.check_gpu_capture import verify as verify_capture
         result['native_capture'] = verify_capture(app)
+        result['decoder_colors'] = verify_decoder_colors(app)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='gpu-stream-', dir=args.output.parent) as temp:
             result['streams'] = [verify_stream(app, Path(temp) / decoder, decoder)

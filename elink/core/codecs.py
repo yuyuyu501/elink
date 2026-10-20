@@ -205,11 +205,24 @@ class DesktopDecoder(H264Decoder):
                     return []
             else:
                 return []
+        if self.hardware:
+            # PyAV's hardware download copies pixels/PTS but can drop color
+            # properties. Restore missing H.264 VUI metadata from the decoder;
+            # otherwise full-range NV12 is expanded as limited-range video.
+            for frame in frames:
+                if int(frame.colorspace) == 2 and int(self.codec.colorspace) != 2:
+                    frame.colorspace = self.codec.colorspace
+                if int(frame.color_range) == 0 and int(self.codec.color_range) in (1, 2):
+                    frame.color_range = self.codec.color_range
         metrics.update(decoder="D3D11VA" if self.hardware else "软件 H.264",
                        decode_ms=(time.perf_counter() - started) * 1000, decoded=metrics["decoded"] + len(frames))
         if profile:
             profile.elapsed('decode', started)
             profile.describe(decoder='D3D11VA' if self.hardware else 'software-h264')
+            if frames:
+                profile.describe(decoder_colorspace=int(frames[-1].colorspace),
+                                 decoder_color_range=int(frames[-1].color_range),
+                                 decoder_pixel_format=frames[-1].format.name)
             for frame in frames:
                 frame.opaque = {'profile': profile, 'decoded_at': time.perf_counter()}
                 profile.count('decoded_frames')
