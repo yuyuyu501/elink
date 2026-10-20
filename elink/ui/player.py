@@ -25,6 +25,20 @@ _DIRECTION_KEYS = {
 }
 
 
+class QualityDialog(QDialog):
+    applying = False
+
+    def reject(self):
+        if not self.applying:
+            super().reject()
+
+    def closeEvent(self, event):
+        if self.applying:
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+
 def remote_key_event(event, down):
     """Convert Qt's key event into a stable Windows keyboard identity.
 
@@ -68,9 +82,11 @@ class Player(QWidget):
         self.muted = False
         self.control_menu = None
         self.settings_dialog = None
+        self.quality_applying = False
         self.captured = False
         self.gpu_surface = None
         self.gpu_overlay = None
+        self.renderer_widgets = None
         self.frame_taken_at = None
         self.image = None
         # QImage wraps this buffer without copying. Keep the numpy owner alive
@@ -113,12 +129,21 @@ class Player(QWidget):
             return
         try:
             from .gpu_video import VideoOverlay, YuvSurface
-            self.gpu_surface = YuvSurface(self)
-            self.gpu_surface.failed.connect(lambda message: QTimer.singleShot(0, lambda: self.fallback_renderer(message)))
+            if self.renderer_widgets:
+                self.gpu_surface, self.gpu_overlay = self.renderer_widgets
+                self.gpu_surface.reconfigure()
+            else:
+                self.gpu_surface = YuvSurface(self)
+                self.gpu_overlay = VideoOverlay(self)
+                self.renderer_widgets = self.gpu_surface, self.gpu_overlay
+            surface = self.gpu_surface
+            if not getattr(surface, 'failure_connected', False):
+                surface.failed.connect(lambda message: QTimer.singleShot(
+                    0, lambda: self.fallback_renderer(message) if self.gpu_surface is surface else None))
+                surface.failure_connected = True
             self.gpu_surface.setGeometry(self.rect())
             self.gpu_surface.lower()
             self.gpu_surface.show()
-            self.gpu_overlay = VideoOverlay(self)
             self.gpu_overlay.setGeometry(self.rect())
             self.gpu_overlay.stackUnder(self.toolbar)
             self.gpu_overlay.show()
@@ -135,21 +160,56 @@ class Player(QWidget):
     def fallback_renderer(self, reason):
         if self._closed:
             return
-        surface, self.gpu_surface = self.gpu_surface, None
-        overlay, self.gpu_overlay = self.gpu_overlay, None
-        if overlay:
-            overlay.hide()
-            overlay.deleteLater()
-        if surface:
-            surface.hide()
-            surface.cleanup()
-            surface.deleteLater()
+        self.clear_renderer()
         if hasattr(self.client, 'set_renderer'):
             self.runtime.call(self.client.set_renderer, 'cpu')
         if hasattr(self.client, 'profile'):
             self.client.profile.describe(renderer='qimage-bgr', renderer_fallback=str(reason)[:240])
         self.show_error('已回退兼容显示：' + str(reason)[:180])
         self.refresh_video()
+
+    def clear_renderer(self):
+        # Removing/replacing the last QOpenGLWidget can invalidate Qt's window
+        # compositor. Keep one context for the entire Player lifetime.
+        surface, self.gpu_surface = self.gpu_surface, None
+        overlay, self.gpu_overlay = self.gpu_overlay, None
+        if overlay:
+            overlay.hide()
+        if surface:
+            # Release interop resources while this surface is still current.
+            surface.release_upscaler()
+            surface.hide()
+            surface.frame = None
+            surface.pending = False
+
+    def apply_preferences(self, values):
+        rebuild = any(self.preferences.get(key) != values.get(key)
+                      for key in ('renderer', 'resolution', 'render_scale', 'upscaler'))
+        rebuild = rebuild or (values['renderer'] == 'gpu') != (self.gpu_surface is not None)
+        self.preferences.update(values)
+        if rebuild:
+            self.clear_renderer()
+            self.setup_renderer()
+            self.layout_chrome()
+        if self.controllers != values['controllers']:
+            self.set_controllers(values['controllers'])
+        self.finish_quality()
+
+    def finish_quality(self, error=None):
+        self.quality_applying = False
+        dialog = self.settings_dialog
+        if not dialog:
+            return
+        dialog.applying = False
+        if error:
+            dialog.options.setEnabled(True)
+            dialog.apply_button.setEnabled(True)
+            dialog.apply_button.setText('应用')
+            dialog.cancel_button.setEnabled(True)
+            dialog.note.setText(str(error))
+            dialog.note.show()
+        else:
+            dialog.accept()
 
     def export_performance(self):
         self.release()
@@ -319,15 +379,17 @@ class Player(QWidget):
         if self.settings_dialog:
             self.settings_dialog.raise_()
             return
-        dialog = self.settings_dialog = QDialog(self)
+        dialog = self.settings_dialog = QualityDialog(self)
         dialog.setWindowTitle("画质与传输设置")
         dialog.setMinimumWidth(460)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 24, 24, 24)
         options = StreamOptions()
+        dialog.options = options
         options.restore(self.preferences)
         layout.addWidget(options)
         note = QLabel()
+        dialog.note = note
         note.setTextFormat(Qt.TextFormat.PlainText)
         note.setWordWrap(True)
         note.setObjectName('muted')
@@ -335,10 +397,14 @@ class Player(QWidget):
         layout.addWidget(note)
         buttons = QHBoxLayout()
         cancel = QPushButton("取消")
+        dialog.cancel_button = cancel
         cancel.clicked.connect(dialog.reject)
-        apply = QPushButton("应用并重新连接")
+        apply = QPushButton("应用")
+        dialog.apply_button = apply
         apply.setObjectName('primary')
         def accept():
+            if self.quality_applying:
+                return
             from ..core.transport import settings
             from ..models import ValidationError
             width, height = options.resolution.currentData()
@@ -350,7 +416,13 @@ class Player(QWidget):
                 note.show()
                 return
             values = options.values()
-            dialog.accept()
+            self.quality_applying = True
+            dialog.applying = True
+            options.setEnabled(False)
+            apply.setEnabled(False)
+            apply.setText('应用中…')
+            cancel.setEnabled(False)
+            note.hide()
             self.reconfigure.emit(values)
         apply.clicked.connect(accept)
         buttons.addWidget(cancel)
@@ -670,8 +742,8 @@ class Player(QWidget):
             self.release()
             self.timer.stop()
             self.runtime.feedback.disconnect(self.rumble)
-            if self.gpu_surface:
-                self.gpu_surface.cleanup()
+            if self.renderer_widgets:
+                self.renderer_widgets[0].cleanup()
             self._closed = True
             self.ended.emit()
         event.accept()

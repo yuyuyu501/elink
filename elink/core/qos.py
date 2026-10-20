@@ -118,6 +118,9 @@ def install_rtp_pacer(pc, bitrate_mbps: int, profile=None, *, fps=60, budget=Non
     installed = 0
     for transport in transports:
         if getattr(transport, '_elink_rtp_pacer', None) is not None:
+            state = transport._elink_rtp_pacer
+            state.rate = bitrate_mbps * 1_000_000 * 1.08
+            state.credit = max(.008, min(2 / fps, .032))
             continue
         original = getattr(transport, '_send_rtp', None)
         if original is None:

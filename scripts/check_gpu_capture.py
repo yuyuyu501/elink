@@ -1,5 +1,6 @@
 """Check native D3D11 capture against known visible colors; save no pixels."""
 import argparse
+import asyncio
 import ctypes
 import fractions
 import json
@@ -72,6 +73,52 @@ def verify(app):
             finally:
                 capture.close()
         return results
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def verify_live_capture(app):
+    from elink.core.media import DesktopTrack
+    window = ColorWindow()
+    window.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+    window.setGeometry(40, 40, 640, 360)
+    window.show()
+    app.processEvents()
+    async def run():
+        track = DesktopTrack(1920, 1080, 60, capture_backend='gpu')
+        results = []
+        try:
+            previous_pts = -1
+            for width, height, fps in ((1920, 1080, 60), (1280, 720, 90), (2560, 1440, 60), (1920, 1080, 120)):
+                await track.reconfigure(width, height, fps)
+                for _ in range(4):
+                    frame = await track.recv()
+                    assert frame.pts > previous_pts
+                    previous_pts = frame.pts
+                    if (frame.width, frame.height, frame.opaque['stream_fps']) == (width, height, fps):
+                        break
+                else:
+                    raise AssertionError('Native capture did not apply dimensions and cadence')
+                assert frame.format.name == 'nv12' and track.gpu_capture is not None
+                rgb = bgr_pixels(frame)[:, :, ::-1]
+                sw, sh = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
+                ratio = window.devicePixelRatioF()
+                errors = []
+                for index, expected in enumerate(COLORS):
+                    x = round((window.x() + index % 2 * 320 + 160) * ratio * width / sw)
+                    y = round((window.y() + index // 2 * 180 + 90) * ratio * height / sh)
+                    errors.append(int(np.max(np.abs(rgb[y, x].astype(int) - expected))))
+                assert max(errors) <= 6, errors
+                results.append(dict(width=width, height=height, fps=fps, monotonic_pts=True,
+                                    max_rgb_error=max(errors), capture_backend='gpu'))
+            return results
+        finally:
+            track.stop()
+            await asyncio.wrap_future(track.release_future)
+    try:
+        return asyncio.run(run())
     finally:
         window.close()
         window.deleteLater()

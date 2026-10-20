@@ -346,23 +346,19 @@ class MainWindow(QMainWindow):
     def reconfigure_session(self, values):
         if self.busy or self._closing or not self.player:
             return
-        self.update_session_preferences(values)
-        address = self.session_address
-        player, self.player = self.player, None
-        self.resume_view = dict(geometry=player.normalGeometry(), fullscreen=player.isFullScreen(),
-                                statistics=player.show_statistics, muted=player.muted,
-                                maximized=player.isMaximized(), was_maximized=player.was_maximized)
-        player.ended.disconnect(self.disconnect_remote)
-        player.close()
-        player.deleteLater()
-        self.set_busy(True)
-        self.show_notice("正在应用画质设置，重新连接中…", error=False)
-        def reconnect(_):
-            self.set_busy(False)
-            if not self._closing:
-                self.address.setText(address)
-                self.connect_remote()
-        self.runtime.submit(self.client.disconnect(), reconnect, self.connect_failed)
+        player = self.player
+        width, height = values['resolution']
+        config = dict(width=width, height=height, fps=self.fps.itemData(values['fps']),
+                      bitrate=values['bitrate'], audio=values['audio'], render_scale=values['render_scale'])
+        def applied(_):
+            if not self._closing and self.player is player:
+                player.apply_preferences(values)
+                self.update_session_preferences(values)
+        def failed(message):
+            if not self._closing and self.player is player:
+                player.finish_quality(f'应用失败：{message}')
+        self.runtime.submit(self.client.reconfigure(config, self.decoder.itemData(values['decoder']), values['renderer']),
+                            applied, failed)
 
     def start_host(self):
         if self._closing or self.host_starting or self.server and self.server.runner:

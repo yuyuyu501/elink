@@ -377,6 +377,97 @@ def verify_decoder_colors(app):
         app.processEvents()
 
 
+def verify_live_settings(app, root):
+    from elink.core.transport import HostServer
+    from elink.core.input import RecordingInput
+    from elink.ui.window import MainWindow
+    from elink.ui.controls import StreamOptions
+
+    window = MainWindow(root / 'ui', auto_refresh=False, auto_host=False)
+    window.client.play_audio = False
+    host = HostServer(root / 'host', synthetic=True, backend_factory=RecordingInput)
+    def wait(predicate):
+        deadline = time.perf_counter() + 15
+        while not predicate():
+            settle(app, .01)
+            if time.perf_counter() > deadline:
+                raise AssertionError('Live settings timed out: ' + (window.player.error_label.text() if window.player else 'no player'))
+    try:
+        port = window.runtime.submit(host.start('127.0.0.1', 0)).result(15)
+        window.controllers.setChecked(False)
+        window.audio.setChecked(False)
+        window.address.setText(f'127.0.0.1:{port}')
+        window.connect_remote()
+        wait(lambda: window.player is not None and window.player.image is not None)
+        view, client = window.player, window.client
+        prepare_visible(view)
+        view.show()
+        client_pc, host_pc, identifier, channel = client.pc, host.pc, client.session_id, client.control
+        view.set_muted(True)
+        view.set_statistics(False)
+        results = []
+        cases = [([1280, 720], 90, 'hardware', 'gpu', 100, 'fsr', False),
+                 ([1920, 1080], 60, 'software', 'cpu', 100, 'fsr', True),
+                 ([2560, 1440], 60, 'hardware', 'gpu', 50, 'fsr', False),
+                 ([1920, 1080], 90, 'hardware', 'gpu', 50, 'rtx', False),
+                 ([1920, 1080], 60, 'hardware', 'gpu', 100, 'rtx', True),
+                 ([1280, 720], 30, 'software', 'cpu', 100, 'fsr', False)]
+        for size, fps, decoder, renderer, scale, upscaler, audio in cases:
+            print(f'Live settings: {size}, {fps} FPS, {decoder}, {renderer}, {scale}%, {upscaler}', flush=True)
+            view.open_quality()
+            dialog = view.settings_dialog
+            options = dialog.findChild(StreamOptions)
+            options.resolution.setCurrentIndex(options.resolution.findData(size))
+            options.fps.setCurrentIndex(options.fps.findData(fps))
+            options.decoder.setCurrentIndex(options.decoder.findData(decoder))
+            options.renderer.setCurrentIndex(options.renderer.findData(renderer))
+            options.render_scale.setCurrentIndex(options.render_scale.findData(scale))
+            options.upscaler.setCurrentIndex(options.upscaler.findData(upscaler))
+            options.audio.setChecked(audio)
+            options.bitrate.setValue(12)
+            count = client.profile.snapshot()['counters'].get('presented_frames', 0)
+            dialog.apply_button.click()
+            wait(lambda: not view.quality_applying)
+            if view.settings_dialog:
+                raise AssertionError('Live application failed: ' + dialog.note.text())
+            wait(lambda: client.profile.snapshot()['counters'].get('presented_frames', 0) > count + 15)
+            if renderer == 'gpu' and view.gpu_surface is None:
+                raise AssertionError('Live GPU switch fell back: ' + view.error_label.text())
+            assert window.player is view and client.pc is client_pc and host.pc is host_pc
+            assert client.session_id == identifier == host.session_id and client.control is channel
+            assert view.muted and not view.show_statistics and client.decoder == decoder
+            assert host.tracks[0].fps == fps and host.tracks[1].enabled.is_set() == audio
+            if renderer == 'gpu':
+                client.mailbox.set_notifier(None)
+                settle(app)
+                frame = view.gpu_surface.frame
+                expected = bgr_pixels(frame)[:, :, ::-1]
+                error = verify_pixels(view, screen_image(app, view), expected, stream_sample_points(expected))
+                client.mailbox.set_notifier(view.frame_ready.emit)
+                width, height = frame.width, frame.height
+            else:
+                client.mailbox.set_notifier(None)
+                settle(app)
+                width, height = view.image.width(), view.image.height()
+                expected = view.image_pixels[:, :, ::-1]
+                error = verify_pixels(view, screen_image(app, view), expected, stream_sample_points(expected))
+                client.mailbox.set_notifier(view.frame_ready.emit)
+            if renderer == 'gpu' and scale != 100:
+                algorithm = client.profile.snapshot()['metadata'].get('upscaler')
+                assert algorithm == ('RTX-VSR' if upscaler == 'rtx' else 'FSR1-EASU-RCAS'), algorithm
+            from elink.core.scaling import encoding_size
+            assert (width, height) == encoding_size(client.config)
+            results.append(dict(resolution=size, fps=fps, decoder=decoder, renderer=renderer,
+                                render_scale=scale, audio=audio, same_session=True, native_rgb_error=error))
+        return results
+    finally:
+        stopped = window.runtime.submit(host.stop())
+        wait(stopped.done)
+        stopped.result()
+        window.close()
+        wait(lambda: window._closed)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=Path('.artifacts/gpu-video-check.json'))
@@ -396,8 +487,9 @@ def main(argv=None):
                   rtx_fallback=verify_rtx_fallback(app),
                   limitations='Synthetic CPU submission benchmark, not game FPS, GPU time or input-to-photon latency.')
     if args.stream_check:
-        from scripts.check_gpu_capture import verify as verify_capture
+        from scripts.check_gpu_capture import verify as verify_capture, verify_live_capture
         result['native_capture'] = verify_capture(app)
+        result['live_capture'] = verify_live_capture(app)
         result['decoder_colors'] = verify_decoder_colors(app)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='gpu-stream-', dir=args.output.parent) as temp:
@@ -406,6 +498,7 @@ def main(argv=None):
             result['super_resolution_streams'] = [verify_stream(app, Path(temp) / str(scale), 'hardware', scale)
                                                    for scale in (75, 67, 50)]
             result['rtx_stream'] = verify_stream(app, Path(temp) / 'rtx', 'hardware', 50, 'rtx')
+            result['live_settings'] = verify_live_settings(app, Path(temp) / 'live')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(json.dumps(result, indent=2))

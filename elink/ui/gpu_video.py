@@ -92,6 +92,7 @@ class YuvSurface(QOpenGLWidget):
         self.textures = []
         self.layout_key = None
         self.upscaler = None
+        self.upscaler_dirty = False
         self.setFormat(fmt)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -127,18 +128,38 @@ class YuvSurface(QOpenGLWidget):
             self.vbo.release()
             self.vao.release()
             self.pending = self.frame is not None
-            profile = getattr(self.player.client, 'profile', None)
-            metadata = profile.snapshot()['metadata'] if profile else {}
-            if self.player.preferences.get('render_scale', metadata.get('render_scale', 100)) != 100:
-                size = self.player.preferences.get('resolution') or [metadata['output_width'], metadata['output_height']]
-                if self.player.preferences.get('upscaler', 'rtx') == 'rtx':
-                    from .rtx_video import RtxUpscaler
-                    self.upscaler = RtxUpscaler(self, size)
-                else:
-                    from .super_resolution import FsrUpscaler
-                    self.upscaler = FsrUpscaler(self, size)
+            self.configure_upscaler()
         except Exception as exc:
             self.fail(exc)
+
+    def reconfigure(self):
+        self.frame = None
+        self.pending = False
+        self.broken = False
+        self.upscaler_dirty = True
+
+    def release_upscaler(self):
+        if self.upscaler and self.context():
+            self.makeCurrent()
+            self.upscaler.cleanup()
+            self.upscaler = None
+            self.doneCurrent()
+
+    def configure_upscaler(self):
+        if self.upscaler:
+            self.upscaler.cleanup()
+            self.upscaler = None
+        profile = getattr(self.player.client, 'profile', None)
+        metadata = profile.snapshot()['metadata'] if profile else {}
+        if self.player.preferences.get('render_scale', metadata.get('render_scale', 100)) != 100:
+            size = self.player.preferences.get('resolution') or [metadata['output_width'], metadata['output_height']]
+            if self.player.preferences.get('upscaler', 'rtx') == 'rtx':
+                from .rtx_video import RtxUpscaler
+                self.upscaler = RtxUpscaler(self, size)
+            else:
+                from .super_resolution import FsrUpscaler
+                self.upscaler = FsrUpscaler(self, size)
+        self.upscaler_dirty = False
 
     def set_frame(self, frame):
         color_parameters(frame)  # Unsupported color metadata falls back to CPU.
@@ -185,6 +206,8 @@ class YuvSurface(QOpenGLWidget):
         profile = getattr(self.player.client, 'profile', None)
         started = time.perf_counter()
         try:
+            if self.upscaler_dirty:
+                self.configure_upscaler()
             gl = self.context().functions()
             for capability in (0x0BE2, 0x0B71, 0x0B90, 0x0C11, 0x0B44):
                 gl.glDisable(capability)  # blend, depth, stencil, scissor, cull

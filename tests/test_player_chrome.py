@@ -40,6 +40,21 @@ def make_player():
     return app, player, events
 
 
+def test_reapply_gpu_preference_retries_after_cpu_fallback(monkeypatch):
+    app, player, _ = make_player()
+    values = dict(renderer='gpu', render_scale=100, upscaler='fsr', resolution=[1920, 1080], controllers=False)
+    player.preferences.update(values)
+    attempts = []
+    monkeypatch.setattr(player, 'setup_renderer', lambda: attempts.append(True))
+    try:
+        assert player.gpu_surface is None
+        player.apply_preferences(values)
+        assert attempts == [True]
+    finally:
+        player.close()
+        app.processEvents()
+
+
 def test_frame_ready_wakes_gui_without_polling_and_close_detaches():
     from concurrent.futures import ThreadPoolExecutor
     app, player, _ = make_player()
@@ -158,7 +173,8 @@ def test_gpu_overlay_refresh_keeps_video_and_raster_drawing_separate():
     modes = []
     player.client.set_renderer = modes.append
     surface = SimpleNamespace(update=lambda: video_updates.append(True),
-                              hide=lambda: None, cleanup=lambda: None, deleteLater=lambda: None)
+                              hide=lambda: None, cleanup=lambda: None, deleteLater=lambda: None,
+                              release_upscaler=lambda: None)
     player.gpu_surface = surface
     overlay = player.gpu_overlay = VideoOverlay(player)
     overlay.setGeometry(player.rect())

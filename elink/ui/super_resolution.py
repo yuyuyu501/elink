@@ -1,9 +1,11 @@
 """FSR 1 EASU/RCAS on GPU, using the unmodified AMD MIT-licensed headers."""
 from functools import lru_cache
+from shiboken6 import delete
 
 from PySide6.QtGui import QVector2D
 from PySide6.QtOpenGL import (QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat,
-                              QOpenGLShader, QOpenGLShaderProgram, QOpenGLTimeMonitor)
+                              QOpenGLShader, QOpenGLShaderProgram)
+from .gpu_timer import ElapsedQuery
 
 from ..paths import resource_dir
 
@@ -84,24 +86,19 @@ class FsrUpscaler:
             if not program.link():
                 raise RuntimeError(program.log())
         for _ in range(4):
-            monitor = QOpenGLTimeMonitor(surface)
-            monitor.setSampleCount(2)
-            if monitor.create():
-                self.timers.append(monitor)
+            self.timers.append(ElapsedQuery())
 
     def render(self, viewport, profile, new_frame):
         surface, frame = self.surface, self.surface.frame
         gl = surface.context().functions()
-        while self.pending_timers and self.pending_timers[0].isResultAvailable():
+        while self.pending_timers and self.pending_timers[0].ready():
             timer = self.pending_timers.pop(0)
-            intervals = timer.waitForIntervals()
-            if profile and intervals:
-                profile.observe('fsr_gpu', intervals[0] / 1_000_000)
-            timer.reset()
+            if profile:
+                profile.observe('fsr_gpu', timer.nanoseconds() / 1_000_000)
             self.timers.append(timer)
         timer = self.timers.pop() if new_frame and self.timers else None
         if timer:
-            timer.recordSample()
+            timer.begin()
         key = frame.width, frame.height, *self.output_size
         if key != self.key:
             self.buffers.clear()
@@ -128,7 +125,7 @@ class FsrUpscaler:
         gl.glViewport(*viewport)
         self._pass(2, self.buffers[2].texture())
         if timer:
-            timer.recordSample()
+            timer.end()
             self.pending_timers.append(timer)
         if profile:
             profile.describe(upscaler='FSR1-EASU-RCAS', upscale_width=self.output_size[0], upscale_height=self.output_size[1])
@@ -157,11 +154,10 @@ class FsrUpscaler:
         self.buffers.clear()
         self.key = None
         for timer in self.timers + self.pending_timers:
-            timer.destroy()
-            timer.deleteLater()
+            timer.close()
         self.timers.clear()
         self.pending_timers.clear()
         for program in self.programs:
             program.removeAllShaders()
-            program.deleteLater()
+            delete(program)
         self.programs.clear()

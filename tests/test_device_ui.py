@@ -63,9 +63,10 @@ def test_device_single_click_failure_and_refresh_preserves_busy(tmp_path, monkey
         close(window, app)
 
 
-def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_path):
+def test_controls_apply_in_same_session_and_cancel_does_not_change_options(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(tmp_path / 'ui', auto_refresh=False, auto_host=False)
+    window.client.play_audio = False
     host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput)
     async def start():
         return await host.start('127.0.0.1', 0)
@@ -96,7 +97,7 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         player.open_quality()
         dialog = player.settings_dialog
         options = dialog.findChild(StreamOptions)
-        pump(app, lambda: any(b.isEnabled() and b.text() == '应用并重新连接' for b in dialog.findChildren(QPushButton)))
+        pump(app, lambda: any(b.isEnabled() and b.text() == '应用' for b in dialog.findChildren(QPushButton)))
         options.bitrate.setValue(17)
         assert options.resolution.currentData() == [1920, 1080]
         options.resolution.setCurrentIndex(options.resolution.findData([2560, 1440]))
@@ -106,26 +107,44 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         player.open_quality()
         dialog = player.settings_dialog
         options = dialog.findChild(StreamOptions)
-        pump(app, lambda: any(b.isEnabled() and b.text() == '应用并重新连接' for b in dialog.findChildren(QPushButton)))
+        pump(app, lambda: any(b.isEnabled() and b.text() == '应用' for b in dialog.findChildren(QPushButton)))
         options.bitrate.setValue(12)
         options.resolution.setCurrentIndex(options.resolution.findData([3840, 2160]))
         options.fps.setCurrentIndex(options.fps.findData(120))
-        next(b for b in dialog.findChildren(QPushButton) if b.text() == '应用并重新连接').click()
+        dialog.apply_button.click()
         assert player.settings_dialog is dialog and window.player is player
         assert window.bitrate.value() == 20  # Invalid settings don't disconnect or persist.
         options.fps.setCurrentIndex(options.fps.findData(144))
         assert options.fps.currentData() == 144
         options.resolution.setCurrentIndex(options.resolution.findData([1280, 720]))
-        options.fps.setCurrentIndex(options.fps.findData(60))
+        options.fps.setCurrentIndex(options.fps.findData(90))
+        options.decoder.setCurrentIndex(options.decoder.findData('software'))
+        options.audio.setChecked(True)
         session = window.client.session_id
-        next(b for b in dialog.findChildren(QPushButton) if b.text() == '应用并重新连接').click()
-        pump(app, lambda: window.player is not None and window.player is not player
-             and window.player.image is not None, timeout=25)
-        assert window.client.session_id != session
+        client_pc, host_pc = window.client.pc, host.pc
+        control, motion = window.client.control, window.client.motion
+        input_session = host.input
+        video, audio = host.tracks
+        previous_pts = video.last_pts
+        dialog.apply_button.click()
+        assert not dialog.apply_button.isEnabled()
+        dialog.reject()  # Escape cannot dismiss a pending operation.
+        assert player.settings_dialog is dialog
+        pump(app, lambda: player.settings_dialog is None and player.image.width() == 1280, timeout=25)
+        assert window.player is player
+        assert window.client.session_id == session == host.session_id
+        assert window.client.pc is client_pc and host.pc is host_pc
+        assert window.client.control is control and window.client.motion is motion
+        assert host.input is input_session and host.tracks == [video, audio]
+        assert video.last_pts > previous_pts
+        assert video.fps == 90 and video.network_budget.target_bps == 12_000_000
+        encoder = next(sender for sender in host.pc.getSenders() if sender.kind == 'video')._RTCRtpSender__encoder
+        assert encoder.policy.fps == encoder.codec.framerate == 90
+        assert window.client.decoder == 'software' and audio.enabled.is_set()
         assert window.player.image.width() == 1280 and window.player.image.height() == 720
         assert window.resolution.currentData() == [1280, 720]
         assert window.client.stats.target_mbps == 12
-        assert window.fps.currentData() == 60
+        assert window.fps.currentData() == 90
         assert window.player.preferences['bitrate'] == 12
         assert window.player.muted and window.client.muted
         assert not window.player.show_statistics
@@ -134,9 +153,33 @@ def test_controls_reconnect_real_session_and_cancel_does_not_change_options(tmp_
         dialog = window.player.settings_dialog
         options = dialog.findChild(StreamOptions)
         assert options.resolution.currentData() == [1280, 720]
-        assert options.fps.currentData() == 60
+        assert options.fps.currentData() == 90
         assert not hasattr(options, 'scale')
-        dialog.reject()
+        # A host-side rejection leaves the dialog, preferences and session usable.
+        configure = video.reconfigure
+        async def rejected(*args):
+            raise RuntimeError('test capture failure')
+        monkeypatch.setattr(video, 'reconfigure', rejected)
+        options.resolution.setCurrentIndex(options.resolution.findData([1600, 900]))
+        dialog.apply_button.click()
+        pump(app, lambda: not player.quality_applying)
+        assert player.settings_dialog is dialog and dialog.note.isVisible()
+        assert 'test capture failure' in dialog.note.text()
+        assert player.preferences['resolution'] == [1280, 720]
+        assert window.resolution.currentData() == [1280, 720]
+        monkeypatch.setattr(video, 'reconfigure', configure)
+        options.resolution.setCurrentIndex(options.resolution.findData([1280, 720]))
+        options.fps.setCurrentIndex(options.fps.findData(30))
+        options.decoder.setCurrentIndex(options.decoder.findData('auto'))
+        options.audio.setChecked(False)
+        options.bitrate.setValue(8)
+        dialog.apply_button.click()
+        pump(app, lambda: player.settings_dialog is None)
+        assert window.client.decoder == 'auto' and not audio.enabled.is_set()
+        assert video.fps == 30 and video.network_budget.target_bps == 8_000_000
+        pump(app, lambda: encoder.codec.framerate == 30)
+        assert window.client.session_id == session and window.player is player
+        assert window.client.pc is client_pc and host.pc is host_pc
         window.player.close()
         pump(app, lambda: window.player is None and not window.busy)
         assert window.client.pc is None

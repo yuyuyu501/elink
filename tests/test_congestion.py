@@ -8,6 +8,18 @@ from elink.core.congestion import NetworkBudget
 from elink.core.profiling import PipelineProfile
 
 
+def test_live_target_change_preserves_congestion_but_accepts_new_user_budget():
+    budget = NetworkBudget(20_000_000)
+    budget.set_target(30_000_000)
+    assert budget.target_bps == budget.media_bps == 30_000_000
+    budget.congested = True
+    budget.media_bps = 12_000_000
+    budget.set_target(40_000_000)
+    assert budget.media_bps == 12_000_000
+    budget.set_target(8_000_000)
+    assert budget.target_bps == budget.media_bps == 8_000_000
+
+
 def test_isolated_loss_or_rtt_spike_does_not_reduce_target_and_persistent_loss_does():
     now = [0.0]
     budget = NetworkBudget(30_000_000, clock=lambda: now[0])

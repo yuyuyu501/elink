@@ -117,6 +117,7 @@ class HostServer:
         self.profile = PipelineProfile()
         self.clipboard_task = None
         self.clipboard_seen = None
+        self.stream_config = None
 
     async def start(self, bind=None, port=49200):
         if self.runner:
@@ -130,6 +131,7 @@ class HostServer:
         app.add_routes([web.get("/v1/info", self.info), web.get("/v1/apps", self.apps),
                         web.post("/v1/session", self.offer), web.delete("/v1/session/{id}", self.delete),
                         web.get("/v1/session/{id}/performance", self.performance),
+                        web.post("/v1/session/{id}/settings", self.reconfigure),
                         web.get("/v1/session/{id}/display", self.retired_display),
                         web.post("/v1/session/{id}/display", self.retired_display)])
         self.closing = False
@@ -157,7 +159,7 @@ class HostServer:
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
                 "busy": self.pc is not None or self.ending,
-                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1"]}
+                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1", "live-settings-v1"]}
 
     async def info(self, request):
         return web.json_response(self.host_info())
@@ -189,7 +191,8 @@ class HostServer:
         from aiortc.sdp import SessionDescription
         description = SessionDescription.parse(data["sdp"])
         kinds = [media.kind for media in description.media]
-        if sorted(kinds) != sorted(["video", "application"] + (["audio"] if config["audio"] else [])):
+        expected = ["video", "application"]
+        if sorted(kinds) not in (sorted(expected + ['audio']), sorted(expected) if not config['audio'] else []):
             raise ValidationError("会话只能包含一个视频、可选音频与输入通道。")
         if any(media.direction != "recvonly" for media in description.media if media.kind in ("video", "audio")):
             raise ValidationError("控制端只能接收主机媒体。")
@@ -206,6 +209,7 @@ class HostServer:
                                   encoded_width=coded_width, encoded_height=coded_height,
                                   render_scale=config['render_scale'], target_bps=config['bitrate'] * 1_000_000)
             self.created = time.monotonic()
+            self.stream_config = config
             self.input_errors.clear()
             codecs.encode_policy = codecs.CodecPolicy(config["fps"], config["bitrate"] * 1_000_000)
             loop = asyncio.get_running_loop()
@@ -293,8 +297,8 @@ class HostServer:
                 self.tracks.append(video)
                 video_sender = pc.addTrack(video)
                 install_video_pipeline(video_sender, self.profile, budget)
-                if config["audio"]:
-                    audio = LoopbackTrack(self.synthetic)
+                if 'audio' in kinds:
+                    audio = LoopbackTrack(self.synthetic, enabled=config['audio'])
                     self.tracks.append(audio)
                     pc.addTrack(audio)
                 video_preferences(pc)
@@ -316,6 +320,35 @@ class HostServer:
         if not self.pc or request.remote != self.device_id or request.match_info['id'] != self.session_id:
             raise web.HTTPForbidden()
         return web.json_response(self.profile.snapshot())
+
+    async def reconfigure(self, request):
+        async with self.lock:
+            if not self.pc or request.remote != self.device_id or request.match_info['id'] != self.session_id:
+                raise web.HTTPForbidden()
+            pc = self.pc
+            config = settings(await self.body(request))
+            video = next(t for t in self.tracks if isinstance(t, DesktopTrack))
+            audio = next((t for t in self.tracks if isinstance(t, LoopbackTrack)), None)
+            if config['audio'] and audio is None:
+                raise ValidationError('当前会话未预留音频通道，请更新控制端后重新连接一次。')
+            width, height = encoding_size(config)
+            try:
+                if (width, height, config['fps']) != (video.width, video.height, video.fps):
+                    await video.reconfigure(width, height, config['fps'])
+            except Exception as exc:
+                raise ValidationError(f'采集设置应用失败：{exc}') from exc
+            if self.pc is not pc:
+                raise ValidationError('会话已结束。')
+            video.network_budget.set_target(config['bitrate'] * 1_000_000)
+            if audio:
+                audio.set_enabled(config['audio'])
+            install_rtp_pacer(pc, config['bitrate'], self.profile, fps=config['fps'], budget=video.network_budget)
+            self.stream_config = config
+            self.profile.describe(width=config['width'], height=config['height'], fps=config['fps'],
+                                  encoded_width=width, encoded_height=height, render_scale=config['render_scale'],
+                                  target_bps=config['bitrate'] * 1_000_000)
+            self.profile.event('stream_settings_applied')
+            return web.json_response({'settings': config})
 
     async def retired_display(self, request):
         # Explicit response for old clients, with no native display API call.
@@ -483,6 +516,9 @@ class Client:
         self.cursor_visible = None
         self.cursor_updated = 0.0
         self.clipboard_seen = None
+        self.config = None
+        self.decoder = 'auto'
+        self.live_settings_supported = False
 
     def schedule_disconnect(self):
         if self.close_task is None or self.close_task.done():
@@ -504,6 +540,7 @@ class Client:
                 if 'spatial-upscale-v1' not in info.get('features', []):
                     raise ValidationError('主机不支持超分采样，请更新被控端或选择原生 100%。')
             self.performance_supported = "performance-v1" in info.get("features", [])
+            self.live_settings_supported = 'live-settings-v1' in info.get('features', [])
             self.cursor_supported = 'cursor-modes-v1' in info.get('features', [])
             self.cursor_applied, self.cursor_visible, self.cursor_updated = 'remote', None, 0.0
             if info.get("busy") is True:
@@ -585,7 +622,7 @@ class Client:
                     self.schedule_disconnect()
 
             pc.addTransceiver("video", direction="recvonly")
-            if config["audio"]:
+            if config["audio"] or self.live_settings_supported:
                 pc.addTransceiver("audio", direction="recvonly")
             for transceiver in pc.getTransceivers():
                 tune_receiver(transceiver.receiver, self.profile)
@@ -595,6 +632,7 @@ class Client:
                 response = await request(self.endpoint, self.fp, "POST", "/v1/session", token=self.token,
                                          payload={"type": pc.localDescription.type, "sdp": pc.localDescription.sdp, "settings": config})
                 self.session_id = response["id"]
+                self.config, self.decoder = config, decoder
                 await pc.setRemoteDescription(RTCSessionDescription(response["sdp"], response["type"]))
                 mark_rtc_sockets(pc)
                 self.clipboard_seen = await asyncio.to_thread(read_text)
@@ -605,6 +643,63 @@ class Client:
             except BaseException:
                 await self._disconnect()
                 raise
+
+    async def switch_decoder(self, mode):
+        if mode == self.decoder:
+            return
+        loop = asyncio.get_running_loop()
+        done = loop.create_future()
+        def completed(error):
+            def resolve():
+                if not done.done():
+                    done.set_exception(error) if error else done.set_result(None)
+            loop.call_soon_threadsafe(resolve)
+        receiver = next(t.receiver for t in self.pc.getTransceivers() if t.kind == 'video')
+        queue = receiver._RTCRtpReceiver__decoder_queue
+        queue.switch_decoder(mode, completed)
+        try:
+            await asyncio.wait_for(done, 10)
+        except BaseException as exc:
+            # A queued switch may finish after a timeout; restore on the next IDR.
+            queue.switch_decoder(self.decoder, lambda error: None)
+            if isinstance(exc, asyncio.TimeoutError):
+                raise ValidationError('切换解码器超时，已请求恢复原解码器；请检查视频传输后重试。') from exc
+            raise
+        self.decoder = mode
+
+    async def reconfigure(self, config, decoder='auto', renderer='cpu'):
+        async with self.lock:
+            if not self.pc or not self.session_id:
+                raise ValidationError('当前会话已结束。')
+            config = settings(config)
+            if decoder not in ('auto', 'software', 'hardware') or renderer not in ('cpu', 'gpu'):
+                raise ValidationError('解码或显示设置无效。')
+            if config['render_scale'] != 100 and renderer != 'gpu':
+                raise ValidationError('超分需要 GPU 纹理显示。')
+            changed = config != self.config
+            if changed and not self.live_settings_supported:
+                raise ValidationError('被控端不支持会话内应用设置，请将两端更新至 0.4.29 或更高版本。')
+            previous_decoder = self.decoder
+            try:
+                await self.switch_decoder(decoder)
+                if changed:
+                    await request(self.endpoint, self.fp, 'POST', f'/v1/session/{self.session_id}/settings',
+                                  payload=config)
+            except BaseException:
+                if self.pc and self.decoder != previous_decoder:
+                    await self.switch_decoder(previous_decoder)
+                raise
+            self.config = config
+            self.set_renderer(renderer)
+            self.profile.describe(output_width=config['width'], output_height=config['height'],
+                                  render_scale=config['render_scale'])
+            from dataclasses import replace
+            self.stats = replace(self.stats, target_mbps=config['bitrate'])
+            if config['audio'] and self.play_audio and self.output is None:
+                self.open_audio_output()
+            if self.output:
+                self.output.muted = self.muted or not config['audio']
+            return config
 
     def set_renderer(self, mode):
         self.renderer = 'gpu' if mode == 'gpu' else 'cpu'
@@ -675,7 +770,8 @@ class Client:
                 recent = self.mailbox.received and now - self.mailbox.updated < 2
                 self.stats = StreamStats(rx, loss, jitter,
                                          codecs.metrics['decode_ms'] if recent else None,
-                                         codecs.metrics['decoder'] if recent else '--', route, target, now,
+                                         codecs.metrics['decoder'] if recent else '--', route,
+                                         self.config['bitrate'] if self.config else target, now,
                                          self.encoder if recent else '--')
             except Exception:
                 # Telemetry failure must never interrupt input or media; UI expires it.
@@ -684,12 +780,8 @@ class Client:
 
     async def consume(self, track):
         try:
-            if track.kind == "audio" and self.play_audio:
-                try:
-                    self.output = AudioOutput()
-                    self.output.muted = self.muted
-                except Exception as exc:
-                    self.notify(f"本机音频输出不可用：{exc}")
+            if track.kind == "audio" and self.play_audio and self.config['audio']:
+                self.open_audio_output()
             while True:
                 frame = await track.recv()
                 if track.kind == "video":
@@ -710,7 +802,7 @@ class Client:
                     self.mailbox.put(pixels)
                 else:
                     self.audio_frames += 1
-                    if self.output:
+                    if self.output and self.config['audio']:
                         self.output.feed(frame)
         except asyncio.CancelledError:
             raise
@@ -720,10 +812,17 @@ class Client:
                 if track.kind == "video":
                     self.schedule_disconnect()
 
+    def open_audio_output(self):
+        try:
+            self.output = AudioOutput()
+            self.output.muted = self.muted
+        except Exception as exc:
+            self.notify(f"本机音频输出不可用：{exc}")
+
     def set_muted(self, muted):
         self.muted = bool(muted)
         if self.output:
-            self.output.muted = self.muted
+            self.output.muted = self.muted or not self.config['audio']
 
     def send(self, event):
         if not self.pc:

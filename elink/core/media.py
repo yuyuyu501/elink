@@ -131,11 +131,48 @@ class DesktopTrack(MediaStreamTrack):
         return self.finish_capture(frame, started)
 
     def finish_capture(self, frame, started):
-        frame.opaque = {"profile": self.profile, "captured_at": started, 'network_budget': self.network_budget}
+        frame.opaque = {"profile": self.profile, "captured_at": started, 'network_budget': self.network_budget,
+                        'stream_fps': self.fps}
         self.profile.mark("capture_interval")
         self.profile.count('captured_frames')
         metrics["capture_ms"] = (time.perf_counter() - started) * 1000
         return frame
+
+    async def reconfigure(self, width, height, fps):
+        # All native capture objects belong to the single capture worker.
+        # Already queued frames finish first and retain their original metadata.
+        def apply():
+            if self.readyState != 'live':
+                raise MediaStreamError
+            changed_size = (width, height) != (self.width, self.height)
+            if changed_size and self.gpu_capture:
+                from .gpu_capture import D3D11Capture
+                draw_mouse = self.cursor_mode != 'local'
+                previous, self.gpu_capture = self.gpu_capture, None
+                previous.close()
+                try:
+                    self.gpu_capture = D3D11Capture(width, height, draw_mouse)
+                    self.gpu_capture.read()
+                except BaseException:
+                    if self.gpu_capture:
+                        self.gpu_capture.close()
+                    try:
+                        self.gpu_capture = D3D11Capture(self.width, self.height, draw_mouse)
+                    except Exception:
+                        self.gpu_capture = None
+                        self.gpu_capture_disabled = True
+                        self.notify('D3D11 采集恢复失败，已回退兼容采集。')
+                    raise
+            if fps != self.fps and self.camera:
+                self.camera.stop()
+                try:
+                    self.camera.start(target_fps=fps, video_mode=True)
+                except BaseException:
+                    self.camera.start(target_fps=self.fps, video_mode=True)
+                    raise
+            self.width, self.height, self.fps = width, height, fps
+            self.frame_clock = FrameClock(fps)
+        await asyncio.get_running_loop().run_in_executor(self.executor, apply)
 
     def scheduled_capture(self):
         late, skipped = self.frame_clock.wait()
@@ -195,7 +232,7 @@ class DesktopTrack(MediaStreamTrack):
 class LoopbackTrack(MediaStreamTrack):
     kind = "audio"
 
-    def __init__(self, synthetic: bool = False):
+    def __init__(self, synthetic: bool = False, enabled=True):
         super().__init__()
         self.synthetic = synthetic
         self.samples = 0
@@ -203,6 +240,8 @@ class LoopbackTrack(MediaStreamTrack):
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.error = ""
+        self.enabled = threading.Event()
+        self.set_enabled(enabled)
         self.thread = threading.Thread(target=self._capture, name="elink-loopback", daemon=True)
         self.thread.start()
 
@@ -210,17 +249,25 @@ class LoopbackTrack(MediaStreamTrack):
         try:
             if self.synthetic:
                 while not self.done.wait(0.02):
-                    self._put(np.zeros((960, 2), dtype=np.float32))
+                    if self.enabled.is_set():
+                        self._put(np.zeros((960, 2), dtype=np.float32))
             else:
+                while not self.done.is_set() and not self.enabled.wait(.1):
+                    pass
+                if self.done.is_set():
+                    return
                 import soundcard as sc
                 # SoundCard initializes COM during its first import and rejects S_FALSE.
                 # Balance our own initialization only after that import has succeeded.
                 com_initialized = ctypes.windll.ole32.CoInitializeEx(None, 0) in (0, 1)
                 speaker = sc.default_speaker()
                 microphone = sc.get_microphone(id=speaker.id, include_loopback=True)
-                with microphone.recorder(samplerate=48000, channels=2, blocksize=960) as recorder:
-                    while not self.done.is_set():
-                        self._put(recorder.record(numframes=960))
+                while not self.done.is_set():
+                    if not self.enabled.wait(.1):
+                        continue
+                    with microphone.recorder(samplerate=48000, channels=2, blocksize=960) as recorder:
+                        while not self.done.is_set() and self.enabled.is_set():
+                            self._put(recorder.record(numframes=960))
         except Exception as exc:
             self.error = f"系统声音采集失败：{exc}"
         finally:
@@ -229,17 +276,27 @@ class LoopbackTrack(MediaStreamTrack):
 
     def _put(self, array):
         with self.lock:
-            self.frames.append((self.samples, array))
-        self.samples += len(array)
+            if self.enabled.is_set():
+                self.frames.append(array)
+
+    def set_enabled(self, enabled):
+        self.enabled.set() if enabled else self.enabled.clear()
+        with self.lock:
+            self.frames.clear()
 
     async def recv(self):
         while self.readyState == "live":
-            if self.error:
+            if self.error and self.enabled.is_set():
                 raise RuntimeError(self.error)
-            with self.lock:
-                item = self.frames.popleft() if self.frames else None
+            if not self.enabled.is_set():
+                await asyncio.sleep(.02)
+                item = np.zeros((960, 2), dtype=np.float32)
+            else:
+                with self.lock:
+                    item = self.frames.popleft() if self.frames else None
             if item is not None:
-                pts, array = item
+                pts, array = self.samples, item
+                self.samples += len(array)
                 pcm = (np.clip(array, -1, 1) * 32767).astype(np.int16).reshape(1, -1)
                 frame = av.AudioFrame.from_ndarray(pcm, format="s16", layout="stereo")
                 frame.sample_rate, frame.pts = 48000, pts

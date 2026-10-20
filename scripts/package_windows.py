@@ -42,6 +42,17 @@ def validate_gpu_test(report):
     capture = report.get('native_capture', [])
     rtx = report.get('rtx_stream', {})
     decoded_colors = report.get('decoder_colors', [])
+    live = report.get('live_settings', [])
+    live_capture = report.get('live_capture', [])
+    if (len(live) != 6 or {c.get('renderer') for c in live} != {'cpu', 'gpu'}
+            or {c.get('decoder') for c in live} != {'software', 'hardware'}
+            or any(c.get('same_session') is not True or not isinstance(c.get('native_rgb_error'), (int, float))
+                   or not 0 <= c['native_rgb_error'] <= 5 for c in live)
+            or len(live_capture) != 4
+            or any(c.get('monotonic_pts') is not True or c.get('capture_backend') != 'gpu'
+                   or not isinstance(c.get('max_rgb_error'), (int, float))
+                   or not 0 <= c['max_rgb_error'] <= 6 for c in live_capture)):
+        raise RuntimeError('Packaged live settings/capture checks have not passed.')
     if ({(c.get('width'), c.get('height'), c.get('colorspace'), c.get('color_range'), c.get('input_format'))
          for c in decoded_colors} != DECODER_COLOR_CASES
             or any(c.get('hardware_format') != 'nv12'

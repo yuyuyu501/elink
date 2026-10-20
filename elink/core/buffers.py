@@ -23,6 +23,14 @@ class DecodeQueue(queue.Queue):
         self.request_keyframe = request_keyframe
         self.waiting_keyframe = False
         self.last_frame_at = None
+        self.decoder_switch = None
+
+    def switch_decoder(self, mode, completed):
+        with self.mutex:
+            self.queue.clear()
+            self.waiting_keyframe = True
+            self.decoder_switch = (mode, completed)
+        self.request_keyframe()
 
     def put(self, item, block=True, timeout=None):
         with self.mutex:
@@ -42,6 +50,9 @@ class DecodeQueue(queue.Queue):
                         self.profile.count("decode_queue_dropped")
                     return
                 self.waiting_keyframe = False
+                if self.decoder_switch:
+                    item[1]._elink_decoder_switch = self.decoder_switch
+                    self.decoder_switch = None
             if item is not None and self.video and self.profile:
                 item[1]._elink_profile = self.profile
                 item[1]._elink_queued_at = time.perf_counter()

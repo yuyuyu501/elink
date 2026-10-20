@@ -116,9 +116,14 @@ class DesktopEncoder(H264Encoder):
         if profile:
             profile.elapsed('capture_to_encode', trace['captured_at'])
         budget = trace.get('network_budget')
+        fps = trace.get('stream_fps', self.policy.fps)
+        changed_fps = fps != self.policy.fps
+        self.policy.fps = fps
+        if budget:
+            self.policy.bitrate = self._rate = budget.target_bps
         rate = min(self._rate, budget.media_bps) if budget else self._rate
         layout = frame.format.name, int(frame.colorspace), int(frame.color_range)
-        changed = self.codec and (self.codec.width != frame.width or self.codec.height != frame.height
+        changed = self.codec and (changed_fps or self.codec.width != frame.width or self.codec.height != frame.height
                                   or rate != self.codec.bit_rate
                                   or self.input_layout is not None and self.input_layout != layout)
         if changed:
@@ -180,6 +185,21 @@ class DesktopDecoder(H264Decoder):
         self.codec.flags |= 0x80000  # AV_CODEC_FLAG_LOW_DELAY
 
     def decode(self, encoded_frame):
+        switch = getattr(encoded_frame, '_elink_decoder_switch', None)
+        if switch:
+            del encoded_frame._elink_decoder_switch
+            mode, completed = switch
+            try:
+                replacement = DesktopDecoder(CodecPolicy(decoder=mode))
+                frames = replacement.decode(encoded_frame)
+                if not frames:
+                    raise RuntimeError('新解码器无法解码关键帧，请选择其他解码方式。')
+                self.__dict__.update(replacement.__dict__)
+            except Exception as exc:
+                completed(exc)
+            else:
+                completed(None)
+                return frames
         started = time.perf_counter()
         profile = getattr(encoded_frame, '_elink_profile', None)
         if profile:

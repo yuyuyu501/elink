@@ -82,7 +82,7 @@ def run(root: Path, desktop=False):
         player.open_quality()
         from .ui.controls import StreamOptions
         from PySide6.QtWidgets import QPushButton
-        pump(lambda: any(b.text() == '应用并重新连接' and b.isEnabled()
+        pump(lambda: any(b.text() == '应用' and b.isEnabled()
                          for b in player.settings_dialog.findChildren(QPushButton)))
         result['stream_preferences'] = player.settings_dialog.findChild(StreamOptions).values()
         app.processEvents()

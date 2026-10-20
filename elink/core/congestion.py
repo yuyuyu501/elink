@@ -11,6 +11,13 @@ class NetworkBudget:
         self.last_change = clock()
         self.congested = False
 
+    def set_target(self, target_bps):
+        previous = self.target_bps
+        self.target_bps = target_bps
+        value = min(self.media_bps, target_bps) if self.congested else target_bps
+        if previous != target_bps:
+            self._set(value, self.clock(), 'settings')
+
     def feedback(self, loss, rtt=None):
         now = self.clock()
         if rtt is not None and rtt > 0:

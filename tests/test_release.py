@@ -45,6 +45,9 @@ def package_fixture(tmp_path, monkeypatch):
     receipt = dict(version=publisher.__version__, source_dirty=False, commit='abc', source_sha256={'source': 'hash'},
                    self_test=dict(ok=True, runtime_stopped=True, audio_frames=10, video_frames=90),
                    gpu_test=dict(colors=[dict(native_rgb_error=2)] * 5,
+                                 live_settings=[dict(renderer=r, decoder=d, same_session=True, native_rgb_error=2)
+                                                for r, d in [('cpu', 'software'), ('gpu', 'hardware')] * 3],
+                                 live_capture=[dict(monotonic_pts=True, capture_backend='gpu', max_rgb_error=2)] * 4,
                                  decoder_colors=[dict(width=w, height=h, colorspace=space, color_range=color_range,
                                                       input_format=fmt, hardware_format='nv12',
                                                       software_colorspace=space, hardware_colorspace=space,
@@ -77,7 +80,8 @@ def package_fixture(tmp_path, monkeypatch):
 @pytest.mark.parametrize('problem', ['checksum', 'commit', 'updater', 'source', 'gpu_missing', 'gpu_black',
                                    'fsr_missing', 'fsr_black', 'fsr_timer', 'capture_missing', 'capture_color',
                                    'rtx_missing', 'rtx_fallback', 'rtx_timer', 'rtx_inactive', 'rtx_notice',
-                                   'decoder_colors_missing', 'decoder_clipped', 'decoder_range', 'decoder_native'])
+                                   'decoder_colors_missing', 'decoder_clipped', 'decoder_range', 'decoder_native',
+                                   'live_missing', 'live_reconnect', 'live_black', 'live_capture'])
 def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypatch, problem):
     _, receipt, archive = package_fixture(tmp_path, monkeypatch)
     if problem == 'checksum':
@@ -118,6 +122,14 @@ def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypa
         receipt['gpu_test']['decoder_colors'][0]['hardware_color_range'] = 0
     elif problem == 'decoder_native':
         receipt['gpu_test']['decoder_colors'][0]['native_rgb_error'] = 18
+    elif problem == 'live_missing':
+        receipt['gpu_test'].pop('live_settings')
+    elif problem == 'live_reconnect':
+        receipt['gpu_test']['live_settings'][0]['same_session'] = False
+    elif problem == 'live_black':
+        receipt['gpu_test']['live_settings'][1]['native_rgb_error'] = 240
+    elif problem == 'live_capture':
+        receipt['gpu_test']['live_capture'][0]['monotonic_pts'] = False
     else:
         receipt['source_sha256'] = {}
     (tmp_path / 'verification.json').write_text(json.dumps(receipt), encoding='utf-8')

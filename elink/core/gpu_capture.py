@@ -34,15 +34,19 @@ def calibrated_color_space(frame, reference):
 class D3D11Capture:
     def __init__(self, width, height, draw_mouse):
         self.width, self.height, self.draw_mouse = width, height, draw_mouse
-        self._build(reference=True)
         try:
+            self._build(reference=True)
             frame, reference = self.sink.pull(), self.reference_sink.pull()
             if frame.pts != reference.pts:
                 raise RuntimeError('D3D11 calibration frames are not synchronized')
             self.colorspace, self.color_range = calibrated_color_space(frame, reference)
         finally:
             self.close()
-        self._build()
+        try:
+            self._build()
+        except BaseException:
+            self.close()
+            raise
 
     def _build(self, reference=False):
         self.graph = av.filter.Graph()

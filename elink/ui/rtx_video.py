@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from shiboken6 import delete
 
 from PySide6.QtOpenGL import QOpenGLShader, QOpenGLShaderProgram, QOpenGLTexture
 
@@ -143,5 +144,5 @@ void main() {gl_FragColor=texture2D(sourceTex,uv);}
         self._release_texture()
         if self.program:
             self.program.removeAllShaders()
-            self.program.deleteLater()
+            delete(self.program)
             self.program = None
