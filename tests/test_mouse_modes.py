@@ -114,3 +114,49 @@ def test_remote_key_event_separates_navigation_and_keypad_digits():
     assert remote_key_event(FakeKey(Qt.Key.Key_Down, 0x28, 0x50,
                                     Qt.KeyboardModifier.KeypadModifier), True) == {
         'type': 'key', 'vk': 0x28, 'scan': 0x50, 'extended': True, 'down': True}
+
+
+def mouse_event(player, point, kind=QEvent.Type.MouseMove):
+    button = Qt.MouseButton.NoButton if kind == QEvent.Type.MouseMove else Qt.MouseButton.LeftButton
+    return QMouseEvent(kind, QPointF(point), QPointF(player.mapToGlobal(point)), button, button,
+                       Qt.KeyboardModifier.NoModifier)
+
+
+def test_desktop_pointer_only_releases_outside_video_and_cannot_click_both_sides():
+    app, player, events = make_player()
+    try:
+        player.set_mouse_mode('local')
+        player.capture()
+        rect = player.rect_image
+        QApplication.sendEvent(player, mouse_event(player, rect.bottomRight()))
+        assert player.captured and player.software_cursor
+        assert player.cursor().shape() == Qt.CursorShape.BlankCursor
+        outside = rect.bottomRight() + QPoint(0, 1)
+        QApplication.sendEvent(player, mouse_event(player, outside))
+        assert not player.captured and not player.software_cursor
+        assert events[-1] == ('focus', False)
+        events.clear()
+        QApplication.sendEvent(player, mouse_event(player, outside, QEvent.Type.MouseButtonPress))
+        assert not player.captured and not events, 'black bars must not start remote input'
+
+        player.capture()
+        events.clear()
+        QApplication.sendEvent(player, mouse_event(player, outside, QEvent.Type.MouseButtonPress))
+        assert events == [('focus', False)], 'release input instead of forwarding an outside click'
+    finally:
+        player.close()
+
+
+def test_relative_pointer_at_edge_stays_captured_and_releases_native_constraint(monkeypatch):
+    app, player, events = make_player()
+    released = []
+    monkeypatch.setattr(player.cursor_confinement, 'release', lambda: released.append(True))
+    try:
+        player.set_mouse_mode('remote')
+        player.capture()
+        QApplication.sendEvent(player, mouse_event(player, player.rect_image.bottomRight()))
+        assert player.captured and player.game_mouse
+        player.open_controls()
+        assert released and not player.captured and not player.raw_mouse.active
+    finally:
+        player.close()

@@ -13,7 +13,7 @@ from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_res
 from .control_center import ControlCenter
 
 from ..core.statistics import StreamStats, overlay_lines
-from ..core.input import RawMouseInput, RemoteKeyboardHook, XInput
+from ..core.input import CursorConfinement, RawMouseInput, RemoteKeyboardHook, XInput
 from ..core import codecs
 from ..core.mouse import MouseSensitivity, mouse_mode, relative_mouse
 
@@ -108,6 +108,7 @@ class Player(QWidget):
         self.xinput = XInput() if controllers else None
         self.keyboard_hook = RemoteKeyboardHook(self.send, lambda: self.captured)
         self.raw_mouse = RawMouseInput()
+        self.cursor_confinement = CursorConfinement()
         self.setWindowTitle("Elink · 远程桌面")
         self.setMinimumSize(640, 400)
         self.make_toolbar()
@@ -458,24 +459,33 @@ class Player(QWidget):
             self._absolute_last = self._absolute_pos = None
             self.mouse_sensitivity.remainder = [0.0, 0.0]
             if relative:
-                self.grabMouse()
-                QCursor.setPos(self.mapToGlobal(self.rect().center()))
+                self.grabMouse(QCursor(Qt.CursorShape.BlankCursor))
+                QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
                 try:
                     self.raw_mouse.start(int(self.winId()))
                 except OSError as exc:
                     self.show_error(f"无法读取主控端原始鼠标输入：{exc}")
             else:
+                self.cursor_confinement.release()
                 self.releaseMouse()
                 self.raw_mouse.stop()
             self.game_mouse = relative
         if force or local != self.local_cursor:
             self.setCursor(Qt.CursorShape.ArrowCursor if local else Qt.CursorShape.BlankCursor)
             self.local_cursor = local
+        if relative and QApplication.platformName() == 'windows':
+            try:
+                rect = self.rect_image.intersected(self.video_viewport())
+                self.cursor_confinement.confine(int(self.winId()), rect.getRect(), (self.width(), self.height()))
+            except OSError as exc:
+                self.release()
+                self.show_error(f'无法约束主控端鼠标：{exc}')
 
     def release(self):
         self.captured = False
         self.keyboard_hook.stop()
         self.raw_mouse.stop()
+        self.cursor_confinement.release()
         self.runtime.call(self.client.focus, False)
         self.releaseMouse()
         self.unsetCursor()
@@ -659,11 +669,13 @@ class Player(QWidget):
     def mouseMoveEvent(self, event):
         if not self.captured:
             return
+        if self.release_outside_video(event.position()):
+            return
         if self.game_mouse:
             # Relative input comes from Raw Input, preserving controller-side
             # device counts instead of Qt's accelerated pointer coordinates.
             if not self.raw_mouse.active:
-                center = self.rect().center()
+                center = self.rect_image.center()
                 delta = event.position().toPoint() - center
                 if not delta.isNull():
                     self.send_relative_motion(delta.x(), delta.y())
@@ -714,7 +726,7 @@ class Player(QWidget):
     def mousePressEvent(self, event):
         if not self.captured:
             has_frame = self.image is not None or (self.gpu_surface is not None and self.gpu_surface.frame is not None)
-            if self.client.pc and self.video_viewport().contains(event.position().toPoint()) and has_frame:
+            if self.client.pc and self.rect_image.contains(event.position().toPoint()) and has_frame:
                 self.capture()
             return
         self.mouse_button(event, True)
@@ -724,13 +736,26 @@ class Player(QWidget):
             self.mouse_button(event, False)
 
     def mouse_button(self, event, down):
+        if self.release_outside_video(event.position()):
+            return
         name = {Qt.MouseButton.LeftButton: "left", Qt.MouseButton.RightButton: "right", Qt.MouseButton.MiddleButton: "middle"}.get(event.button())
         if name:
             self.send({"type": "button", "button": name, "down": down})
 
     def wheelEvent(self, event):
-        if self.captured:
+        if self.captured and not self.release_outside_video(event.position()):
             self.send({"type": "wheel", "delta": event.angleDelta().y()})
+
+    def release_outside_video(self, position):
+        if not self.game_mouse and not self.rect_image.contains(position.toPoint()):
+            self.release()
+            return True
+        return False
+
+    def leaveEvent(self, event):
+        if self.captured:
+            self.release_outside_video(QPointF(self.mapFromGlobal(QCursor.pos())))
+        super().leaveEvent(event)
 
     def event(self, event):
         if getattr(self, 'captured', False) and event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):

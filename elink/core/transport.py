@@ -29,6 +29,31 @@ from .profiling import PipelineProfile
 from .statistics import StreamStats, ReceiveSampler, selected_route
 
 
+SESSION_CLOSE_TIMEOUT = 5.0
+CONTROL_HEARTBEAT_TIMEOUT = 6.0
+
+
+async def cleanup_step(awaitable, label, notify, timeout=SESSION_CLOSE_TIMEOUT):
+    try:
+        await asyncio.wait_for(awaitable, timeout)
+        return True
+    except Exception as exc:
+        detail = '超时' if isinstance(exc, TimeoutError) else str(exc)
+        notify(f'会话清理（{label}）：{detail}')
+        return False
+
+
+async def close_peer(pc, notify):
+    if await cleanup_step(pc.close(), '连接', notify, SESSION_CLOSE_TIMEOUT):
+        return
+    # A stalled RTP sender must not keep the old ICE sockets accepting traffic.
+    transports = {t.receiver.transport for t in pc.getTransceivers()}
+    if pc.sctp:
+        transports.add(pc.sctp.transport)
+    await asyncio.gather(*(cleanup_step(t.stop(), 'DTLS', notify, SESSION_CLOSE_TIMEOUT) for t in transports))
+    await asyncio.gather(*(cleanup_step(t.transport.stop(), 'ICE', notify, SESSION_CLOSE_TIMEOUT) for t in transports))
+
+
 def video_preferences(pc):
     # High profile enables CABAC. Level 5.2 covers up to 4K60; settings()
     # validates the macroblock rate for higher frame rates.
@@ -112,6 +137,7 @@ class HostServer:
         self.ending = False
         self.end_task = None
         self.created = 0.0
+        self.control_seen_at = 0.0
         self.input_errors = set()
         self.control_channel = None
         self.profile = PipelineProfile()
@@ -209,6 +235,7 @@ class HostServer:
                                   encoded_width=coded_width, encoded_height=coded_height,
                                   render_scale=config['render_scale'], target_bps=config['bitrate'] * 1_000_000)
             self.created = time.monotonic()
+            self.control_seen_at = 0.0
             self.stream_config = config
             self.input_errors.clear()
             codecs.encode_policy = codecs.CodecPolicy(config["fps"], config["bitrate"] * 1_000_000)
@@ -217,7 +244,7 @@ class HostServer:
 
             def feedback(event):
                 def send():
-                    if reliable_channel and reliable_channel.readyState == "open" and reliable_channel.bufferedAmount < 16384:
+                    if self.pc is pc and reliable_channel and reliable_channel.readyState == "open" and reliable_channel.bufferedAmount < 16384:
                         reliable_channel.send(json.dumps(event))
                 loop.call_soon_threadsafe(send)
 
@@ -227,6 +254,9 @@ class HostServer:
             @pc.on("datachannel")
             def on_channel(channel):
                 nonlocal reliable_channel
+                if self.pc is not pc:
+                    channel.close()
+                    return
                 reliable = channel.label == "control"
                 if channel.label not in ("control", "motion") or reliable and reliable_channel is not None:
                     channel.close()
@@ -234,6 +264,12 @@ class HostServer:
                 if reliable:
                     reliable_channel = channel
                     self.control_channel = channel
+                    self.control_seen_at = time.monotonic()
+
+                    @channel.on('close')
+                    def control_closed():
+                        if self.pc is pc:
+                            asyncio.create_task(self.end_session(pc))
                 count, period = 0, time.monotonic()
 
                 @channel.on("message")
@@ -257,6 +293,9 @@ class HostServer:
                             return
                         if len(raw) > 2048:
                             return
+                        if reliable and isinstance(event, dict) and event.get('type') == 'disconnect':
+                            asyncio.create_task(self.end_session(pc))
+                            return
                         if reliable and isinstance(event, dict) and event.get('type') == 'cursor-mode':
                             mode = event.get('mode')
                             if mode in ('smart', 'remote', 'local'):
@@ -273,7 +312,8 @@ class HostServer:
                                           'cursor_visible': video.cursor_visible if video else None,
                                           'encoder': codecs.metrics.get('encoder', '未启动')})
                             return
-                        input_session.receive(raw, reliable)
+                        if input_session.receive(raw, reliable) and reliable and event.get('type') == 'heartbeat':
+                            self.control_seen_at = now
                     except Exception as exc:
                         message = str(exc)[:200]
                         if message not in self.input_errors:
@@ -285,7 +325,7 @@ class HostServer:
             async def state():
                 self.notify(f"被控会话：{pc.connectionState}")
                 if pc.connectionState in ("failed", "closed") and self.pc is pc:
-                    await self.end_session()
+                    await self.end_session(pc)
 
             try:
                 await pc.setRemoteDescription(RTCSessionDescription(data["sdp"], "offer"))
@@ -313,7 +353,7 @@ class HostServer:
                     raise ValidationError("会话已取消。")
                 return web.json_response({"id": self.session_id, "type": pc.localDescription.type, "sdp": pc.localDescription.sdp})
             except BaseException:
-                await self.end_session()
+                await self.end_session(pc)
                 raise
 
     async def performance(self, request):
@@ -367,12 +407,16 @@ class HostServer:
             if self.input:
                 self.input.watchdog()
             if self.pc:
-                expired = time.monotonic() - self.created > 20 and (self.pc.connectionState != "connected" or time.monotonic() - self.input.heartbeat > 15)
+                now = time.monotonic()
+                expired = (now - self.control_seen_at > CONTROL_HEARTBEAT_TIMEOUT if self.control_seen_at
+                           else now - self.created > 20)
                 if expired:
                     self.notify("会话超时，已释放输入。")
                     await self.end_session()
 
-    async def end_session(self):
+    async def end_session(self, expected_pc=None):
+        if expected_pc is not None and self.pc is not expected_pc:
+            return
         await self._end_session()
 
     async def _end_session(self):
@@ -381,8 +425,10 @@ class HostServer:
             self.ending = True
             input_session, self.input = self.input, None
             tracks, self.tracks = self.tracks, []
+            channel, self.control_channel = self.control_channel, None
+            clipboard, self.clipboard_task = self.clipboard_task, None
             self.session_id = self.device_id = ""
-            self.end_task = asyncio.create_task(self.finish_session(pc, input_session, tracks))
+            self.end_task = asyncio.create_task(self.finish_session(pc, input_session, tracks, channel, clipboard))
         if self.end_task:
             # Cancelling a watchdog/request must not interrupt native transport teardown.
             await asyncio.shield(self.end_task)
@@ -396,27 +442,31 @@ class HostServer:
             self.clipboard_seen = value
             send({"type": "clipboard", "text": value})
 
-    async def finish_session(self, pc, input_session, tracks):
+    async def finish_session(self, pc, input_session, tracks, channel, clipboard):
         try:
-            if self.clipboard_task:
-                self.clipboard_task.cancel()
-                await asyncio.gather(self.clipboard_task, return_exceptions=True)
-                self.clipboard_task = None
-            if input_session:
-                input_session.close()
-            for track in tracks:
-                track.stop()
-            channel, self.control_channel = self.control_channel, None
-            if channel and channel.readyState == "open":
-                channel.send(json.dumps({"type": "ended"}))
-                await asyncio.sleep(0.05)
-            await pc.close()
-        finally:
+            # Release input before any await, even if another cleanup step fails.
+            resources = ([input_session.close] if input_session else []) + [t.stop for t in tracks]
+            for release in resources:
+                try:
+                    release()
+                except Exception as exc:
+                    self.notify(f'会话资源释放失败：{exc}')
+            if clipboard:
+                clipboard.cancel()
+                await cleanup_step(asyncio.gather(clipboard, return_exceptions=True), '剪贴板', self.notify)
+            try:
+                if channel and channel.readyState == "open":
+                    channel.send(json.dumps({"type": "ended"}))
+                    await asyncio.sleep(0.05)
+            except Exception as exc:
+                self.notify(f'断开通知发送失败：{exc}')
+            await close_peer(pc, self.notify)
             for track in tracks:
                 if isinstance(track, DesktopTrack) and getattr(track, "release_future", None):
-                    await asyncio.wrap_future(track.release_future)
+                    await cleanup_step(asyncio.shield(asyncio.wrap_future(track.release_future)), '采集', self.notify)
                 if isinstance(track, LoopbackTrack):
-                    await asyncio.to_thread(track.thread.join, 1)
+                    await cleanup_step(asyncio.to_thread(track.thread.join, 1), '音频', self.notify)
+        finally:
             self.ending = False
 
     async def stop(self):
@@ -508,6 +558,7 @@ class Client:
         self.connected_at = 0.0
         self.lock = asyncio.Lock()
         self.close_task = None
+        self.disconnect_task = None
         self.stats = StreamStats()
         self.encoder = "--"
         self.cursor_supported = False
@@ -576,6 +627,8 @@ class Client:
 
             @self.control.on("message")
             def message(raw):
+                if self.pc is not pc:
+                    return
                 try:
                     if not isinstance(raw, str):
                         return
@@ -869,26 +922,42 @@ class Client:
             await asyncio.sleep(0.5)
 
     async def disconnect(self):
+        if self.disconnect_task is None or self.disconnect_task.done():
+            self.disconnect_task = asyncio.create_task(self._disconnect_locked())
+        await asyncio.shield(self.disconnect_task)
+
+    async def _disconnect_locked(self):
         async with self.lock:
             await self._disconnect()
 
     async def _disconnect(self):
-        self.focus(False)
+        try:
+            self.focus(False)
+            self.send({'type': 'disconnect'})
+        except Exception:
+            pass  # HTTPS and the host watchdog are independent fallbacks.
         pc, self.pc = self.pc, None
+        identifier, self.session_id = self.session_id, ''
+        endpoint, fp, token = self.endpoint, getattr(self, 'fp', ''), getattr(self, 'token', '')
+        self.control = self.motion = None
+
+        async def notify_host():
+            if identifier:
+                try:
+                    await asyncio.wait_for(request(endpoint, fp, 'DELETE', f'/v1/session/{identifier}', token=token), 4)
+                except Exception:
+                    pass
+
+        notification = asyncio.create_task(notify_host())
         current = asyncio.current_task()
         tasks = [t for t in self.tasks if t is not current]
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await cleanup_step(asyncio.gather(*tasks, return_exceptions=True), '接收任务', self.notify)
         if self.output:
-            self.output.close()
-            self.output = None
-        if pc:
-            await pc.close()
-        if self.session_id:
-            identifier, self.session_id = self.session_id, ""
             try:
-                await asyncio.wait_for(request(self.endpoint, self.fp, "DELETE", f"/v1/session/{identifier}", token=self.token), 4)
-            except Exception:
-                pass
-        self.control = self.motion = None
+                self.output.close()
+            except Exception as exc:
+                self.notify(f'音频输出释放失败：{exc}')
+            self.output = None
+        await asyncio.gather(notification, close_peer(pc, self.notify) if pc else asyncio.sleep(0))

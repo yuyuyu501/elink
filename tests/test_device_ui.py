@@ -25,6 +25,28 @@ def close(window, app):
     pump(app, lambda: window._closed)
 
 
+def test_error_notice_dismiss_and_redisplay_preserves_log(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    apply_theme(app)
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
+    window.show()
+    try:
+        window.report_error('connection failed <plain text>\n' * 4)
+        app.processEvents()
+        assert window.notice.isVisible() and window.notice_close.isVisible()
+        assert window.notice.textFormat() == Qt.TextFormat.PlainText
+        log = window.log.toPlainText()
+        window.notice_close.click()
+        assert not window.notice.isVisible() and not window.notice_bar.isVisible()
+        assert window.log.toPlainText() == log
+        window.report_error('another failure')
+        app.processEvents()
+        assert window.notice.isVisible() and window.notice.text() == 'another failure'
+        assert window.notice.geometry().right() < window.notice_close.geometry().left()
+    finally:
+        close(window, app)
+
+
 def test_device_single_click_failure_and_refresh_preserves_busy(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     apply_theme(app)

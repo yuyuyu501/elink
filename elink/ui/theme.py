@@ -12,6 +12,12 @@ QLabel#sectionTitle { font-size: 15px; font-weight: 600; }
 QLabel#muted { color: #70809b; }
 QLabel#notice { padding: 12px; background: #eaf0ff; color: #3155a0; border-radius: 8px; }
 QLabel#errorNotice { padding: 12px; background: #fff0ee; color: #a53232; border: 1px solid #f0c4bd; border-radius: 8px; }
+QFrame#notice { background: #eaf0ff; border-radius: 8px; }
+QFrame#notice QLabel { color: #3155a0; }
+QFrame#errorNotice { background: #fff0ee; border: 1px solid #f0c4bd; border-radius: 8px; }
+QFrame#errorNotice QLabel { color: #a53232; }
+QPushButton#noticeClose { min-height: 0; padding: 0; border: 0; background: transparent; border-radius: 4px; }
+QPushButton#noticeClose:hover { background: #f4d5d0; }
 QLabel#emptyState { color: #70809b; line-height: 24px; }
 QFrame#localDevice { background: #eaf0fc; border: 1px solid #dfe6f1; border-radius: 10px; padding: 8px; }
 QPushButton, QToolButton { min-height: 28px; border: 1px solid #dfe6f1; background: #ffffff;

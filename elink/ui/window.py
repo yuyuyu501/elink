@@ -24,6 +24,7 @@ from .. import startup
 from .player import Player
 from .about import AboutPage
 from .controls import StreamOptions, DeviceCard
+from .chrome import window_icon
 from .. import __version__
 
 
@@ -86,11 +87,24 @@ class MainWindow(QMainWindow):
         title.addWidget(text_label(f"WINDOWS  /  {__version__} PREVIEW", "muted"))
         layout.addLayout(title)
         layout.addWidget(text_label("你的设备，随时连接。", "muted"))
-        self.notice = text_label("", "errorNotice")
+        self.notice_bar = QFrame()
+        self.notice_bar.setObjectName('errorNotice')
+        notice_row = QHBoxLayout(self.notice_bar)
+        notice_row.setContentsMargins(12, 8, 8, 8)
+        self.notice = text_label('', 'noticeText')
         self.notice.setTextFormat(Qt.TextFormat.PlainText)
         self.notice.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.notice.hide()
-        layout.addWidget(self.notice)
+        notice_row.addWidget(self.notice, 1)
+        self.notice_close = QPushButton()
+        self.notice_close.setObjectName('noticeClose')
+        self.notice_close.setIcon(window_icon('close'))
+        self.notice_close.setToolTip('关闭提示')
+        self.notice_close.setAccessibleName('关闭提示')
+        self.notice_close.setFixedSize(32, 32)
+        self.notice_close.clicked.connect(self.notice_bar.hide)
+        notice_row.addWidget(self.notice_close, 0, Qt.AlignmentFlag.AlignTop)
+        self.notice_bar.hide()
+        layout.addWidget(self.notice_bar)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
         self.make_remote()
@@ -297,11 +311,12 @@ class MainWindow(QMainWindow):
         self.network_dialog.activateWindow()
 
     def show_notice(self, message, error=True):
-        self.notice.setObjectName("errorNotice" if error else "notice")
+        self.notice_bar.setObjectName("errorNotice" if error else "notice")
         self.notice.setText(str(message))
-        self.notice.style().unpolish(self.notice)
-        self.notice.style().polish(self.notice)
-        self.notice.show()
+        for widget in (self.notice_bar, self.notice):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+        self.notice_bar.show()
 
     def handle_message(self, message):
         if message.startswith(("控制端会话：", "被控会话：")):
@@ -337,7 +352,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.report_error(str(exc))
             return
-        self.notice.hide()
+        self.notice_bar.hide()
         self.session_address = address
         self.save_config()
         self.show_notice(f"正在连接 {address}…", error=False)
@@ -369,7 +384,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self.session_address = result[0]
-        self.notice.hide()
+        self.notice_bar.hide()
         self.player = Player(self.runtime, self.client, controllers=self.controllers.isChecked(), preferences=self.options.values())
         self.player.settings_changed.connect(self.update_session_preferences)
         self.player.reconfigure.connect(self.reconfigure_session)
@@ -479,7 +494,10 @@ class MainWindow(QMainWindow):
 
     def end_host_session(self):
         if self.server:
-            self.runtime.submit(self.server.end_session(), lambda _: self.append_log("已断开当前控制端。"))
+            def ended(_):
+                self.append_log('已断开当前控制端。')
+                self.refresh_host()
+            self.runtime.submit(self.server.end_session(), ended, self.report_error)
 
     def refresh_host(self):
         if self.auto_host and not self._closing and not self.host_starting and time.monotonic() >= self.host_retry_at:
@@ -489,16 +507,19 @@ class MainWindow(QMainWindow):
             return
         self.poll_pending = True
         async def snapshot():
-            return self.server.device_id, self.server.pc is not None or self.server.ending, self.server.port if self.server.runner else None
+            return (self.server.device_id, self.server.pc is not None, self.server.ending,
+                    self.server.port if self.server.runner else None)
         def display(result):
             self.poll_pending = False
             if self._closing:
                 return
-            address, active, port = result
+            address, connected, ending, port = result
+            active = connected or ending
             if port:
-                self.host_status.setText(f"{'占用中' if active else '可连接'} · TCP {port}")
+                state = '正在断开' if ending else '占用中' if connected else '可连接'
+                self.host_status.setText(f'{state} · TCP {port}')
             self.apply_host_button.setEnabled(not active and not self.host_starting)
-            self.session_status.setText(f"当前控制端：{address}" if active else "当前无串流连接")
+            self.session_status.setText('正在释放会话资源…' if ending else f'当前控制端：{address}' if connected else '当前无串流连接')
             self.end_session_button.setEnabled(active)
             self.end_session_button.setVisible(active)
         self.runtime.submit(snapshot(), display, lambda _: setattr(self, "poll_pending", False))

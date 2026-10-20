@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes as c
 import json
+import math
 import os
 import time
 from ctypes import wintypes as w
@@ -59,6 +60,51 @@ class _RawInput(c.Structure):
 class _WindowsMessage(c.Structure):
     _fields_ = [("hwnd", w.HWND), ("message", w.UINT), ("wParam", w.WPARAM), ("lParam", w.LPARAM),
                 ("time", w.DWORD), ("pt_x", w.LONG), ("pt_y", w.LONG)]
+
+
+class CursorConfinement:
+    """Constrain the native pointer, using native client pixels for mixed DPI."""
+
+    def __init__(self):
+        self._bounds = None
+        self._user32 = None
+        if os.name == 'nt':
+            self._user32 = c.WinDLL('user32', use_last_error=True)
+            for name, args in (
+                ('GetClientRect', [w.HWND, c.POINTER(w.RECT)]),
+                ('ClientToScreen', [w.HWND, c.POINTER(w.POINT)]),
+                ('ClipCursor', [c.POINTER(w.RECT)]),
+                ('GetClipCursor', [c.POINTER(w.RECT)]),
+            ):
+                function = getattr(self._user32, name)
+                function.argtypes, function.restype = args, w.BOOL
+
+    def confine(self, hwnd, bounds, size):
+        if self._user32 is None:
+            return
+        client, origin = w.RECT(), w.POINT()
+        if not self._user32.GetClientRect(hwnd, c.byref(client)) or not self._user32.ClientToScreen(hwnd, c.byref(origin)):
+            raise c.WinError(c.get_last_error())
+        x, y, width, height = bounds
+        sx, sy = client.right / max(1, size[0]), client.bottom / max(1, size[1])
+        rect = (origin.x + math.floor(x * sx), origin.y + math.floor(y * sy),
+                origin.x + math.ceil((x + width) * sx), origin.y + math.ceil((y + height) * sy))
+        if width <= 0 or height <= 0 or rect[2] <= rect[0] or rect[3] <= rect[1]:
+            self.release()
+            return
+        if rect != self._bounds:
+            native = w.RECT(*rect)
+            if not self._user32.ClipCursor(c.byref(native)):
+                raise c.WinError(c.get_last_error())
+            self._bounds = rect
+
+    def release(self):
+        if self._bounds is not None:
+            rect = w.RECT()
+            # Do not undo a constraint installed by another foreground window.
+            if self._user32.GetClipCursor(c.byref(rect)) and (rect.left, rect.top, rect.right, rect.bottom) == self._bounds:
+                self._user32.ClipCursor(None)
+            self._bounds = None
 
 
 class RawMouseInput:
