@@ -1,15 +1,16 @@
-"""Check native Windows pointer confinement on synthetic CPU/GPU players.
+"""Check windowed pointer exit and fullscreen capture on CPU/GPU players.
 
 Run on an unlocked Windows desktop. Moves the local pointer briefly, restores
-it afterwards, and never injects remote input. --baseline disables confinement
-to demonstrate the former pointer escape with the same Qt/Raw Input path.
+it afterwards, and never injects remote input. Uses only isolated test players.
 """
 import argparse
 import ctypes
 from ctypes import wintypes
 import json
+from pathlib import Path
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import av
 import numpy as np
@@ -30,10 +31,12 @@ class Runtime(QObject):
         function(*args)
 
 
-def settle(app):
+def settle(app, until=None):
     deadline = time.monotonic() + .12
     while time.monotonic() < deadline:
         app.processEvents()
+        if until and until():
+            return
         time.sleep(.002)
 
 
@@ -44,14 +47,64 @@ def clip_bounds():
     return rect.left, rect.top, rect.right, rect.bottom
 
 
-def check(app, renderer, baseline):
+def present(view, renderer, source_size):
+    width, height = source_size
+    pixels = np.full((height, width, 3), (40, 160, 80), dtype=np.uint8)
+    if renderer == 'gpu':
+        assert view.gpu_surface is not None, 'GPU renderer fell back'
+        view.gpu_surface.set_frame(av.VideoFrame.from_ndarray(pixels, format='bgr24').reformat(format='yuv420p'))
+    else:
+        view.set_frame_pixels(pixels)
+    view.refresh_video()
+
+
+def check_windowed(app, view, client, events, before, mode, visible, fallback=False):
+    client.cursor_visible = visible
+    view.set_mouse_mode(mode)
+    rect = view.rect_image
+    points = [(QPoint(rect.left() + 1, rect.center().y()), QPoint(rect.left() - 4, rect.center().y())),
+              (QPoint(rect.right() - 1, rect.center().y()), QPoint(rect.right() + 4, rect.center().y())),
+              (QPoint(rect.center().x(), rect.top() + 1), QPoint(rect.center().x(), rect.top() - 4)),
+              (QPoint(rect.center().x(), rect.bottom() - 1), QPoint(rect.center().x(), rect.bottom() + 4))]
+    for inside, outside in points:
+        view.release()
+        QCursor.setPos(view.mapToGlobal(rect.center()))
+        settle(app)
+        client.cursor_updated = time.monotonic()
+        with patch.object(QCursor, 'setPos', wraps=QCursor.setPos) as warp:
+            view.capture()
+            settle(app, lambda: view.captured)
+            assert view.captured and not warp.called, (
+                'windowed capture changed', mode, visible, view.captured, QCursor.pos(),
+                view.rect_image.getRect(), view.isActiveWindow(), events[-5:])
+        assert clip_bounds() == before, 'windowed sessions must not confine the system pointer'
+        if not visible or mode == 'remote':
+            assert view.game_mouse and (fallback or view.raw_mouse.active)
+        QCursor.setPos(view.mapToGlobal(inside))
+        settle(app, lambda: view.captured)
+        assert view.captured and view.cursor().shape() == Qt.CursorShape.BlankCursor, (
+            mode, rect.getRect(), inside, view.mapFromGlobal(QCursor.pos()), events[-5:])
+        assert all(not handle.isVisible() for handle in view.resize_handles)
+        events.clear()
+        QCursor.setPos(view.mapToGlobal(outside))
+        assert not view.video_contains(view.mapFromGlobal(QCursor.pos())), (
+            'pointer did not cross video edge', mode, visible, outside, view.mapFromGlobal(QCursor.pos()),
+            view.rect_image.getRect(), view.captured, clip_bounds(), events[-5:])
+        settle(app, lambda: not view.captured)
+        assert not view.captured and not view.software_cursor and not view.raw_mouse.active, (
+            'pointer exit was not released', mode, visible, rect.getRect(), outside,
+            view.mapFromGlobal(QCursor.pos()), view.isActiveWindow(), events[-5:])
+        assert events[-1] == ('focus', False) and clip_bounds() == before
+    return dict(mode=mode, host_cursor_visible=visible, fallback=fallback, four_edges=True)
+
+
+def check(app, renderer):
     events = []
     client = SimpleNamespace(pc=object(), mailbox=FrameMailbox(), rtt_ms=0, last_pong=time.monotonic(),
                              cursor_supported=True, cursor_visible=False, cursor_updated=time.monotonic(),
                              set_cursor_mode=lambda _: None, set_renderer=lambda _: None,
                              focus=lambda value: events.append(('focus', value)), send=lambda e: events.append(('input', e)))
     view = Player(Runtime(), client, controllers=False, preferences={'renderer': renderer, 'mouse_mode': 'local'})
-    view.timer.stop()
     view.resize(900, 620)
     view.move(view.screen().availableGeometry().topLeft() + QPoint(30, 30))
     view.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
@@ -61,69 +114,63 @@ def check(app, renderer, baseline):
     settle(app)
     before = clip_bounds()
     try:
-        pixels = np.full((360, 640, 3), (40, 160, 80), dtype=np.uint8)
-        if renderer == 'gpu':
-            assert view.gpu_surface is not None, 'GPU renderer fell back'
-            view.gpu_surface.set_frame(av.VideoFrame.from_ndarray(pixels, format='bgr24').reformat(format='yuv420p'))
-        else:
-            view.set_frame_pixels(pixels)
-        view.refresh_video()
+        present(view, renderer, (640, 360))
         settle(app)
         assert view.isActiveWindow() and not view.rect_image.isEmpty()
-        if baseline:
-            view.cursor_confinement.confine = lambda *args: None
+        windowed = []
+        for size, source_size in (((640, 400), (640, 360)), ((1000, 650), (480, 360))):
+            view.resize(*size)
+            present(view, renderer, source_size)
+            settle(app)
+            for mode, visible in (('smart', True), ('smart', False), ('local', True),
+                                  ('local', False), ('remote', True)):
+                result = check_windowed(app, view, client, events, before, mode, visible)
+                windowed.append(dict(size=size, source_size=source_size, **result))
+        start = view.raw_mouse.start
+        view.raw_mouse.start = lambda _: False
+        try:
+            windowed.append(check_windowed(app, view, client, events, before, 'remote', False, fallback=True))
+        finally:
+            view.raw_mouse.start = start
+
+        # Fullscreen games retain continuous relative input and release on F8.
+        view.showFullScreen()
+        settle(app)
+        client.cursor_visible = False
+        client.cursor_updated = time.monotonic()
         QCursor.setPos(view.mapToGlobal(view.rect_image.center()))
         view.capture()
         settle(app)
         assert view.captured and view.game_mouse and view.raw_mouse.active
         QCursor.setPos(view.mapToGlobal(QPoint(view.width() + 80, view.height() // 2)))
         settle(app)
-        escaped = not view.rect_image.contains(view.mapFromGlobal(QCursor.pos()))
-        assert escaped == baseline, f'Unexpected pointer escape: {escaped}'
-        assert view.captured, 'relative input should remain captured at a game boundary'
-        if not baseline:
-            bounds = clip_bounds()
-            view.move(view.pos() + QPoint(25, 15))
-            view.update_mouse()
-            assert clip_bounds() != bounds, 'constraint must follow a moved window'
-            view.move(view.screen().geometry().topLeft() - QPoint(100, 20))
-            view.update_mouse()
-        view.open_controls()
+        assert view.video_contains(view.mapFromGlobal(QCursor.pos())) and view.captured
+        QTest.keyClick(view, Qt.Key.Key_F8)
         settle(app)
         assert not view.captured and not view.raw_mouse.active and clip_bounds() == before
-        view.move(view.screen().availableGeometry().topLeft() + QPoint(30, 30))
         view.open_controls()
+        view.showNormal()
+        view.move(view.screen().availableGeometry().topLeft() + QPoint(30, 30))
         settle(app)
-        # Return to desktop mapping. Crossing a letterbox border releases input.
-        client.cursor_visible = True
-        client.cursor_updated = time.monotonic()
+        assert not view.captured and clip_bounds() == before
+        # Windowed input still releases on F8 and focus loss, including offscreen windows.
+        view.move(view.screen().geometry().topLeft() - QPoint(100, 20))
+        settle(app)
         QCursor.setPos(view.mapToGlobal(view.rect_image.center()))
-        settle(app)
         view.capture()
-        settle(app)
-        assert view.captured and view.software_cursor and not view.game_mouse
-        QCursor.setPos(view.mapToGlobal(view.rect_image.topLeft() + QPoint(10, 10)))
-        settle(app)
-        assert view.captured, (renderer, view.rect_image.getRect(), view.mapFromGlobal(QCursor.pos()),
-                               view.isActiveWindow(), events[-5:])
-        QCursor.setPos(view.mapToGlobal(QPoint(view.width() + 40, view.height() // 2)))
-        settle(app)
-        assert not view.captured and not view.software_cursor and events[-1] == ('focus', False)
+        view.update_mouse()
         assert clip_bounds() == before
-        # F8 and focus loss must both release the game constraint and raw input.
-        client.cursor_visible = False
-        client.cursor_updated = time.monotonic()
-        view.capture()
         QTest.keyClick(view, Qt.Key.Key_F8)
         settle(app)
         assert not view.captured and clip_bounds() == before
         view.open_controls()
+        QCursor.setPos(view.mapToGlobal(view.rect_image.center()))
         view.capture()
         assert view.captured
         QApplication.sendEvent(view, QEvent(QEvent.Type.WindowDeactivate))
         assert not view.captured and not view.raw_mouse.active and clip_bounds() == before
-        return dict(renderer=renderer, baseline=baseline, pointer_escaped=escaped,
-                    desktop_exit=True, f8_release=True, focus_release=True, offscreen_release=not baseline)
+        return dict(renderer=renderer, windowed=windowed, fullscreen_confined=True,
+                    f8_release=True, focus_release=True, offscreen_unconfined=True)
     finally:
         view.close()
         settle(app)
@@ -132,7 +179,7 @@ def check(app, renderer, baseline):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline', action='store_true')
+    parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     app = QApplication.instance() or QApplication([])
     if app.platformName() != 'windows':
@@ -140,8 +187,12 @@ def main():
     apply_theme(app)
     original = QCursor.pos()
     try:
-        results = [check(app, renderer, args.baseline) for renderer in ('cpu', 'gpu')]
-        print(json.dumps(dict(ok=True, checks=results), indent=2))
+        results = [check(app, renderer) for renderer in ('cpu', 'gpu')]
+        report = json.dumps(dict(ok=True, scale_factor=app.devicePixelRatio(), checks=results), indent=2)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(report, encoding='utf-8')
+        print(report)
     finally:
         QCursor.setPos(original)
 

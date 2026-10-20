@@ -1,8 +1,9 @@
 import json
 import time
 
+import pytest
 from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QCursor, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from test_player_chrome import make_player
@@ -158,5 +159,135 @@ def test_relative_pointer_at_edge_stays_captured_and_releases_native_constraint(
         assert player.captured and player.game_mouse
         player.open_controls()
         assert released and not player.captured and not player.raw_mouse.active
+    finally:
+        player.close()
+
+
+@pytest.mark.parametrize('size', [(640, 400), (1000, 650)])
+@pytest.mark.parametrize('mode,visible', [('smart', True), ('smart', False), ('local', True),
+                                         ('local', False), ('remote', True)])
+def test_windowed_pointer_releases_at_each_video_edge_without_warp_or_constraint(monkeypatch, size, mode, visible):
+    app, player, events = make_player()
+    warps, constraints = [], []
+    monkeypatch.setattr(QCursor, 'setPos', lambda point: warps.append(point))
+    monkeypatch.setattr(player.cursor_confinement, 'confine', lambda *args: constraints.append(args))
+    player.client.cursor_supported = True
+    player.client.cursor_visible = visible
+    player.client.cursor_updated = time.monotonic()
+    try:
+        player.resize(*size)
+        app.processEvents()
+        player.set_mouse_mode(mode)
+        rect = player.rect_image
+        inside = [rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()]
+        outside = [rect.topLeft() - QPoint(1, 0), rect.topRight() + QPoint(1, 0),
+                   rect.bottomLeft() + QPoint(0, 1), rect.topLeft() - QPoint(0, 1)]
+        for point, exit_point in zip(inside, outside):
+            monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(point))
+            player.capture()
+            player.update_mouse()
+            QApplication.sendEvent(player, mouse_event(player, point))
+            assert player.captured and player.cursor().shape() == Qt.CursorShape.BlankCursor
+            assert not warps and not constraints, 'windowed capture must not trap the system pointer'
+            events.clear()
+            QApplication.sendEvent(player, mouse_event(player, exit_point))
+            assert not player.captured and not player.software_cursor and not player.raw_mouse.active
+            assert events == [('focus', False)], 'crossing an edge must release before forwarding movement'
+            QApplication.sendEvent(player, mouse_event(player, exit_point, QEvent.Type.MouseButtonPress))
+            assert events == [('focus', False)], 'an outside click must not control both computers'
+    finally:
+        player.close()
+
+
+def test_windowed_fallback_uses_consecutive_motion_without_recentering(monkeypatch):
+    app, player, events = make_player()
+    warps = []
+    monkeypatch.setattr(QCursor, 'setPos', lambda point: warps.append(point))
+    monkeypatch.setattr(player.raw_mouse, 'start', lambda _: False)
+    origin = player.rect_image.center()
+    monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(origin))
+    try:
+        player.set_mouse_mode('remote')
+        player.capture()
+        events.clear()
+        for offset in (QPoint(10, -4), QPoint(13, -2)):
+            QApplication.sendEvent(player, mouse_event(player, origin + offset))
+        moves = [event for kind, event in events if kind == 'input']
+        assert moves == [dict(type='move', absolute=False, x=10, y=-4),
+                         dict(type='move', absolute=False, x=3, y=2)]
+        assert not warps
+    finally:
+        player.close()
+
+
+def test_windowed_raw_input_stops_before_delayed_qt_leave(monkeypatch):
+    app, player, events = make_player()
+    point = player.rect_image.center()
+    monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(point))
+    try:
+        player.set_mouse_mode('remote')
+        player.capture()
+        monkeypatch.setattr(player.raw_mouse, 'delta', lambda _: (5, 3))
+        point = player.rect_image.bottomRight() + QPoint(1, 1)
+        events.clear()
+        player.nativeEvent(b'windows_generic_MSG', 1)
+        assert not player.captured and events == [('focus', False)]
+    finally:
+        player.close()
+
+
+def test_windowed_pointer_poll_releases_when_native_leave_notification_is_missing(monkeypatch):
+    app, player, events = make_player()
+    point = player.rect_image.center()
+    monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(point))
+    monkeypatch.setattr(QApplication, 'platformName', lambda: 'windows')
+    try:
+        player.set_mouse_mode('remote')
+        player.capture()
+        point = player.rect_image.topLeft() - QPoint(1, 0)
+        events.clear()
+        player.update_mouse()
+        assert not player.captured and not player.raw_mouse.active and events == [('focus', False)]
+    finally:
+        player.close()
+
+
+def test_video_boundary_uses_fractional_coordinates_without_rounding_inside_pixels_outside():
+    app, player, events = make_player()
+    try:
+        player.set_mouse_mode('local')
+        rect = player.rect_image
+        player.capture()
+        inside = QPointF(rect.x() + rect.width() - .1, rect.y() + .1)
+        QApplication.sendEvent(player, mouse_event(player, inside))
+        assert player.captured and player.software_cursor
+        events.clear()
+        QApplication.sendEvent(player, mouse_event(player, QPointF(rect.x() - .1, rect.y() + .1)))
+        assert not player.captured and events == [('focus', False)]
+    finally:
+        player.close()
+
+
+def test_only_fullscreen_relative_mouse_is_confined_and_fallback_recenters(monkeypatch):
+    app, player, events = make_player()
+    constraints, warps = [], []
+    monkeypatch.setattr(QCursor, 'setPos', lambda point: warps.append(point))
+    monkeypatch.setattr(player.cursor_confinement, 'confine', lambda *args: constraints.append(args))
+    monkeypatch.setattr(player.raw_mouse, 'start', lambda _: False)
+    monkeypatch.setattr(QApplication, 'platformName', lambda: 'windows')
+    try:
+        player.showFullScreen()
+        app.processEvents()
+        player.set_mouse_mode('remote')
+        player.capture()
+        assert constraints and warps
+        events.clear()
+        center = player.rect_image.center()
+        QApplication.sendEvent(player, mouse_event(player, center + QPoint(8, -3)))
+        assert events == [('input', dict(type='move', absolute=False, x=8, y=-3))]
+        assert warps[-1] == player.mapToGlobal(center)
+        player.showNormal()
+        app.processEvents()
+        assert not player.captured
     finally:
         player.close()

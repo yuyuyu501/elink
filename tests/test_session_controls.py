@@ -43,6 +43,7 @@ def test_relative_native_and_fallback_input_use_same_sensitivity(monkeypatch):
         assert moves == [dict(type='move', absolute=False, x=1, y=-1)]
         events.clear()
         player.captured = player.game_mouse = True
+        monkeypatch.setattr(QCursor, 'pos', lambda: player.mapToGlobal(player.rect_image.center()))
         monkeypatch.setattr(player.raw_mouse, 'delta', lambda _: (10, -4))
         assert player.nativeEvent(b'windows_generic_MSG', 1) == (True, 0)
         assert events[-1] == ('input', dict(type='move', absolute=False, x=5, y=-2))

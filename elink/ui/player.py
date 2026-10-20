@@ -77,6 +77,7 @@ class Player(QWidget):
         self.mouse_mode = mouse_mode(self.preferences.get('mouse_mode', 'remote' if game_mouse else 'smart'))
         self.mouse_sensitivity = MouseSensitivity(self.preferences.get('mouse_sensitivity', 0))
         self._absolute_last = self._absolute_pos = None
+        self._relative_last = None
         self.game_mouse = False  # Effective input mapping; independent of cursor rendering.
         self.local_cursor = False
         self.software_cursor = False
@@ -445,6 +446,9 @@ class Player(QWidget):
     def update_mouse(self, force=False):
         if not self.captured:
             return
+        if not self.isFullScreen() and QApplication.platformName() == 'windows':
+            if self.release_outside_video(QPointF(self.mapFromGlobal(QCursor.pos()))):
+                return
         fresh = time.monotonic() - getattr(self.client, 'cursor_updated', 0) < 2
         visible = getattr(self.client, 'cursor_visible', None) if fresh else None
         supported = getattr(self.client, 'cursor_supported', False)
@@ -461,10 +465,12 @@ class Player(QWidget):
             self.refresh_video()
         if force or relative != self.game_mouse:
             self._absolute_last = self._absolute_pos = None
+            self._relative_last = QPointF(self.mapFromGlobal(QCursor.pos()))
             self.mouse_sensitivity.remainder = [0.0, 0.0]
             if relative:
                 self.grabMouse(QCursor(Qt.CursorShape.BlankCursor))
-                QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
+                if self.isFullScreen():
+                    QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
                 try:
                     self.raw_mouse.start(int(self.winId()))
                 except OSError as exc:
@@ -477,18 +483,23 @@ class Player(QWidget):
         if force or local != self.local_cursor:
             self.setCursor(Qt.CursorShape.ArrowCursor if local else Qt.CursorShape.BlankCursor)
             self.local_cursor = local
-        if relative and QApplication.platformName() == 'windows':
+        # Windowed sessions release at the video edge. Only fullscreen games
+        # need a confined pointer for continuous relative movement.
+        if relative and self.isFullScreen() and QApplication.platformName() == 'windows':
             try:
                 rect = self.rect_image.intersected(self.video_viewport())
                 self.cursor_confinement.confine(int(self.winId()), rect.getRect(), (self.width(), self.height()))
             except OSError as exc:
                 self.release()
                 self.show_error(f'无法约束主控端鼠标：{exc}')
+        else:
+            self.cursor_confinement.release()
 
     def release(self):
         self.captured = False
         self.keyboard_hook.stop()
         self.raw_mouse.stop()
+        self._relative_last = None
         self.cursor_confinement.release()
         self.runtime.call(self.client.focus, False)
         self.releaseMouse()
@@ -679,11 +690,14 @@ class Player(QWidget):
             # Relative input comes from Raw Input, preserving controller-side
             # device counts instead of Qt's accelerated pointer coordinates.
             if not self.raw_mouse.active:
-                center = self.rect_image.center()
-                delta = event.position().toPoint() - center
+                position = event.position()
+                origin = QPointF(self.rect_image.center()) if self.isFullScreen() else self._relative_last
+                delta = position - (origin if origin is not None else position)
+                self._relative_last = QPointF(position)
                 if not delta.isNull():
                     self.send_relative_motion(delta.x(), delta.y())
-                    QCursor.setPos(self.mapToGlobal(center))
+                    if self.isFullScreen():
+                        QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
             event.accept()
             return
         elif not self.rect_image.isEmpty():
@@ -723,6 +737,10 @@ class Player(QWidget):
         if self.captured and self.game_mouse:
             delta = self.raw_mouse.delta(message)
             if delta and (delta[0] or delta[1]):
+                # WM_INPUT can arrive before Qt reports the pointer leaving.
+                # Stop remote input before the same movement reaches local UI.
+                if self.release_outside_video(QPointF(self.mapFromGlobal(QCursor.pos()))):
+                    return False, 0
                 self.send_relative_motion(*delta)
                 return True, 0
         return super().nativeEvent(event_type, message)
@@ -730,7 +748,7 @@ class Player(QWidget):
     def mousePressEvent(self, event):
         if not self.captured:
             has_frame = self.image is not None or (self.gpu_surface is not None and self.gpu_surface.frame is not None)
-            if self.client.pc and self.rect_image.contains(event.position().toPoint()) and has_frame:
+            if self.client.pc and self.video_contains(event.position()) and has_frame:
                 self.capture()
             return
         self.mouse_button(event, True)
@@ -750,8 +768,14 @@ class Player(QWidget):
         if self.captured and not self.release_outside_video(event.position()):
             self.send({"type": "wheel", "delta": event.angleDelta().y()})
 
+    def video_contains(self, position):
+        rect = self.rect_image
+        # Avoid rounding a fractional position across the edge on scaled windows.
+        return (rect.x() <= position.x() < rect.x() + rect.width()
+                and rect.y() <= position.y() < rect.y() + rect.height())
+
     def release_outside_video(self, position):
-        if not self.game_mouse and not self.rect_image.contains(position.toPoint()):
+        if not (self.game_mouse and self.isFullScreen()) and not self.video_contains(position):
             self.release()
             return True
         return False
