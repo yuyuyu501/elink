@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
 from PySide6.QtGui import QImage, QKeyEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from elink.core.media import FrameMailbox
 from elink.core.profiling import PipelineProfile
@@ -38,6 +39,40 @@ def make_player():
     player.show()
     app.processEvents()
     return app, player, events
+
+
+def test_export_success_notice_disappears_after_three_seconds(monkeypatch, tmp_path):
+    app, player, _ = make_player()
+    filename = tmp_path / 'performance.json'
+    report = {'client': {'elapsed_seconds': 15}, 'host': None}
+    player.client.performance_report = lambda: report
+    monkeypatch.setattr(player.runtime, 'submit', lambda result, saved, failed: saved(result), raising=False)
+    monkeypatch.setattr(QFileDialog, 'getSaveFileName', lambda *args: (str(filename), 'JSON (*.json)'))
+    try:
+        player.export_performance()
+        assert json.loads(filename.read_text(encoding='utf-8')) == report
+        assert player.error_label.isVisible()
+        assert str(filename) in player.error_label.text()
+        QTest.qWait(2800)
+        assert player.error_label.isVisible()
+        QTest.qWait(350)
+        assert not player.error_label.isVisible()
+    finally:
+        player.close()
+        app.processEvents()
+
+
+def test_new_error_is_not_hidden_by_previous_success_notice():
+    app, player, _ = make_player()
+    try:
+        player.show_error('性能报告已保存', timeout_ms=3000)
+        player.show_error('连接失败')
+        QTest.qWait(3150)
+        assert player.error_label.isVisible()
+        assert player.error_label.text() == '连接失败'
+    finally:
+        player.close()
+        app.processEvents()
 
 
 def test_reapply_gpu_preference_retries_after_cpu_fallback(monkeypatch):

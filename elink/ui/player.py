@@ -226,7 +226,7 @@ class Player(QWidget):
             from ..storage import atomic_json
             try:
                 atomic_json(Path(filename), report)
-                self.show_error('性能报告已保存：' + filename)
+                self.show_error('性能报告已保存：' + filename, timeout_ms=3000)
             except OSError as exc:
                 self.show_error(str(exc))
         self.runtime.submit(self.client.performance_report(), saved, self.show_error)
@@ -253,6 +253,10 @@ class Player(QWidget):
         self.error_label.setWordWrap(True)
         self.error_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.error_label.hide()
+        self.error_timer = QTimer(self)
+        self.error_timer.setSingleShot(True)
+        self.error_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.error_timer.timeout.connect(self.error_label.hide)
 
     def video_viewport(self):
         return self.rect().adjusted(0, 0 if self.isFullScreen() else TITLE_HEIGHT, 0, 0)
@@ -301,9 +305,12 @@ class Player(QWidget):
         else:
             self.showMaximized()
 
-    def show_error(self, message):
+    def show_error(self, message, *, timeout_ms=0):
+        self.error_timer.stop()
         self.error_label.setText(str(message))
         self.error_label.show()
+        if timeout_ms > 0:
+            self.error_timer.start(timeout_ms)
 
     def open_controls(self):
         if self._closed:
