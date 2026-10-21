@@ -30,11 +30,11 @@ def package(output=None, manifest=None):
     command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir',
                '--name', 'elink', '--distpath', str(distribution),
                '--workpath', str(output / 'build'), '--specpath', str(output),
-               '--add-data', 'elink/resources:elink/resources',
+               '--add-data', str(ROOT / 'elink/resources') + ':elink/resources',
                '--collect-all', 'av', '--collect-all', 'aiortc', '--collect-all', 'pylibsrtp',
                '--collect-all', 'soundcard', '--collect-all', 'sounddevice',
                '--hidden-import', 'mss.linux', '--hidden-import', 'Xlib.ext.xtest',
-               '--hidden-import', 'dbus_next.aio', '--exclude-module', 'pytest', 'main.py']
+               '--hidden-import', 'dbus_next.aio', '--exclude-module', 'pytest', str(ROOT / 'main.py')]
     subprocess.run(command, cwd=ROOT, check=True)
     bundle = distribution / 'elink'
     # A Linux package must not ship the Windows virtual controller library.
