@@ -68,7 +68,7 @@ def package(output=None, manifest=None):
     control.joinpath('control').write_text(
         f'Package: elink\nVersion: {__version__}\nSection: net\nPriority: optional\nArchitecture: amd64\n'
         'Maintainer: Elink <noreply@github.com>\n'
-        'Depends: libc6 (>= 2.38), libglib2.0-0, libx11-6, libxext6, libxfixes3, libxtst6, libxcb-cursor0, libxcb-xinerama0, libxkbcommon-x11-0, libgl1, libpulse0, libportaudio2\n'
+        'Depends: libc6 (>= 2.38), libglib2.0-0, libx11-6, libxext6, libxfixes3, libxtst6, libxcb-cursor0, libxcb-xinerama0, libxkbcommon-x11-0, libgl1, libegl1, libopengl0, libpulse0, libportaudio2\n'
         'Recommends: libsdl2-2.0-0, xclip\n'
         'Description: Elink desktop controller and host preview\n'
         ' Built and checked on Deepin 25 x86_64 with X11. No graphics driver is bundled.\n', encoding='utf-8')
