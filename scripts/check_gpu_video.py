@@ -475,6 +475,9 @@ def verify_live_settings(app, root):
             view.open_quality()
             dialog = view.settings_dialog
             options = dialog.findChild(StreamOptions)
+            if upscaler == 'rtx':
+                wait(lambda: not options.rtx_check_pending)
+                assert options.upscaler.findData('rtx') >= 0, 'Live RTX capability detection failed'
             options.resolution.setCurrentIndex(options.resolution.findData(size))
             options.fps.setCurrentIndex(options.fps.findData(fps))
             options.decoder.setCurrentIndex(options.decoder.findData(decoder))
