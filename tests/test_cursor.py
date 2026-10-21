@@ -18,21 +18,29 @@ def test_cursor_hotspot_output_origin_and_clipping():
 @pytest.mark.parametrize('channels', [3, 4])
 def test_windows_cursor_draw_does_not_change_cached_frame(channels):
     cursor = WindowsCursor()
-    cursor.user.LoadCursorW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
-    cursor.user.LoadCursorW.restype = wintypes.HANDLE
-    handle = cursor.user.LoadCursorW(None, 32512)  # Shared system arrow, no ownership.
+    cursor.user.CreateCursor.argtypes = [wintypes.HINSTANCE, ctypes.c_int, ctypes.c_int,
+                                         ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+    cursor.user.CreateCursor.restype = wintypes.HANDLE
+    cursor.user.DestroyCursor.argtypes = [wintypes.HANDLE]
+    # Remote-control software may replace the shared system arrow with a transparent cursor.
+    # This private monochrome cursor inverts its background without changing system state.
+    mask = (ctypes.c_ubyte * 32)(*([255] * 32))
+    handle = cursor.user.CreateCursor(None, 0, 0, 16, 16, mask, mask)
     assert handle
-    background = np.full((100, 200, channels), 80, dtype=np.uint8)
-    first = cursor.draw(background, handle, (10, 10))
-    second = cursor.draw(background, handle, (80, 10))
-    assert np.any(first != background)
-    assert np.any(second != background)
-    assert np.all(background == 80)
-    assert np.all(second[:, :60] == 80)  # No trail left from the previous position.
-    clipped = cursor.draw(background, handle, (-5, -5))
-    assert clipped.shape == background.shape
-    if channels == 4:
-        assert np.all(first[:, :, 3] == 80)  # Cursor changes color, not source alpha.
+    try:
+        background = np.full((100, 200, channels), 80, dtype=np.uint8)
+        first = cursor.draw(background, handle, (10, 10))
+        second = cursor.draw(background, handle, (80, 10))
+        assert np.any(first != background)
+        assert np.any(second != background)
+        assert np.all(background == 80)
+        assert np.all(second[:, :60] == 80)  # No trail left from the previous position.
+        clipped = cursor.draw(background, handle, (-5, -5))
+        assert clipped.shape == background.shape
+        if channels == 4:
+            assert np.all(first[:, :, 3] == 80)  # Cursor changes color, not source alpha.
+    finally:
+        cursor.user.DestroyCursor(handle)
 
 
 def test_hidden_cursor_preserves_game_frame():

@@ -57,9 +57,9 @@ def verify_installer(setup, bundle, root, version, manifest):
     original_startup = run_value()
     flags = dict(env=native_environment(), creationflags=subprocess.CREATE_NO_WINDOW, check=True, timeout=180)
 
-    def install(log):
+    def install(log, directory=target):
         subprocess.run([str(setup), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART',
-                        '/TASKS=', '/LANG=chinesesimplified', f'/DIR={target}', f'/GROUP={group}',
+                        '/TASKS=', '/LANG=chinesesimplified', f'/DIR={directory}', f'/GROUP={group}',
                         f'/LOG={root / log}'], **flags)
         saved = registration()
         if not saved or Path(saved['InstallLocation']).resolve() != target or saved['DisplayVersion'] != version:
@@ -92,7 +92,10 @@ def verify_installer(setup, bundle, root, version, manifest):
             raise RuntimeError('ZIP update changed installer metadata or installed payload.')
         if shortcut_target(shortcut) != executable or registration()['DisplayVersion'] != version:
             raise RuntimeError('ZIP update broke installation registration/shortcut.')
-        install('repair.log')
+        # Windows normally treats spelling variants of a path as the same folder.
+        install('repair.log', Path(str(target).swapcase()))
+        if not os.path.samefile(registration()['InstallLocation'], target):
+            raise RuntimeError('Repair created another installation for a case-only path change.')
         # A ZIP update can add files which the original Inno uninstall manifest never listed.
         (target / 'app/added-by-update.txt').write_text('owned program file', encoding='ascii')
         userdata = root / 'update-check/userdata/preserved-user-data.txt'
@@ -105,7 +108,7 @@ def verify_installer(setup, bundle, root, version, manifest):
         return dict(ok=True, offline_payload_identical=True, current_user_install=True, shortcut=True,
                     self_test=result, repair=True, zip_update=update, uninstaller_preserved=True,
                     uninstall=True, added_files_removed=True, configuration_preserved=True,
-                    unrelated_startup_preserved=True, unicode_path=True,
+                    unrelated_startup_preserved=True, unicode_path=True, case_insensitive_path=True,
                     note='Isolated same-version install/repair/update; manual two-machine acceptance pending.')
     finally:
         uninstall()

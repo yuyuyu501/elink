@@ -42,14 +42,15 @@ def test_payload_is_anchored_to_all_existing_github_assets(tmp_path, monkeypatch
         assert package.verify_payload_publication(api, receipt, files) == assets
 
 
-def installer_fixture(tmp_path, monkeypatch):
+def installer_fixture(tmp_path, monkeypatch, installer_revision=1):
     revision, payload = 'b' * 40, 'a' * 40
     monkeypatch.setattr(publisher, 'git', lambda *args: {
         ('status', '--porcelain'): '', ('rev-parse', 'HEAD'): revision,
         ('remote', 'get-url', 'origin'): 'https://github.com/yuyuyu501/elink.git',
     }[args])
     monkeypatch.setattr(publisher, 'source_snapshot', lambda: {'script': 'hash'})
-    setup = tmp_path / 'Elink-0.4.37-windows-x64-Setup.exe'
+    setup_name, checksum_name, report_name = package.installer_filenames('0.4.37', installer_revision)
+    setup = tmp_path / setup_name
     setup.write_bytes(b'verified installer')
     originals = [dict(id=i, name=name, size=100, state='uploaded', digest='sha256:' + str(i) * 64)
                  for i, name in enumerate(('Elink-0.4.37-windows-x64.zip', *package.ORIGINAL_NAMES))]
@@ -58,11 +59,13 @@ def installer_fixture(tmp_path, monkeypatch):
                            'unrelated_startup_preserved', 'unicode_path'), True)
     checks['self_test'] = dict(ok=True, runtime_stopped=True, audio_frames=10, video_frames=90)
     checks['zip_update'] = dict(ok=True, directory_replacement=True, restart_confirmed=True, configuration_preserved=True)
+    checks['case_insensitive_path'] = True
     report = dict(version='0.4.37', format='offline-inno-setup', packaging_commit=revision, payload_commit=payload,
+                  installer_revision=installer_revision,
                   source_sha256={'script': 'hash'}, payload_files=10, original_assets=originals,
                   installer_test=checks, package_sha256=package.sha256(setup), package_size=setup.stat().st_size)
-    (tmp_path / 'setup-verification.json').write_text(json.dumps(report), encoding='utf-8')
-    (tmp_path / 'Setup-SHA256SUMS.txt').write_text(f'{package.sha256(setup)}  {setup.name}\n', encoding='ascii')
+    (tmp_path / report_name).write_text(json.dumps(report), encoding='utf-8')
+    (tmp_path / checksum_name).write_text(f'{package.sha256(setup)}  {setup.name}\n', encoding='ascii')
     return report, setup
 
 
@@ -86,13 +89,18 @@ def test_installer_cannot_publish_without_lifecycle_and_provenance(tmp_path, mon
         publisher.validate_installer(tmp_path)
 
 
+@pytest.mark.parametrize('installer_revision', [1, 2])
 @pytest.mark.parametrize('scenario', ['success', 'resume', 'collision', 'wrong_tag', 'original_changed', 'ci_failed'])
-def test_installer_upload_is_strictly_additive_and_resumable(tmp_path, monkeypatch, scenario):
-    report, setup = installer_fixture(tmp_path, monkeypatch)
+def test_installer_upload_is_strictly_additive_and_resumable(tmp_path, monkeypatch, scenario, installer_revision):
+    report, setup = installer_fixture(tmp_path, monkeypatch, installer_revision)
     mutations = []
     release = dict(id=42, tag_name='v0.4.37', draft=False, prerelease=True, body='existing release notes',
                    assets=list(report['original_assets']), html_url='https://github.com/yuyuyu501/elink/releases/tag/v0.4.37',
                    upload_url='https://uploads.github.com/repos/yuyuyu501/elink/releases/42/assets{?name}')
+    if installer_revision == 2:
+        release['assets'].append(dict(id=77, name='Elink-0.4.37-windows-x64-Setup.exe', size=10,
+                                      state='uploaded', digest='sha256:' + 'f' * 64))
+    before = [dict(a) for a in release['assets']]
     if scenario == 'original_changed':
         release['assets'] = [dict(a, size=1) for a in release['assets']]
     if scenario in ('resume', 'collision'):
@@ -119,11 +127,19 @@ def test_installer_upload_is_strictly_additive_and_resumable(tmp_path, monkeypat
         assert method == 'GET'
         return release
     if scenario in ('success', 'resume'):
-        assert publisher.publish(tmp_path, api) == release['html_url']
+        assert publisher.publish(tmp_path, api, installer_revision=installer_revision) == release['html_url']
         assert len(mutations) == (2 if scenario == 'resume' else 3)
-        assert release['assets'][:3] == report['original_assets']
+        assert release['assets'][:len(before)] == before
         assert release['body'] == 'existing release notes' and release['draft'] is False
     else:
         with pytest.raises(RuntimeError):
-            publisher.publish(tmp_path, api)
+            publisher.publish(tmp_path, api, installer_revision=installer_revision)
         assert mutations == []
+
+
+def test_revised_installer_requires_real_case_variant_repair_test(tmp_path, monkeypatch):
+    report, _ = installer_fixture(tmp_path, monkeypatch, 2)
+    report['installer_test']['case_insensitive_path'] = False
+    (tmp_path / 'setup-r2-verification.json').write_text(json.dumps(report), encoding='utf-8')
+    with pytest.raises(RuntimeError, match='Case-insensitive'):
+        publisher.validate_installer(tmp_path, 2)

@@ -19,6 +19,14 @@ from scripts.publish_release import API, GitHub, git, validate_existing_tag
 ORIGINAL_NAMES = ('SHA256SUMS.txt', 'verification.json')
 
 
+def installer_filenames(version, revision=1):
+    if type(revision) is not int or not 1 <= revision <= 65535:
+        raise ValueError('Installer revision must be an integer from 1 to 65535.')
+    suffix = f'-r{revision}' if revision > 1 else ''
+    return (f'Elink-{version}-windows-x64-Setup{suffix}.exe',
+            f'Setup{suffix}-SHA256SUMS.txt', f'setup{suffix}-verification.json')
+
+
 def sha256(path):
     with path.open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
@@ -81,13 +89,14 @@ def verify_payload_publication(api, receipt, files):
     return originals
 
 
-def package(directory, compiler, output=None, api=None):
+def package(directory, compiler, output=None, api=None, *, installer_revision=1):
     if os.name != 'nt':
         raise RuntimeError('Build and verify installers on Windows.')
     if git('status', '--porcelain'):
         raise RuntimeError('Installer packaging requires clean, committed source.')
     snapshot, revision = source_snapshot(), git('rev-parse', 'HEAD')
     receipt, files = validate_payload(directory)
+    setup_name, checksum_name, report_name = installer_filenames(receipt['version'], installer_revision)
     originals = verify_payload_publication(api or GitHub().api, receipt, files)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     destination = (output or ROOT / 'dist/installers') / ('v' + receipt['version']) / stamp
@@ -99,9 +108,10 @@ def package(directory, compiler, output=None, api=None):
     bundle = extract_verified(files[0], work / 'payload', receipt['version'], threading.Event())
     manifest = file_manifest(bundle)
     script = ROOT / 'packaging/windows/elink.iss'
-    subprocess.run([str(compiler), '/Qp', f'/DAppVersion={receipt["version"]}', f'/DPayloadDir={bundle}',
+    subprocess.run([str(compiler), '/Qp', f'/DAppVersion={receipt["version"]}',
+                    f'/DInstallerRevision={installer_revision}', f'/DPayloadDir={bundle}',
                     f'/DOutputDir={destination}', str(script)], check=True, cwd=ROOT, timeout=600)
-    setup = destination / f'Elink-{receipt["version"]}-windows-x64-Setup.exe'
+    setup = destination / setup_name
     from scripts.test_windows_installer import verify_installer
     print('Verifying actual installation/update/uninstall: ' + str(work), flush=True)
     verification = verify_installer(setup, bundle, work / 'installation', receipt['version'], manifest)
@@ -109,12 +119,13 @@ def package(directory, compiler, output=None, api=None):
         raise RuntimeError('Packaging source changed during installer verification.')
     digest = sha256(setup)
     report = dict(format='offline-inno-setup', version=receipt['version'], built_at=stamp,
+                  installer_revision=installer_revision,
                   payload_commit=receipt['commit'], packaging_commit=revision, source_sha256=snapshot,
                   original_assets=originals, package_sha256=digest, package_size=setup.stat().st_size,
                   payload_files=len(manifest), compiler_sha256=sha256(compiler), installer_test=verification,
                   signed=False, channel='preview', manual_acceptance='pending')
-    (destination / 'setup-verification.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
-    (destination / 'Setup-SHA256SUMS.txt').write_text(f'{digest}  {setup.name}\n', encoding='ascii')
+    (destination / report_name).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
+    (destination / checksum_name).write_text(f'{digest}  {setup.name}\n', encoding='ascii')
     print('Verified offline installer: ' + str(destination), flush=True)
     return destination
 
@@ -124,9 +135,11 @@ def main():
     parser.add_argument('--package', required=True, type=Path, help='Original published portable ZIP/receipt directory.')
     parser.add_argument('--compiler', required=True, type=Path, help='Trusted Inno Setup 6.7+ ISCC.exe.')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--installer-revision', type=int, default=1, help='Use a new revision for installer-only fixes.')
     args = parser.parse_args()
     try:
-        package(args.package.resolve(), args.compiler.resolve(), args.output.resolve() if args.output else None)
+        package(args.package.resolve(), args.compiler.resolve(), args.output.resolve() if args.output else None,
+                installer_revision=args.installer_revision)
     except Exception as exc:
         print(f'Installer packaging stopped: {exc}', file=sys.stderr)
         raise

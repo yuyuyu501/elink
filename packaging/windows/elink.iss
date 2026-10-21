@@ -7,6 +7,14 @@
 #ifndef OutputDir
   #error OutputDir is required
 #endif
+#ifndef InstallerRevision
+  #define InstallerRevision 1
+#endif
+#if Int(InstallerRevision) > 1
+  #define InstallerSuffix "-r" + Str(Int(InstallerRevision))
+#else
+  #define InstallerSuffix ""
+#endif
 
 [Setup]
 AppId={{A4735807-684B-4757-9EE5-88AFA2E6E791}
@@ -18,6 +26,8 @@ AppPublisherURL=https://github.com/yuyuyu501/elink
 AppSupportURL=https://github.com/yuyuyu501/elink/issues
 AppUpdatesURL=https://github.com/yuyuyu501/elink/releases
 DefaultDirName={localappdata}\Programs\Elink
+DisableDirPage=no
+AlwaysShowDirOnReadyPage=yes
 DefaultGroupName=Elink
 DisableProgramGroupPage=no
 PrivilegesRequired=lowest
@@ -25,7 +35,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir={#OutputDir}
-OutputBaseFilename=Elink-{#AppVersion}-windows-x64-Setup
+OutputBaseFilename=Elink-{#AppVersion}-windows-x64-Setup{#InstallerSuffix}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -33,7 +43,7 @@ UninstallDisplayIcon={app}\app\Elink.exe
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
-VersionInfoVersion={#AppVersion}.0
+VersionInfoVersion={#AppVersion}.{#InstallerRevision}
 VersionInfoDescription=Elink offline installer
 
 [Languages]
