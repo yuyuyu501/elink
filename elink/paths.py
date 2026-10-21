@@ -9,6 +9,8 @@ def data_dir() -> Path:
     override = os.environ.get("ELINK_DATA_DIR")
     if override:
         return Path(override).expanduser().resolve()
+    if sys.platform.startswith('linux'):
+        return Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')) / 'elink'
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Elink"
 
 

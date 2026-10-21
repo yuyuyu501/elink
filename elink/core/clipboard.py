@@ -54,6 +54,9 @@ def _open_clipboard():
 
 def read_text() -> str | None:
     """Read Unicode text, or return None when the clipboard is unavailable."""
+    if os.name != 'nt':
+        from ..platforms.linux.clipboard import read_text as read_linux
+        return read_linux()
     with _clipboard_lock:
         return _read_text_locked()
 
@@ -85,6 +88,9 @@ def _read_text_locked():
 
 def write_text(value: str) -> bool:
     """Replace the clipboard with Unicode text; return whether it succeeded."""
+    if os.name != 'nt':
+        from ..platforms.linux.clipboard import write_text as write_linux
+        return write_linux(value)
     with _clipboard_lock:
         return _write_text_locked(value)
 

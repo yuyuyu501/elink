@@ -1,5 +1,6 @@
 """Shared stream preferences and keyboard-accessible device rows."""
 import asyncio
+import sys
 
 from shiboken6 import isValid
 from PySide6.QtCore import Qt
@@ -75,7 +76,8 @@ class StreamOptions(QWidget):
         for fps in (60, 90, 120, 144, 165, 240, 30):
             self.fps.addItem(f'{fps} FPS', fps)
         self.decoder = QComboBox()
-        for label, value in [('自动（优先硬件）', 'auto'), ('软件 H.264', 'software'), ('D3D11VA', 'hardware')]:
+        hardware = 'D3D11VA' if sys.platform == 'win32' else 'NVIDIA CUDA'
+        for label, value in [('自动（优先硬件）', 'auto'), ('软件 H.264', 'software'), (hardware, 'hardware')]:
             self.decoder.addItem(label, value)
         self.renderer = QComboBox()
         self.renderer.addItem('兼容显示（CPU）', 'cpu')
@@ -115,7 +117,7 @@ class StreamOptions(QWidget):
         self.mouse_sensitivity.setRange(-5, 5)
         self.mouse_sensitivity.setDecimals(1)
         self.mouse_sensitivity.hide()
-        self.controllers = QCheckBox('转发 XInput 手柄与震动')
+        self.controllers = QCheckBox('转发 XInput 手柄与震动' if sys.platform == 'win32' else '转发 SDL 手柄')
         for widget in (self.audio, self.controllers):
             widget.setChecked(True)
             form.addRow(widget)
@@ -138,6 +140,8 @@ class StreamOptions(QWidget):
         self.rtx_check_pending = False
         self.set_rtx_available(False)
         if QApplication.platformName() in ('offscreen', 'minimal'):
+            return
+        if sys.platform != 'win32':
             return
         self.rtx_check_pending = True
 

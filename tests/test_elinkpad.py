@@ -1,4 +1,5 @@
 import threading
+import os
 import time
 
 import pytest
@@ -87,6 +88,7 @@ def test_close_during_open_never_submits_old_input():
     assert device.closed and not device.inputs
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows kernel device interface')
 def test_missing_driver_is_reported_without_fallback(monkeypatch):
     messages = []
     monkeypatch.setattr(Device, "paths", staticmethod(lambda: []))

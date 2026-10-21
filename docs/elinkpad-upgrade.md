@@ -4,11 +4,11 @@
 
 ## 已实现
 
-- `native/elinkpad/driver.c`：Elink UMDF2/XUSB 实验驱动，单个 Xbox 360 风格目标。使用 Windows 现有 WUDFRd，不增加自有内核 `.sys`。自有硬件 ID，不匹配实体 Xbox 设备。
+- `native/windows/elinkpad/driver.c`：Elink UMDF2/XUSB 实验驱动，单个 Xbox 360 风格目标。使用 Windows 现有 WUDFRd，不增加自有内核 `.sys`。自有硬件 ID，不匹配实体 Xbox 设备。
 - `protocol.h`：版本化、固定长度的本地 IOCTL；控制权绑定 WDF 文件句柄；拒绝跨句柄写入、重复/过期序号和保留按键位；输入变化才增加 XInput 包序号。
 - 驱动 500 ms 未收到有效报告时归零；释放控制权和文件清理同样归零。震动通过独立查询回传，XUSB 等待输入请求由 WDF 队列管理。
 - `device.c`：显式启动的临时设备助手，唯一设备实例与 ContainerId，默认句柄生存期。助手退出移除设备；应用会话退出释放控制权和归零，但不会移除助手持有的设备。
-- `elink/core/elinkpad.py`：直接访问设备接口，不加载 ViGEmClient；最新状态有界缓存，独立工作线程处理设备打开、提交和震动。500 ms 未收到新网络手柄快照时发送中立状态，避免后台刷新维持旧按键。
+- `elink/platforms/windows/elinkpad.py`：直接访问设备接口，不加载 ViGEmClient；最新状态有界缓存，独立工作线程处理设备打开、提交和震动。500 ms 未收到新网络手柄快照时发送中立状态，避免后台刷新维持旧按键。
 - 主机提供 ViGEm 兼容、ElinkPad 实验、禁用三种后端并保存选择。被控期间禁止修改，重启被控后应用新选择。明确选择 ElinkPad 时失败不会暗中回退 ViGEm；媒体和键鼠仍可工作。
 - 默认保留 ViGEm 兼容模式。控制端仍是 XInput 采集，非 XInput 实体手柄的 SDL 映射不在本次驱动替换范围内。
 
@@ -33,4 +33,4 @@
 
 设备 ACL 允许本地交互用户读写；控制句柄避免并发写入，但不是不同本地用户之间的完整隔离。正式产品仍需安装器、签名及受限的设备生命周期服务，不能要求最终用户长期手动运行管理员助手。
 
-HIDMaestro 的 MIT XUSB 布局参考固定到 `00b7303f8533c3fe10687a765c84e929b34a5e9c`，保留完整许可证。未使用受 LB-SAL 限制的 libvirtualhid 驱动源码。构建和测试步骤见 [驱动 README](../native/elinkpad/README.md)。
+HIDMaestro 的 MIT XUSB 布局参考固定到 `00b7303f8533c3fe10687a765c84e929b34a5e9c`，保留完整许可证。未使用受 LB-SAL 限制的 libvirtualhid 驱动源码。构建和测试步骤见 [驱动 README](../native/windows/elinkpad/README.md)。

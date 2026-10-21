@@ -37,8 +37,8 @@ def build():
         result = subprocess.check_output(f'cmd /d /s /c ""{vcvars}" >nul && set"', text=True)
         env.update(line.split('=', 1) for line in result.splitlines() if '=' in line and not line.startswith('='))
     env['VSLANG'] = '1033'
-    destination = ROOT / '.artifacts' / 'video-build'
-    subprocess.run(['cmake', '-S', str(ROOT / 'native' / 'video'), '-B', str(destination),
+    destination = ROOT / '.artifacts' / 'windows' / 'video-build'
+    subprocess.run(['cmake', '-S', str(ROOT / 'native' / 'windows' / 'video'), '-B', str(destination),
                     '-G', 'Ninja' if shutil.which('ninja', path=env.get('PATH')) else 'NMake Makefiles',
                     '-DCMAKE_BUILD_TYPE=Release'], env=env, check=True)
     subprocess.run(['cmake', '--build', str(destination)], env=env, check=True)

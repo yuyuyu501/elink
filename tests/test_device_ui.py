@@ -163,10 +163,11 @@ def test_controls_apply_in_same_session_and_cancel_does_not_change_options(tmp_p
         player.open_controls()
         assert not player.captured
         player.control_menu.close()
-        player.set_mouse_mode('local')
-        assert window.mouse_mode.currentData() == 'local'
-        pump(app, lambda: window.client.cursor_applied == 'local')
-        assert host.tracks[0].cursor_mode == 'local'
+        mode = 'local' if 'local' in window.client.cursor_modes else 'remote'
+        player.set_mouse_mode(mode)
+        assert window.mouse_mode.currentData() == mode
+        pump(app, lambda: window.client.cursor_applied == mode)
+        assert host.tracks[0].cursor_mode == mode
         player.set_muted(True)
         pump(app, lambda: window.client.muted)
         player.set_statistics(False)

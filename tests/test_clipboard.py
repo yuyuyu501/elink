@@ -1,6 +1,7 @@
 import asyncio
 
 import ctypes
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Win32 clipboard transactions')
 def test_clipboard_serializes_native_transactions(monkeypatch):
     from elink.core import clipboard
     active = 0
@@ -34,6 +36,7 @@ def test_clipboard_serializes_native_transactions(monkeypatch):
     assert peak == 1
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Win32 global clipboard memory')
 @pytest.mark.parametrize('payload,expected', [
     ('正常\x00尾部'.encode('utf-16-le'), '正常'),
     ('无终止符'.encode('utf-16-le'), '无终止符'),

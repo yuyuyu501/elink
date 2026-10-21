@@ -9,6 +9,7 @@ from elink.core.media import bgr_pixels
 
 
 def decoder_with_downloaded_frame(monkeypatch, frame, *, space, color_range):
+    monkeypatch.setattr('elink.core.codecs.ctypes.util.find_library', lambda _: 'mock-hardware-runtime')
     context = SimpleNamespace(colorspace=space, color_range=color_range,
                               flags=0, decode=lambda packet: [frame])
     monkeypatch.setattr('elink.core.codecs.av.CodecContext',

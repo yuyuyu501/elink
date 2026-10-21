@@ -1,4 +1,5 @@
 import sys
+import os
 from types import SimpleNamespace
 
 import av
@@ -31,6 +32,7 @@ def test_calibration_rejects_gray_but_uses_small_colored_regions():
     assert calibrated_color_space(frame, reference) == (1, 2)
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows capture backend')
 def test_native_cursor_reconfiguration_and_worker_cleanup(monkeypatch):
     captures = []
     class Capture:
@@ -61,6 +63,7 @@ def test_native_cursor_reconfiguration_and_worker_cleanup(monkeypatch):
     assert captures[1].closed and track.gpu_capture is None
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='DXGI fallback backend')
 def test_native_failure_falls_back_once_and_forced_mode_reports_failure(monkeypatch, caplog):
     attempts, notices = [], []
     def fail(*args):

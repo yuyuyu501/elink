@@ -1,17 +1,21 @@
 """Nonblocking OpenGL elapsed queries, owned by the current render context."""
 import ctypes as C
+import ctypes.util
+import sys
 
 
 class ElapsedQuery:
     def __init__(self):
-        library = C.WinDLL('opengl32')
-        library.wglGetProcAddress.argtypes = [C.c_char_p]
-        library.wglGetProcAddress.restype = C.c_void_p
+        windows = sys.platform == 'win32'
+        library = C.WinDLL('opengl32') if windows else C.CDLL(ctypes.util.find_library('GL') or 'libGL.so.1')
+        resolve = library.wglGetProcAddress if windows else library.glXGetProcAddressARB
+        resolve.argtypes = [C.c_char_p]
+        resolve.restype = C.c_void_p
         def function(name, *arguments):
-            address = library.wglGetProcAddress(name.encode('ascii'))
+            address = resolve(name.encode('ascii'))
             if not address or address in (1, 2, 3, C.c_void_p(-1).value):
                 raise RuntimeError(f'OpenGL timer unavailable: {name}')
-            return C.WINFUNCTYPE(None, *arguments)(address)
+            return (C.WINFUNCTYPE if windows else C.CFUNCTYPE)(None, *arguments)(address)
         self.generate = function('glGenQueries', C.c_int, C.POINTER(C.c_uint))
         self.delete = function('glDeleteQueries', C.c_int, C.POINTER(C.c_uint))
         self.start = function('glBeginQuery', C.c_uint, C.c_uint)

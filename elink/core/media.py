@@ -54,11 +54,25 @@ class DesktopTrack(MediaStreamTrack):
         self.network_budget = None
         self.capture_backend = capture_backend
         self.gpu_capture = None
+        self.platform_capture = None
         self.gpu_capture_disabled = capture_backend == 'dxcam' or os.name != 'nt'
         self.notify = lambda message: None
 
     def capture(self):
         started = time.perf_counter()
+        if not self.synthetic and os.name != 'nt':
+            from ..platforms import backend
+            if self.platform_capture is None:
+                self.platform_capture = backend().create_capture()
+            pixels = self.platform_capture.read(draw_mouse=self.cursor_mode != 'local')
+            self.cursor_visible = self.platform_capture.cursor_visible
+            self.profile.elapsed('capture_read_cursor', started)
+            converted = time.perf_counter()
+            frame = av.VideoFrame.from_numpy_buffer(np.ascontiguousarray(pixels), format='bgra')
+            frame = self.reformatter.reformat(frame, width=self.width, height=self.height, format='yuv420p')
+            self.profile.elapsed('capture_convert', converted)
+            self.profile.describe(capture_backend=self.platform_capture.name, capture_format='bgra')
+            return self.finish_capture(frame, started)
         if not self.synthetic and self.camera is None and not self.gpu_capture_disabled:
             try:
                 from .gpu_capture import D3D11Capture
@@ -233,6 +247,9 @@ class DesktopTrack(MediaStreamTrack):
             self.capture_future.cancel()
             self.capture_future = None
         def release():
+            if self.platform_capture:
+                self.platform_capture.close()
+                self.platform_capture = None
             if self.gpu_capture:
                 self.gpu_capture.close()
                 self.gpu_capture = None
@@ -252,6 +269,9 @@ class LoopbackTrack(MediaStreamTrack):
         super().__init__()
         self.synthetic = synthetic
         self.samples = 0
+        self.audio_clock = None
+        self.captured_blocks = 0
+        self.silence_blocks = 0
         self.frames = collections.deque(maxlen=3)
         self.lock = threading.Lock()
         self.done = threading.Event()
@@ -275,9 +295,10 @@ class LoopbackTrack(MediaStreamTrack):
                 import soundcard as sc
                 # SoundCard initializes COM during its first import and rejects S_FALSE.
                 # Balance our own initialization only after that import has succeeded.
-                com_initialized = ctypes.windll.ole32.CoInitializeEx(None, 0) in (0, 1)
+                com_initialized = os.name == 'nt' and ctypes.windll.ole32.CoInitializeEx(None, 0) in (0, 1)
                 speaker = sc.default_speaker()
-                microphone = sc.get_microphone(id=speaker.id, include_loopback=True)
+                source_id = speaker.id if os.name == 'nt' else speaker.id + '.monitor'
+                microphone = sc.get_microphone(id=source_id, include_loopback=True)
                 while not self.done.is_set():
                     if not self.enabled.wait(.1):
                         continue
@@ -286,6 +307,7 @@ class LoopbackTrack(MediaStreamTrack):
                             self._put(recorder.record(numframes=960))
         except Exception as exc:
             self.error = f"系统声音采集失败：{exc}"
+            log.exception('System audio capture failed')
         finally:
             if not self.synthetic and locals().get("com_initialized", False):
                 ctypes.windll.ole32.CoUninitialize()
@@ -293,6 +315,7 @@ class LoopbackTrack(MediaStreamTrack):
     def _put(self, array):
         with self.lock:
             if self.enabled.is_set():
+                self.captured_blocks += 1
                 self.frames.append(array)
 
     def set_enabled(self, enabled):
@@ -304,12 +327,18 @@ class LoopbackTrack(MediaStreamTrack):
         while self.readyState == "live":
             if self.error and self.enabled.is_set():
                 raise RuntimeError(self.error)
-            if not self.enabled.is_set():
-                await asyncio.sleep(.02)
+            now = time.monotonic()
+            if self.audio_clock is None:
+                self.audio_clock = now
+            await asyncio.sleep(max(0, self.audio_clock - now))
+            self.audio_clock = max(self.audio_clock + .02, time.monotonic())
+            with self.lock:
+                item = self.frames.popleft() if self.frames and self.enabled.is_set() else None
+            if item is None:
+                # PipeWire can suspend an idle monitor. Keep RTP time advancing
+                # while capture waits, then consume the newest real audio blocks.
                 item = np.zeros((960, 2), dtype=np.float32)
-            else:
-                with self.lock:
-                    item = self.frames.popleft() if self.frames else None
+                self.silence_blocks += 1
             if item is not None:
                 pts, array = self.samples, item
                 self.samples += len(array)
@@ -318,7 +347,6 @@ class LoopbackTrack(MediaStreamTrack):
                 frame.sample_rate, frame.pts = 48000, pts
                 frame.time_base = fractions.Fraction(1, 48000)
                 return frame
-            await asyncio.sleep(0.004)
         raise MediaStreamError
 
     def stop(self):

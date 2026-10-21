@@ -41,8 +41,8 @@ def main() -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("Elink")
     apply_theme(app)
-    if os.name != "nt":
-        QMessageBox.critical(None, "Elink", "当前版本仅支持 Windows，Linux 和 Android 尚未实现。")
+    if os.name != 'nt' and not sys.platform.startswith('linux'):
+        QMessageBox.critical(None, "Elink", "桌面端支持 Windows 和 Linux。")
         return 1
     root = data_dir()
     try:
@@ -87,3 +87,7 @@ def main() -> int:
     result = app.exec()
     lock.unlock()
     return result
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

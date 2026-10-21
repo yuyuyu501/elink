@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import socket
+import sys
 import time
 from pathlib import Path
 
@@ -96,7 +97,8 @@ class MainWindow(QMainWindow):
         brand_text.addWidget(text_label('你的设备，随时连接。', 'muted'))
         title.addLayout(brand_text)
         title.addStretch()
-        title.addWidget(text_label(f'WINDOWS  /  {__version__}\nPREVIEW', 'versionLabel'), 0, Qt.AlignmentFlag.AlignTop)
+        platform_label = 'WINDOWS' if sys.platform == 'win32' else 'LINUX'
+        title.addWidget(text_label(f'{platform_label}  /  {__version__}\nPREVIEW', 'versionLabel'), 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(title)
         self.setWindowIcon(icon('link', '#2855eb'))
         self.notice_bar = QFrame()
@@ -245,6 +247,10 @@ class MainWindow(QMainWindow):
         self.pad_backend.addItem("ViGEmBus（需已安装）", "vigem")
         self.pad_backend.addItem("ElinkPad（实验驱动，单手柄）", "elinkpad")
         self.pad_backend.addItem("禁用虚拟手柄", "disabled")
+        if sys.platform.startswith('linux'):
+            self.pad_backend.clear()
+            self.pad_backend.addItem('Linux uinput', 'uinput')
+            self.pad_backend.addItem('禁用虚拟手柄', 'disabled')
         self.pad_backend.setMinimumWidth(360)
         self.pad_backend.setMaximumWidth(480)
         advanced_layout.addWidget(OptionRow('本机手柄后端', self.pad_backend))

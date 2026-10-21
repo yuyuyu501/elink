@@ -4,6 +4,7 @@ import asyncio
 import shutil
 import threading
 import time
+import sys
 
 from PySide6.QtCore import Qt, QSize, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
@@ -44,7 +45,8 @@ class AboutPage(QWidget):
         title = QLabel('Elink')
         title.setObjectName('brandTitle')
         name.addWidget(title)
-        version = QLabel(f'{__version__} · Windows x64 预览版')
+        platform = 'Windows' if sys.platform == 'win32' else 'Linux'
+        version = QLabel(f'{__version__} · {platform} x64 预览版')
         version.setObjectName('muted')
         name.addWidget(version)
         heading.addLayout(name, 1)
@@ -89,7 +91,8 @@ class AboutPage(QWidget):
         self.cancel_button.clicked.connect(self.cancel)
         self.cancel_button.hide()
         layout.addWidget(self.cancel_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        note = QLabel("便携版更新将下载完整应用，校验后退出并替换、重启；配置与用户数据保留。\n"
+        note = QLabel("Linux 更新请下载 .deb 并使用系统安装器安装；配置与用户数据保留。" if sys.platform.startswith('linux') else
+                      "便携版更新将下载完整应用，校验后退出并替换、重启；配置与用户数据保留。\n"
                       "更新会断开当前串流；新版启动后自动恢复等待连接。\n"
                       "旧程序会保留在应用旁的 .Elink-update-* 文件夹，确认新版正常后可删除该备份。")
         note.setWordWrap(True)

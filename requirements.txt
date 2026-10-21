@@ -3,9 +3,14 @@ cryptography==46.0.5
 aiortc==1.14.0
 av==16.1.0
 aiohttp==3.13.2
-dxcam==0.0.5
+dxcam==0.0.5; sys_platform == 'win32'
 numpy==2.2.6
 soundcard==0.4.5
 sounddevice==0.5.3
 opencv-python==4.12.0.88
 aioice==0.10.2
+mss==10.1.0; sys_platform == 'linux'
+python-xlib==0.33; sys_platform == 'linux'
+evdev==1.9.2; sys_platform == 'linux'
+psutil==7.1.0; sys_platform == 'linux'
+dbus-next==0.2.3; sys_platform == 'linux'

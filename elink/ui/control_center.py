@@ -54,6 +54,7 @@ class ControlCenter(LocalPanel):
         for label, mode, hint in MOUSE_MODES:
             radio = QRadioButton(label)
             radio.setToolTip(hint)
+            radio.setEnabled(mode in getattr(player.client, 'cursor_modes', ('smart', 'remote', 'local')))
             radio.clicked.connect(lambda checked=False, mode=mode: self.select_mode(mode))
             mouse_rows.addWidget(radio)
             self.modes[mode] = radio

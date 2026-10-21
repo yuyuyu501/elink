@@ -119,7 +119,7 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         assert client.cursor_supported
         from elink.core.media import DesktopTrack
         video = next(t for t in host.tracks if isinstance(t, DesktopTrack))
-        for mode in ('local', 'remote', 'smart'):
+        for mode in client.cursor_modes:
             client.set_cursor_mode(mode)
             await until(lambda: client.cursor_applied == mode)
             assert video.cursor_mode == mode
@@ -156,7 +156,7 @@ async def roundtrip(root, synthetic=True, width=640, height=360, fps=30):
         await client.connect(address, {"width": width, "height": height, "fps": fps, "audio": False})
         await until(lambda: client.mailbox.received >= 3)
         assert host.profile is not old_host_profile and client.profile is not old_client_profile
-        await until(lambda: client.cursor_applied == 'smart')
+        await until(lambda: client.cursor_applied in client.cursor_modes)
         assert not (root / "host/authorized-devices.json").exists()
         assert not (root / "client/trusted-hosts.json").exists()
         return report

@@ -92,3 +92,17 @@ def test_startup_log_is_written_before_collecting_environment(tmp_path, monkeypa
         configure_logging(tmp_path)
     text = (tmp_path / 'logs/elink.log').read_text(encoding='utf-8')
     assert f'Elink {__version__} file logging ready' in text
+
+
+def test_webrtc_sender_failure_is_persisted_without_debug_media(tmp_path, application_logger):
+    filename = configure_logging(tmp_path)
+    logger = logging.getLogger('aiortc.rtcrtpsender')
+    try:
+        raise RuntimeError('audio resampler failed')
+    except RuntimeError:
+        logger.warning('RTCRtpsender(audio) failed', exc_info=True)
+    logger.debug('private media payload must not be written')
+    text = filename.read_text(encoding='utf-8')
+    assert 'RuntimeError: audio resampler failed' in text
+    assert 'RTCRtpsender(audio)' in text
+    assert 'private media payload' not in text

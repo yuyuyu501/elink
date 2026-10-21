@@ -8,3 +8,13 @@ dist/
 .artifacts/
 .runtime/
 *.spec
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/**/build/
+*.jks
+*.keystore
+*.p12
+*.pfx
+.env
+.env.*

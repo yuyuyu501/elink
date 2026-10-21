@@ -1,4 +1,5 @@
 import asyncio
+import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,18 +15,21 @@ from elink.models import ValidationError
 def test_capture_resizes_pixels_without_changing_source_display(size):
     # A real-size fake desktop exercises conversion, not the synthetic source
     # which would already have the requested stream dimensions.
-    pixels = np.full((1440, 2560, 3), 80, dtype=np.uint8)
+    pixels = np.full((1440, 2560, 4), 80, dtype=np.uint8)
     track = DesktopTrack(*size, 60)
     track.camera = SimpleNamespace(get_latest_frame=lambda: pixels, release=lambda: None,
                                    _output=SimpleNamespace(desc=SimpleNamespace(
                                        DesktopCoordinates=SimpleNamespace(left=0, top=0))))
     track.cursor = SimpleNamespace(visible=lambda: False)
+    if os.name != 'nt':
+        track.platform_capture = SimpleNamespace(read=lambda **kw: pixels, cursor_visible=False,
+                                                name='fake-x11', close=lambda: None)
     track.cursor_mode = 'local'
     try:
         frame = track.capture()
         assert (frame.width, frame.height) == size
         assert frame.format.name == 'yuv420p'
-        assert pixels.shape == (1440, 2560, 3) and np.all(pixels == 80)
+        assert pixels.shape == (1440, 2560, 4) and np.all(pixels == 80)
     finally:
         track.stop()
         track.release_future.result(timeout=5)

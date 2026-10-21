@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,13 @@ def entry(version, **values):
         size=100, digest="sha256:" + "a" * 64)])
     result.update(values)
     return result
+
+
+@pytest.fixture(autouse=True)
+def windows_update_selection(monkeypatch):
+    # These fixtures exercise the Windows portable updater on every test OS.
+    if os.name != 'nt':
+        monkeypatch.setattr(updates, 'sys', SimpleNamespace(platform='win32'))
 
 
 def test_release_order_channels_and_asset_selection():
@@ -136,7 +144,7 @@ def test_redirect_is_checked_before_request():
 @pytest.mark.parametrize("failure", [None, "checksum", "truncated", "oversized", "cancel"])
 def test_download_validation_and_active_install_untouched(tmp_path, monkeypatch, failure):
     data = bundle_bytes()
-    release = updates.select_release([entry("0.5.0")])
+    release = updates.select_release([entry("0.5.0")], current="0.4.37")
     release = replace(release, size=len(data), digest=hashlib.sha256(data).hexdigest())
     cancelled = threading.Event()
     if failure == "checksum":
@@ -166,18 +174,20 @@ def test_download_validation_and_active_install_untouched(tmp_path, monkeypatch,
 
 def test_checksum_file_fallback(tmp_path, monkeypatch):
     data = bundle_bytes()
-    release = replace(updates.select_release([entry("0.5.0")]), size=len(data), digest="")
+    release = replace(updates.select_release([entry("0.5.0")], current="0.4.37"), size=len(data), digest="")
     checksum = f"{hashlib.sha256(data).hexdigest()}  {release.name}\n".encode()
     monkeypatch.setattr(updates, "session", lambda: Session([Response(checksum), Response(data)]))
     workspace = asyncio.run(updates.prepare_update(release, tmp_path / "Elink", threading.Event(), lambda *_: None))
     assert (workspace / "payload/Elink/Elink.exe").exists()
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows portable installation')
 def test_source_cannot_replace_python_installation(tmp_path):
     with pytest.raises(RuntimeError, match="源码"):
         updates.installation_dir(tmp_path)
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows portable installation')
 def test_portable_update_protects_user_data(tmp_path, monkeypatch):
     target = tmp_path / "Elink"
     (target / "_internal").mkdir(parents=True)
@@ -190,6 +200,7 @@ def test_portable_update_protects_user_data(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("armed,broken", [(False, False), (True, True), (True, False)])
+@pytest.mark.skipif(os.name != 'nt', reason='Windows PowerShell transactional updater')
 def test_powershell_transaction_and_startup_rollback(tmp_path, armed, broken):
     """Exercise the real helper with isolated fake applications; no installed files touched."""
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"

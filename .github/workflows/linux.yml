@@ -1,0 +1,28 @@
+name: Linux Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install native UI dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-xinerama0 libxtst6 xvfb
+      - name: Install test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run Linux tests
+        run: xvfb-run -a python -m pytest -q

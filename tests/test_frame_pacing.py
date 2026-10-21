@@ -1,4 +1,5 @@
 import asyncio
+import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -69,6 +70,7 @@ def test_capture_waits_off_event_loop_and_pts_follows_completed_capture():
 
 
 @pytest.mark.parametrize('channels', [3, 4])
+@pytest.mark.skipif(os.name != 'nt', reason='DXCam RGB/BGRA capture buffers')
 def test_capture_buffer_lifetime_stride_and_channel_order(channels):
     pixels = np.zeros((40, 132, channels), np.uint8)
     pixels[:, :, :3] = (20, 90, 190)

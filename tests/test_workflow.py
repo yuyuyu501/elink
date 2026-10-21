@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 
@@ -70,6 +71,7 @@ def test_package_rejects_failed_or_incomplete_exe_self_test(report):
         package_windows.validate_self_test(report)
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows packaging entry point')
 def test_packaging_stops_on_failed_tests_before_build(monkeypatch):
     monkeypatch.setattr(package_windows, 'source_snapshot', lambda: {})
     monkeypatch.setattr(package_windows.subprocess, 'check_output', lambda *a, **k: 'head')

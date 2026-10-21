@@ -41,7 +41,7 @@ def native_library():
     if os.name != 'nt':
         raise RuntimeError('RTX VSR requires Windows and an NVIDIA RTX GPU')
     path = (bundle_dir() / 'elink_video.dll' if getattr(sys, 'frozen', False) else
-            Path(__file__).resolve().parents[2] / '.artifacts' / 'video-build' / 'elink_video.dll')
+            Path(__file__).resolve().parents[2] / '.artifacts' / 'windows' / 'video-build' / 'elink_video.dll')
     library = C.CDLL(str(path))
     library.elink_video_error.restype = C.c_char_p
     library.elink_video_error.argtypes = []

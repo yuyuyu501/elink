@@ -63,7 +63,8 @@ def select_release(entries, current=__version__, include_preview=True):
             preview = bool(entry.get("prerelease")) or "-" in version
             if entry.get("draft") or (preview and not include_preview) or key <= version_key(current):
                 continue
-            name = f"Elink-{version}-windows-x64.zip"
+            name = (f"Elink-{version}-linux-x64.deb" if sys.platform.startswith('linux')
+                    else f"Elink-{version}-windows-x64.zip")
             assets = [a for a in entry["assets"] if a["name"] == name]
             if len(assets) != 1:
                 continue
@@ -138,6 +139,8 @@ async def check_release(include_preview=True):
 
 
 def installation_dir(data_root):
+    if sys.platform.startswith('linux'):
+        raise RuntimeError('Linux 安装包请通过上方 Releases 链接下载，再使用系统安装器更新。')
     if os.name != "nt" or not getattr(sys, "frozen", False):
         raise RuntimeError("源码运行模式只能检测更新；自动替换需使用 Windows x64 便携版。")
     target = Path(sys.executable).absolute().parent

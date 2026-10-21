@@ -1,4 +1,5 @@
 import asyncio
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -109,6 +110,7 @@ def test_rtx_option_requires_detection_and_old_preferences_fall_back():
         app.processEvents()
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='NVIDIA Windows VSR detection')
 def test_upscaler_detection_is_async_rechecks_and_ignores_stale_or_deleted_widget(monkeypatch):
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import QCoreApplication, QEvent

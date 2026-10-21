@@ -73,4 +73,4 @@ Microsoft 资料：
 - [内核代码签名要求](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/kernel-mode-code-signing-policy--windows-vista-and-later-)
 - [DMF VirtualHidDeviceVhf](https://github.com/microsoft/DMF/blob/master/Dmf/Modules.Library/Dmf_VirtualHidDeviceVhf.md)
 
-后续更新已创建并编译 `native/elinkpad` UMDF2 驱动和临时软件设备助手，接入 0.4 主机后端选择。原生协议测试、应用测试、INF 校验与目录文件生成已完成；尚未签名、安装或完成 XInput/游戏实机验收，默认仍保留 ViGEm 兼容后端。详见 [ElinkPad 升级记录](elinkpad-upgrade.md)。
+后续更新已创建并编译 `native/windows/elinkpad` UMDF2 驱动和临时软件设备助手，接入 0.4 主机后端选择。原生协议测试、应用测试、INF 校验与目录文件生成已完成；尚未签名、安装或完成 XInput/游戏实机验收，默认仍保留 ViGEm 兼容后端。详见 [ElinkPad 升级记录](elinkpad-upgrade.md)。

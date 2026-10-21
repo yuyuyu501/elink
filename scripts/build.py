@@ -34,7 +34,7 @@ def main(dist_dir=None):
     for name in ("README.md", "THIRD_PARTY_NOTICES.md"):
         shutil.copy2(project / name, output / name)
     shutil.copytree(project / "docs", output / "docs", dirs_exist_ok=True)
-    shutil.copytree(project / "native" / "elinkpad", output / "native" / "elinkpad", dirs_exist_ok=True)
+    shutil.copytree(project / "native" / "windows" / "elinkpad", output / "native" / "windows" / "elinkpad", dirs_exist_ok=True)
     if (project / "licenses").is_dir():
         shutil.copytree(project / "licenses", output / "licenses", dirs_exist_ok=True)
     for distribution in importlib.metadata.distributions():

@@ -1,4 +1,5 @@
 import ctypes
+import os
 from ctypes import wintypes
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ def test_cursor_hotspot_output_origin_and_clipping():
 
 
 @pytest.mark.parametrize('channels', [3, 4])
+@pytest.mark.skipif(os.name != 'nt', reason='Win32 cursor handles')
 def test_windows_cursor_draw_does_not_change_cached_frame(channels):
     cursor = WindowsCursor()
     cursor.user.CreateCursor.argtypes = [wintypes.HINSTANCE, ctypes.c_int, ctypes.c_int,
@@ -43,6 +45,7 @@ def test_windows_cursor_draw_does_not_change_cached_frame(channels):
         cursor.user.DestroyCursor(handle)
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Win32 cursor visibility')
 def test_hidden_cursor_preserves_game_frame():
     cursor = WindowsCursor()
     def hidden(pointer):
@@ -54,6 +57,7 @@ def test_hidden_cursor_preserves_game_frame():
     assert cursor.visible() is False
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='DXCam capture backend')
 def test_desktop_redraws_cursor_without_a_new_desktop_frame():
     pixels = np.zeros((16, 16, 3), dtype=np.uint8)
     frames = iter([pixels, None, None, None])

@@ -93,13 +93,14 @@ def validate_package(directory):
     return receipt, (archive, directory / 'SHA256SUMS.txt', directory / 'verification.json')
 
 
-def ensure_synced_ci(api, revision):
+def ensure_synced_ci(api, revision, workflows=('test.yml',)):
     if api(API + '/commits/main')['sha'] != revision:
         raise RuntimeError('Package commit is not the current remote main commit.')
-    runs = api(API + '/actions/workflows/test.yml/runs?head_sha=' + revision + '&per_page=20')['workflow_runs']
-    matches = [r for r in runs if r['head_sha'] == revision and r['event'] == 'push']
-    if not matches or max(matches, key=lambda r: r['id'])['conclusion'] != 'success':
-        raise RuntimeError('Windows CI has not passed for this commit; wait/fix it and retry publishing.')
+    for workflow in workflows:
+        runs = api(API + f'/actions/workflows/{workflow}/runs?head_sha=' + revision + '&per_page=20')['workflow_runs']
+        matches = [r for r in runs if r['head_sha'] == revision and r['event'] == 'push']
+        if not matches or max(matches, key=lambda r: r['id'])['conclusion'] != 'success':
+            raise RuntimeError(f'{workflow} CI has not passed for this commit; wait/fix it and retry publishing.')
 
 
 def existing_release(api, tag):
@@ -132,20 +133,58 @@ def validate_existing_tag(api, tag, revision):
     raise RuntimeError('Cannot resolve existing version tag.')
 
 
-def publish(directory, notes, api=None):
+def validate_platform_packages(directories, reference):
+    files, platforms = [], set()
+    for directory in directories:
+        matches = list(directory.glob('*.verification.json'))
+        if len(matches) != 1:
+            raise RuntimeError('Expected one platform verification receipt')
+        report = json.loads(matches[0].read_text(encoding='utf-8'))
+        platform = report.get('platform')
+        prefix, extension = {'linux-x64': ('Linux', 'deb'), 'android-arm64': ('Android', 'apk')}.get(platform, ('', ''))
+        if not prefix or platform in platforms:
+            raise RuntimeError('Unsupported or duplicate platform package')
+        name = f'Elink-{__version__}-{platform}.{extension}'
+        if (report.get('version') != __version__ or report.get('package') != name
+                or report.get('source_dirty') is not False or report.get('commit') != reference['commit']
+                or report.get('source_sha256') != reference['source_sha256']):
+            raise RuntimeError('Platform source/version differs from verified Windows source')
+        path = directory / name
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if report.get('sha256') != digest or report.get('bytes') != path.stat().st_size:
+            raise RuntimeError('Platform checksum or size mismatch')
+        checksum = directory / f'{prefix}.sha256'
+        if checksum.read_text(encoding='ascii') != f'{digest}  {name}\n':
+            raise RuntimeError('Platform checksum file mismatch')
+        if platform == 'linux-x64':
+            validate_self_test(report.get('self_test', {}))
+        elif any(report.get(key) is not True for key in ('signature_verified', 'unit_tests', 'lint')):
+            raise RuntimeError('Android signature, tests and lint must pass')
+        files.extend((path, checksum, matches[0]))
+        platforms.add(platform)
+    return tuple(files)
+
+
+def publish(directory, notes, api=None, *, platforms=()):
     receipt, files = validate_package(directory)
+    files += validate_platform_packages(platforms, receipt)
+    workflows = ['test.yml']
+    if any(p.suffix == '.deb' for p in files):
+        workflows.append('linux.yml')
+    if any(p.suffix == '.apk' for p in files):
+        workflows.append('android.yml')
     body = notes.read_text(encoding='utf-8').strip()
     if not body:
         raise RuntimeError('Release notes are required.')
     api = api or GitHub().api
-    ensure_synced_ci(api, receipt['commit'])
+    ensure_synced_ci(api, receipt['commit'], workflows)
     tag = 'v' + __version__
     release = existing_release(api, tag)
     if release is not None and not release['draft']:
         raise RuntimeError('Version already published; refusing to replace it.')
     validate_existing_tag(api, tag, receipt['commit'])
     fields = dict(tag_name=tag, target_commitish=receipt['commit'],
-                  name=f'Elink {__version__} Windows Preview', body=body,
+                  name=f'Elink {__version__} ' + ('Cross-platform Preview' if platforms else 'Windows Preview'), body=body,
                   draft=True, prerelease=True, make_latest='false')
     if release is None:
         release = api(API + '/releases', 'POST', fields)
@@ -169,7 +208,8 @@ def publish(directory, notes, api=None):
         print(f'Verified {path.name}', flush=True)
     # Recheck before public visibility, including edits made during a long upload.
     validate_package(directory)
-    ensure_synced_ci(api, receipt['commit'])
+    validate_platform_packages(platforms, receipt)
+    ensure_synced_ci(api, receipt['commit'], workflows)
     release = api(API + '/releases/' + str(release['id']), 'PATCH',
                   dict(draft=False, prerelease=True, make_latest='false'))
     if release['draft']:
@@ -182,9 +222,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--package', type=Path, required=True)
     parser.add_argument('--notes', type=Path, required=True)
+    parser.add_argument('--platform-package', type=Path, action='append', default=[])
     args = parser.parse_args()
     try:
-        publish(args.package.resolve(), args.notes.resolve())
+        publish(args.package.resolve(), args.notes.resolve(), platforms=args.platform_package)
     except urllib.error.HTTPError as exc:
         print(f'Publication stopped: GitHub HTTP {exc.code}', file=sys.stderr)
         return 1

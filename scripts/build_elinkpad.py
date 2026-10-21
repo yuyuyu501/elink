@@ -52,7 +52,7 @@ def main():
     env["PATH"] = str(compiler) + os.pathsep + str(Path(os.environ["SystemRoot"]) / "System32")
     output = ROOT / "build" / "elinkpad"
     output.mkdir(parents=True, exist_ok=True)
-    source = ROOT / "native" / "elinkpad"
+    source = ROOT / "native" / "windows" / "elinkpad"
 
     def run(command):
         subprocess.run(list(map(str, command)), cwd=output, env=env, check=True)
@@ -87,7 +87,7 @@ def main():
             archive.write(output / name, name)
         for path in sorted(source.iterdir()):
             if path.is_file():
-                archive.write(path, "native/elinkpad/" + path.name)
+                archive.write(path, "native/windows/elinkpad/" + path.name)
         archive.write(ROOT / "scripts" / "build_elinkpad.py", "scripts/build_elinkpad.py")
         archive.write(ROOT / "scripts" / "test_elinkpad_live.py", "scripts/test_elinkpad_live.py")
         archive.write(ROOT / "licenses" / "HIDMaestro-LICENSE.txt", "licenses/HIDMaestro-LICENSE.txt")

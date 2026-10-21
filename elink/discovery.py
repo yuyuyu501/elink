@@ -30,13 +30,33 @@ def machine_id():
             identifier = winreg.QueryValueEx(key, 'MachineGuid')[0]
     except (ImportError, OSError):
         identifier = f'{socket.gethostname()}:{uuid.getnode()}'
+        if os.name != 'nt':
+            from pathlib import Path
+            try:
+                identifier = Path('/etc/machine-id').read_text(encoding='ascii').strip()
+            except OSError:
+                pass
     return hashlib.sha256(('elink-machine-v2:' + identifier).encode()).hexdigest()
 
 
 def lan_interfaces():
     """Read actual IPv4 interface masks without guessing /24 or scanning subnets."""
     if os.name != 'nt':
-        return []
+        import psutil
+        interfaces = []
+        for name, addresses in psutil.net_if_addrs().items():
+            for row in addresses:
+                if row.family != socket.AF_INET or not row.netmask:
+                    continue
+                try:
+                    interface = ipaddress.ip_interface(f'{row.address}/{row.netmask}')
+                    if (not interface.ip.is_loopback and not interface.ip.is_unspecified
+                            and interface.network.prefixlen > 0
+                            and interface.ip not in ipaddress.ip_network('100.64.0.0/10')):
+                        interfaces.append(interface)
+                except ValueError:
+                    continue
+        return interfaces
     class Row(C.Structure):
         _fields_ = [('address', W.DWORD), ('index', W.DWORD), ('mask', W.DWORD),
                     ('broadcast', W.DWORD), ('size', W.DWORD), ('unused', W.WORD), ('kind', W.WORD)]

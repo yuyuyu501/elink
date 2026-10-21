@@ -45,7 +45,11 @@ class Identity:
     def __init__(self, root: Path):
         self.directory = root / "identity"
         self.directory.mkdir(parents=True, exist_ok=True)
-        cert_path, key_path = self.directory / "host.pem", self.directory / "host-key.dpapi"
+        windows = os.name == 'nt'
+        if not windows:
+            self.directory.chmod(0o700)
+        cert_path = self.directory / 'host.pem'
+        key_path = self.directory / ('host-key.dpapi' if windows else 'host-key.pem')
         if cert_path.exists() != key_path.exists():
             raise ValidationError("主机身份文件不完整，已保留原文件。")
         if not cert_path.exists():
@@ -56,14 +60,26 @@ class Identity:
                     .public_key(key.public_key()).serial_number(x509.random_serial_number())
                     .not_valid_before(now - dt.timedelta(minutes=5)).not_valid_after(now + dt.timedelta(days=3650))
                     .sign(key, hashes.SHA256()))
-            key_path.write_bytes(protect(key.private_bytes(serialization.Encoding.PEM,
-                                                           serialization.PrivateFormat.PKCS8, serialization.NoEncryption())))
+            private_key = key.private_bytes(serialization.Encoding.PEM,
+                                           serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+            if windows:
+                key_path.write_bytes(protect(private_key))
+            else:
+                descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, 'wb') as output:
+                    output.write(private_key)
             cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
         self.certificate = x509.load_pem_x509_certificate(cert_path.read_bytes())
         self.fingerprint = self.certificate.fingerprint(hashes.SHA256()).hex()
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.minimum_version = ssl.TLSVersion.TLSv1_2
-        # SSLContext consumes the key at load time. The persistent copy is DPAPI protected.
+        if not windows:
+            if key_path.is_symlink():
+                raise ValidationError('Identity private key must not be a symbolic link')
+            key_path.chmod(0o600)
+            self.context.load_cert_chain(str(cert_path), str(key_path))
+            return
+        # SSLContext consumes the key at load time. The Windows copy is DPAPI protected.
         import tempfile
         with tempfile.TemporaryDirectory(prefix="tls-", dir=self.directory) as temporary:
             plaintext = Path(temporary) / "key.pem"

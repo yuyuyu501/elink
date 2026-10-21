@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import av
 import logging
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, Signal
@@ -17,6 +18,7 @@ from .icons import icon
 from ..core.statistics import StreamStats, overlay_lines
 from ..core.input import CursorConfinement, RawMouseInput, RemoteKeyboardHook, XInput
 from ..core import codecs
+from ..platforms import backend
 from ..core.mouse import MouseSensitivity, mouse_mode, relative_mouse
 
 
@@ -54,7 +56,13 @@ def remote_key_event(event, down):
     if key in _DIRECTION_KEYS:
         vk, scan = _DIRECTION_KEYS[key]
         return {"type": "key", "vk": vk, "scan": scan, "extended": True, "down": down}
+    if sys.platform.startswith('linux'):
+        from ..platforms.linux.qt_keys import remote_key
+        return remote_key(event, down)
     native_vk = int(event.nativeVirtualKey() or 0)
+    if not native_vk:
+        from ..platforms.linux.qt_keys import remote_key
+        return remote_key(event, down)
     if 0x60 <= native_vk <= 0x69 and key not in _DIRECTION_KEYS:
         return {"type": "key", "vk": native_vk, "scan": 0, "extended": False, "down": down}
     scan = int(event.nativeScanCode() or 0)
@@ -76,6 +84,9 @@ class Player(QWidget):
         self.controllers = controllers
         self.preferences = dict(preferences or {})
         self.mouse_mode = mouse_mode(self.preferences.get('mouse_mode', 'remote' if game_mouse else 'smart'))
+        available = getattr(client, 'cursor_modes', ('smart', 'remote', 'local'))
+        if self.mouse_mode not in available:
+            self.mouse_mode = available[0]
         self.mouse_sensitivity = MouseSensitivity(self.preferences.get('mouse_sensitivity', 0))
         self._absolute_last = self._absolute_pos = None
         self._relative_last = None
@@ -109,7 +120,7 @@ class Player(QWidget):
         self.new_image = False
         self.show_statistics = True
         self.pad_indices = set()
-        self.xinput = XInput() if controllers else None
+        self.xinput = (XInput() if sys.platform == 'win32' else backend().gamepads()) if controllers else None
         self.keyboard_hook = RemoteKeyboardHook(self.send, lambda: self.captured)
         self.raw_mouse = RawMouseInput()
         self.cursor_confinement = CursorConfinement()
@@ -366,6 +377,8 @@ class Player(QWidget):
         self.settings_changed.emit({'mouse_sensitivity': self.mouse_sensitivity.value})
 
     def set_mouse_mode(self, mode):
+        if mode not in getattr(self.client, 'cursor_modes', ('smart', 'remote', 'local')):
+            return
         self.release()
         self.mouse_mode = mouse_mode(mode)
         self.preferences['mouse_mode'] = self.mouse_mode
@@ -734,7 +747,9 @@ class Player(QWidget):
         return super().focusNextPrevChild(next_child)
 
     def key(self, event, down):
-        self.send(remote_key_event(event, down))
+        value = remote_key_event(event, down)
+        if value['vk']:
+            self.send(value)
 
     def mouseMoveEvent(self, event):
         if not self.captured:
@@ -903,6 +918,8 @@ class Player(QWidget):
             self.release()
             self.timer.stop()
             self.runtime.feedback.disconnect(self.rumble)
+            if self.xinput and hasattr(self.xinput, 'close'):
+                self.xinput.close()
             if self.renderer_widgets:
                 self.renderer_widgets[0].cleanup()
             self._closed = True

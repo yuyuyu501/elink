@@ -14,9 +14,10 @@ from aiohttp import web
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, RTCRtpSender
 
 from ..models import Endpoint, ValidationError
+from ..platforms import backend, capabilities
 from . import codecs
 from .clipboard import MAX_CLIPBOARD_CHARS, read_text, write_text
-from .input import InputSession, WindowsInput, PAD_BACKENDS
+from .input_session import InputSession, PAD_BACKENDS
 from .media import AudioOutput, DesktopTrack, FrameMailbox, LoopbackTrack, bgr_pixels
 from .qos import install_rtp_pacer, mark_rtc_sockets
 from .sending import install_video_pipeline
@@ -59,8 +60,7 @@ def video_preferences(pc):
     # validates the macroblock rate for higher frame rates.
     import copy
     preferences = copy.deepcopy([c for c in RTCRtpSender.getCapabilities("video").codecs if c.mimeType.lower() == "video/h264"])
-    for codec in preferences:
-        codec.parameters["profile-level-id"] = "640034"
+    preferences.sort(key=lambda c: c.parameters.get('profile-level-id') != '640034')
     for transceiver in pc.getTransceivers():
         if transceiver.kind == "video":
             transceiver.setCodecPreferences(preferences)
@@ -75,11 +75,18 @@ def install():
         protocol.transport.abort()
         await protocol._StunProtocol__closed
     StunProtocol.close = close_datagram
-    # aiortc validates preferences against its supported codec registry.
+    # Keep baseline profiles for native libwebrtc, alongside the desktop High
+    # profile. Preference order is per peer; the registry must stay compatible.
     from aiortc.codecs import CODECS
-    for codec in CODECS["video"]:
-        if codec.mimeType.lower() == "video/h264":
-            codec.parameters["profile-level-id"] = "640034"
+    import copy
+    template = next(c for c in CODECS['video'] if c.mimeType.lower() == 'video/h264')
+    present = {c.parameters.get('profile-level-id') for c in CODECS['video']}
+    for profile in ('640034', '42e034', '420034'):
+        if profile not in present:
+            codec = copy.deepcopy(template)
+            codec.payloadType = max(c.payloadType for c in CODECS['video']) + 1
+            codec.parameters['profile-level-id'] = profile
+            CODECS['video'].append(codec)
 
 
 def settings(value):
@@ -185,7 +192,8 @@ class HostServer:
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
                 "busy": self.pc is not None or self.ending,
-                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1", "live-settings-v1"]}
+                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1", "live-settings-v1"],
+                'capabilities': capabilities()}
 
     async def info(self, request):
         return web.json_response(self.host_info())
@@ -248,7 +256,7 @@ class HostServer:
                         reliable_channel.send(json.dumps(event))
                 loop.call_soon_threadsafe(send)
 
-            self.input = InputSession(self.backend_factory() if self.backend_factory else WindowsInput(feedback, self.pad_backend, self.notify))
+            self.input = InputSession(self.backend_factory() if self.backend_factory else backend().create_input(feedback, self.pad_backend, self.notify))
             input_session = self.input
 
             @pc.on("datachannel")
@@ -298,7 +306,7 @@ class HostServer:
                             return
                         if reliable and isinstance(event, dict) and event.get('type') == 'cursor-mode':
                             mode = event.get('mode')
-                            if mode in ('smart', 'remote', 'local'):
+                            if mode in capabilities()['cursor_modes']:
                                 for track in self.tracks:
                                     if isinstance(track, DesktopTrack):
                                         track.cursor_mode = mode
@@ -596,6 +604,15 @@ class Client:
             self.cursor_applied, self.cursor_visible, self.cursor_updated = 'remote', None, 0.0
             if info.get("busy") is True:
                 raise ValidationError("主机正在被其他设备控制或连接中，请等待当前会话结束。")
+            remote_caps = info.get('capabilities', {})
+            if not isinstance(remote_caps, dict):
+                raise ValidationError('Invalid host capabilities')
+            advertised = remote_caps.get('cursor_modes', ['smart', 'remote', 'local'])
+            if not isinstance(advertised, list):
+                raise ValidationError('Invalid host cursor modes')
+            self.cursor_modes = [mode for mode in advertised if mode in ('smart', 'remote', 'local')]
+            if not self.cursor_modes:
+                self.cursor_modes = ['remote']
             codecs.decode_policy = codecs.CodecPolicy(decoder=decoder)
             self.pc = pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.profile = PipelineProfile()
@@ -657,7 +674,7 @@ class Client:
                     elif event.get("type") == "warning":
                         self.notify(str(event.get("message", ""))[:200])
                     elif event.get("type") == "rumble":
-                        from .input import integer
+                        from .input_session import integer
                         if integer(event.get("index"), 0, 3) and all(integer(event.get(k), 0, 65535) for k in ("left", "right")):
                             self.feedback(event)
                 except (ValueError, TypeError):

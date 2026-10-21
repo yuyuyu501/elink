@@ -1,6 +1,6 @@
 # Third-Party Components
 
-Elink 0.4 uses generic media, networking and UI libraries. Sunshine and Moonlight are architectural references only: neither application nor its source is bundled in this version. Elink is not affiliated with Sunshine, Moonlight, Tailscale or NetEase.
+Elink uses generic media, networking and UI libraries. Sunshine and Moonlight are architectural references only: neither application nor its source is bundled in this version. Elink is not affiliated with Sunshine, Moonlight, Tailscale or NetEase.
 
 | Component | Version | License / source |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ The Elink GLSL wrapper applies EASU followed by RCAS, without FSR 3 frame
 generation or temporal reconstruction. The upstream headers are included in
 the portable application's resources alongside these notices.
 
-The NVIDIA driver extension GUID and request layout in `native/video/rtx_video.cpp`
+The NVIDIA driver extension GUID and request layout in `native/windows/video/rtx_video.cpp`
 follow Chromium's `ToggleNvidiaVpSuperResolution` interface. Its copyright and
 BSD notice are retained in `licenses/Chromium-LICENSE.txt`. The D3D11/WGL bridge
 is built from this repository's source. NVIDIA SDK binaries and NGX model files
@@ -61,3 +61,22 @@ ElinkPad's experimental UMDF2 driver adapts XUSB wire layouts and capability arr
 Dynamic Qt libraries remain replaceable in the folder build. The build script copies installed package license texts (including transitive dependencies such as OpenSSL, libsrtp, Opus, cffi and aioice) to `licenses/python-packages/` and records actual media-library versions. The PyAV FFmpeg binary includes libx264: review its actual GPL configuration, not only PyAV's BSD wrapper license.
 
 This is a local development artifact. Public binary redistribution requires preparing the corresponding sources and notices for the actual GPL/LGPL dependencies and fulfilling their distribution terms. A URL alone does not satisfy every source-delivery obligation. No new license for Elink's own source is assigned here.
+
+## Android Preview
+
+The arm64 APK uses WebRTC SDK `io.github.webrtc-sdk:android:125.6422.07`
+(tag v125.6422.07, repository commit 878c5b093f8bbbd4955d1037316484aabe962d18).
+The SDK wrapper is MIT; the native WebRTC binary and its dependencies have
+separate BSD and other notices. The complete upstream notice file is preserved
+as `licenses/android/WEBRTC.md` and bundled as an APK asset.
+
+OkHttp 4.12.0, Okio 3.6.0, Kotlin 2.1.10, kotlinx-coroutines 1.10.1 and
+JetBrains annotations use Apache-2.0 notices retained in `licenses/android`.
+Android build tools, SDK images and JDK are build dependencies, not APK payloads.
+The local Preview signing key is stored outside the repository; its certificate
+is for update continuity, not a commercial publisher identity.
+
+Linux additionally uses MSS 10.1.0 (MIT), python-xlib 0.33 (LGPL-2.1),
+evdev 1.9.2 (BSD), dbus-next 0.2.3 (MIT) and psutil 7.1.0 (BSD).
+Installed Python dependency notices are copied into the Linux package;
+SDL2, X11, PulseAudio, xclip and GPU drivers remain system components.

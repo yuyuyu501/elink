@@ -21,6 +21,9 @@ def startup_command():
 
 
 def set_enabled(enabled):
+    if sys.platform.startswith('linux'):
+        from .platforms.linux.integration import set_startup
+        return set_startup(enabled)
     if os.name != 'nt':
         raise OSError('开机自启仅支持 Windows。')
     import winreg

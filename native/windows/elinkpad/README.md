@@ -1,4 +1,4 @@
-# ElinkPad 0.4 experimental
+# Windows ElinkPad 0.4 experimental
 
 Elink-maintained UMDF2 function driver exposing one Xbox 360-style XUSB
 interface and a private, versioned control interface. This is an experimental

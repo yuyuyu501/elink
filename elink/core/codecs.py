@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import fractions
 import logging
+import sys
+import ctypes.util
 import time
 from dataclasses import dataclass
 
@@ -23,6 +25,7 @@ class CodecPolicy:
     encoder: str = "auto"
     decoder: str = "auto"
     fixed_priority: bool = True
+    profile: str = 'high'
 
 
 encode_policy = CodecPolicy()
@@ -68,21 +71,24 @@ def make_encoder(name: str, width: int, height: int, policy: CodecPolicy, pixel_
     if name == "h264_nvenc":
         codec.options = {**common, "preset": "p1", "tune": "ull", "zerolatency": "1", "delay": "0",
                          "rc": "cbr", "rc-lookahead": "0", "forced-idr": "1", "strict_gop": "1",
-                         "profile": "high"}
+                         "profile": policy.profile}
     elif name == "h264_amf":
-        codec.options = {**common, "usage": "ultralowlatency", "quality": "speed", "rc": "cbr", "profile": "high"}
+        codec.options = {**common, "usage": "ultralowlatency", "quality": "speed", "rc": "cbr", "profile": policy.profile}
     elif name == "h264_qsv":
-        codec.options = {**common, "preset": "veryfast", "async_depth": "1", "look_ahead": "0", "profile": "high"}
+        codec.options = {**common, "preset": "veryfast", "async_depth": "1", "look_ahead": "0", "profile": policy.profile}
     else:
-        codec.options = {**common, "preset": "ultrafast", "tune": "zerolatency", "profile": "high",
-                         "x264-params": "scenecut=0:repeat-headers=1:cabac=1"}
+        codec.options = {**common, "preset": "ultrafast", "tune": "zerolatency", "profile": policy.profile,
+                         "x264-params": 'scenecut=0:repeat-headers=1:cabac=' + ('0' if policy.profile == 'baseline' else '1')}
     codec.open()
     return codec
 
 
 class DesktopEncoder(H264Encoder):
-    def __init__(self, policy: CodecPolicy):
+    def __init__(self, policy: CodecPolicy, parameters=None):
         self.policy = CodecPolicy(**vars(policy))
+        if parameters is not None:
+            identifier = str(parameters.get('profile-level-id', '42e01f')).lower()
+            self.policy.profile = 'baseline' if identifier.startswith('42') else 'high'
         self._rate = self.policy.bitrate
         self.name = ""
         self.input_layout = None
@@ -134,6 +140,7 @@ class DesktopEncoder(H264Encoder):
             for name in choices:
                 try:
                     policy = CodecPolicy(self.policy.fps, rate, name)
+                    policy.profile = self.policy.profile
                     self.codec = make_encoder(name, frame.width, frame.height, policy, frame.format.name,
                                               int(frame.colorspace), int(frame.color_range))
                     self.name = name
@@ -168,9 +175,13 @@ class DesktopDecoder(H264Decoder):
     def __init__(self, policy: CodecPolicy):
         self.mode = policy.decoder
         self.hardware = False
+        self.hardware_name = 'D3D11VA' if sys.platform == 'win32' else 'CUDA'
         if self.mode != "software":
             try:
-                self.codec = av.CodecContext.create("h264", "r", hwaccel=HWAccel("d3d11va", allow_software_fallback=False))
+                device = 'd3d11va' if sys.platform == 'win32' else 'cuda'
+                if device == 'cuda' and not ctypes.util.find_library('nvcuvid'):
+                    raise ValueError('NVIDIA decoder runtime libnvcuvid is unavailable')
+                self.codec = av.CodecContext.create("h264", "r", hwaccel=HWAccel(device, allow_software_fallback=False))
                 self.hardware = True
             except (av.FFmpegError, ValueError):
                 if self.mode == "hardware":
@@ -234,11 +245,11 @@ class DesktopDecoder(H264Decoder):
                     frame.colorspace = self.codec.colorspace
                 if int(frame.color_range) == 0 and int(self.codec.color_range) in (1, 2):
                     frame.color_range = self.codec.color_range
-        metrics.update(decoder="D3D11VA" if self.hardware else "软件 H.264",
+        metrics.update(decoder=self.hardware_name if self.hardware else "软件 H.264",
                        decode_ms=(time.perf_counter() - started) * 1000, decoded=metrics["decoded"] + len(frames))
         if profile:
             profile.elapsed('decode', started)
-            profile.describe(decoder='D3D11VA' if self.hardware else 'software-h264')
+            profile.describe(decoder=self.hardware_name if self.hardware else 'software-h264')
             if frames:
                 profile.describe(decoder_colorspace=int(frames[-1].colorspace),
                                  decoder_color_range=int(frames[-1].color_range),
@@ -250,7 +261,13 @@ class DesktopDecoder(H264Decoder):
 
 
 def install_factories():
+    if sys.platform.startswith('linux'):
+        import locale
+        # Qt adopts the desktop locale. PyAV 16 decodes FFmpeg's strerror as
+        # ASCII, including EAGAIN while pulling an audio resampler. Keep only
+        # native error messages in C; Qt text and numeric formatting stay intact.
+        locale.setlocale(locale.LC_MESSAGES, 'C')
     # aiortc 1.14 exposes factories at these module boundaries. One outbound host
     # session and one inbound client session are allowed; each codec copies its policy.
-    rtcrtpsender.get_encoder = lambda codec: DesktopEncoder(encode_policy) if codec.mimeType.lower() == "video/h264" else get_encoder(codec)
+    rtcrtpsender.get_encoder = lambda codec: DesktopEncoder(encode_policy, codec.parameters) if codec.mimeType.lower() == "video/h264" else get_encoder(codec)
     rtcrtpreceiver.get_decoder = lambda codec: DesktopDecoder(decode_policy) if codec.mimeType.lower() == "video/h264" else get_decoder(codec)

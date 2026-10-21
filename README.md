@@ -1,4 +1,4 @@
-# Elink 0.4.37 Preview
+# Elink 0.5.0 Preview
 
 Windows 独立远程桌面与游戏串流原型。Elink 自己负责采集、发现、会话、播放器和输入；不需要 Sunshine 或 Moonlight，不下载或启动它们。
 
@@ -78,22 +78,32 @@ python -m venv .venv
 - 同网自动发现与直接连接、单控制端占用检查、会话内证书固定；失焦/断线/超时释放输入。主机证书私钥使用 DPAPI 保存。
 - 外部 Tailscale 状态、设备列表、直连或中继路径探测。
 
+## Linux 与 Android 0.5.0 预览
+
+仓库按 `elink/core`、`elink/ui`、`elink/platforms/windows`、`elink/platforms/linux`、`native/windows`、`android` 和 `protocol` 分层。桌面仍使用共享 Python/Qt 应用和平台后端；Android 是独立 Kotlin 工程，使用原生 WebRTC `SurfaceViewRenderer` 解码显示。
+
+Linux x64 同时提供控制端和被控端。当前实测环境为 Deepin 25、X11、glibc 2.38。X11 采集、键鼠输入、系统声音、控制发现和两台实机之间的 H.264/WebRTC 双向视频已测试。Linux 上没有用于测试的 NVIDIA 编解码运行库，因此该环境使用 libx264 和软件 H.264；游戏手柄还依赖用户有权访问 `/dev/uinput`。Wayland Portal/PipeWire 后端是实验实现，尚未实机验收；系统权限对话框、剪贴板、手柄反馈与打包依赖存在限制。Linux 安装包基于 glibc 2.38 构建，不能据此宣称兼容更旧发行版。
+
+Android arm64 是控制端预览，支持连接 Windows/Linux 主机、H.264/Opus 接收、触控、键鼠及基础手柄输入。实际设备使用 MediaCodec 与 WebRTC 原生渲染，但本轮没有可用 Android 调试授权，因此未做手机/平板实机、游戏手柄、持续帧率、电池与热稳定性验收；提供签名 APK 供手动测试。没有 Android 被控端、应用内自动更新或 iOS/macOS 版本。
+
+Android 第三方许可和协议范围见 `licenses/android`、[协议说明](protocol/README.md) 与[跨平台实现记录](docs/cross-platform-design.md)。
+
 ## 尚未完成
 
 这是可验证的独立核心预览版，尚未达到成熟游戏串流产品的性能与兼容性。可选串流尺寸最高 3840 × 2160；当前 H.264 Level 5.2 预算允许 4K60、1440p144，1080p 可选至 240 FPS。这是参数范围，不是实际帧率承诺；高分辨率会增加转换、编解码、带宽和显示开销。Qt 图像绘制和 CPU/GPU 拷贝尚未改成零拷贝渲染。通道 RTT 不代表操作到显示的总延迟。
 
 没有自有信令服务器、公网 STUN/TURN 或内置 Tailscale。没有可达路径且 Tailscale 不可用时，无法连接。跨 NAT 不作成功保证；中继可能增加延迟。
 
-目前只串流主显示器当前桌面；没有 HDR、HEVC/AV1、多显示器选择、专用游戏启动列表、剪贴板/文件传输、UAC/锁屏控制、服务模式、独立窗口级采集。F8 / F10 / F11 被播放器保留。Linux 和 Android 尚未实现，不计划 macOS/iOS。
+目前只串流主显示器当前桌面；没有 HDR、HEVC/AV1、多显示器选择、专用游戏启动列表、文件传输、UAC/锁屏控制、服务模式、独立窗口级采集。Android 设备搜索暂只覆盖可广播的局域网，不覆盖 Tailscale MagicDNS；请使用可达 IP。F8 / F10 / F11 被播放器保留。不计划 macOS/iOS。
 
 NVENC/D3D11VA 可在本机验证；AMF/QSV、实际物理手柄游戏和跨网表现需要对应设备与第二台电脑验收。
 
 ## 自主手柄驱动进度
 
-`native/elinkpad` 新增 Elink 自己维护的 UMDF2/XUSB 实验驱动，不需要 Sunshine、Moonlight 或 ViGEm 才能编译。当前实现单手柄、版本化 IOCTL、句柄控制权、震动反馈和 500 ms 失联归零。应用用独立工作线程提交状态，避免设备访问阻塞串流。
+`native/windows/elinkpad` 新增 Elink 自己维护的 UMDF2/XUSB 实验驱动，不需要 Sunshine、Moonlight 或 ViGEm 才能编译。当前实现单手柄、版本化 IOCTL、句柄控制权、震动反馈和 500 ms 失联归零。应用用独立工作线程提交状态，避免设备访问阻塞串流。
 
 驱动已编译，并完成原生协议测试、INF 校验和未签名目录文件生成；尚未安装到工作机，也未完成 Windows XInput 或真实游戏验证。**当前默认仍是已验证过的 ViGEm 兼容模式，不应理解为已彻底替代 ViGEm。** 实验选项需要在独立测试系统签名、加载驱动，并运行临时设备助手；未就绪会明确报错，键鼠和串流仍可使用。
 
-构建：`.venv/Scripts/python.exe scripts/build_elinkpad.py --fetch-wdk`。工具只在项目目录取得 WDK 和编译，不安装驱动、不导入证书、不修改系统启动设置。详见 [驱动开发说明](native/elinkpad/README.md) 和 [更新验收记录](docs/elinkpad-upgrade.md)。
+构建：`.venv/Scripts/python.exe scripts/build_elinkpad.py --fetch-wdk`。工具只在项目目录取得 WDK 和编译，不安装驱动、不导入证书、不修改系统启动设置。详见 [驱动开发说明](native/windows/elinkpad/README.md) 和 [更新验收记录](docs/elinkpad-upgrade.md)。
 
 实现与验证记录见 [docs/implementation.md](docs/implementation.md)。第三方库和再分发要求见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -20,6 +20,8 @@ from .ui.window import MainWindow
 
 def run(root: Path, desktop=False):
     root.mkdir(parents=True, exist_ok=True)
+    from .logging_setup import configure_logging
+    configure_logging(root)
     app = QApplication.instance() or QApplication([])
     apply_theme(app)
     window = MainWindow(root / "ui", auto_refresh=False, auto_host=False)
@@ -40,8 +42,10 @@ def run(root: Path, desktop=False):
 
     async def connect():
         nonlocal server, client
-        server = HostServer(root / "host", synthetic=not desktop, backend_factory=RecordingInput)
-        client = Client(root / "client", play_audio=not desktop)
+        import logging
+        notify = logging.getLogger(__name__).info
+        server = HostServer(root / "host", synthetic=not desktop, backend_factory=RecordingInput, notify=notify)
+        client = Client(root / "client", play_audio=not desktop, notify=notify)
         await server.start("127.0.0.1", 0)
         address = f"127.0.0.1:{server.port}"
         await client.connect(address, dict(width=1280, height=720, fps=60, audio=True))
@@ -113,7 +117,19 @@ def run(root: Path, desktop=False):
             assert window.isVisible()
             result['tray_controls'] = dict(hide=True, restore=True)
     except Exception:
-        result.update(ok=False, error=traceback.format_exc())
+        import logging
+        logging.getLogger(__name__).exception('Desktop self-test failed')
+        result.update(ok=False, error=traceback.format_exc(), metrics=dict(metrics),
+                      video_frames=client.mailbox.received if client else 0,
+                      audio_frames=client.audio_frames if client else 0,
+                      stream_statistics=asdict(client.stats) if client else {},
+                      has_image=bool(player and player.image is not None))
+        if server:
+            from .core.media import LoopbackTrack
+            result['audio_capture'] = [dict(samples=t.samples, captured_blocks=t.captured_blocks,
+                                            silence_blocks=t.silence_blocks, error=t.error,
+                                            enabled=t.enabled.is_set(), alive=t.thread.is_alive())
+                                       for t in server.tracks if isinstance(t, LoopbackTrack)]
     finally:
         if player:
             player.close()
