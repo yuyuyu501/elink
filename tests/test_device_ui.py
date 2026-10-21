@@ -255,7 +255,7 @@ def test_controls_apply_in_same_session_and_cancel_does_not_change_options(tmp_p
         pump(app, lambda: player.settings_dialog is None)
         assert window.client.decoder == 'auto' and not audio.enabled.is_set()
         assert video.fps == 30 and video.network_budget.target_bps == 8_000_000
-        pump(app, lambda: encoder.codec.framerate == 30)
+        pump(app, lambda: encoder.codec is not None and encoder.codec.framerate == 30)
         assert window.client.session_id == session and window.player is player
         assert window.client.pc is client_pc and host.pc is host_pc
         window.player.close()
