@@ -330,8 +330,15 @@ class MainActivity : Activity() {
             log.appendText("${java.time.Instant.now()} $message\n${cause?.stackTraceToString() ?: ""}\n")
         }
         if (isFinishing || isDestroyed) return
+        input?.releaseInput()
         errorDialog?.dismiss()
         errorDialog = AlertDialog.Builder(this).setTitle("Elink").setMessage(message).setPositiveButton("关闭", null).create()
+        errorDialog?.setOnDismissListener {
+            if (popup?.isShowing != true && session?.connected == true && resumed) {
+                session?.focus(true)
+                input?.requestFocus()
+            }
+        }
         errorDialog?.show()
     }
 

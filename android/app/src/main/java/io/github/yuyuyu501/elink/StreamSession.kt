@@ -160,14 +160,19 @@ class StreamSession(
             sessionId = answer.getString("id")
             setDescription(pc, SessionDescription(SessionDescription.Type.ANSWER, answer.getString("sdp")), false)
             changed("正在建立媒体连接…")
+            val connectionStarted = android.os.SystemClock.elapsedRealtime()
             timer = scope.launch {
                 var sampleTime = android.os.SystemClock.elapsedRealtime()
                 while (isActive && peer === pc && !closing) {
                     val now = android.os.SystemClock.elapsedRealtime()
+                    if (!connected && now - connectionStarted > 15000) {
+                        scope.launch { abort("媒体连接超时，请确认两台设备的网络互通") }
+                        return@launch
+                    }
                     if (connected) {
                         sendRaw(JSONObject().put("type", "heartbeat").put("active", active).put("epoch", epoch))
                         sendRaw(JSONObject().put("type", "ping").put("time", now))
-                        if (now - lastPong > 8000) { abort("连接超时"); return@launch }
+                        if (now - lastPong > 8000) { scope.launch { abort("连接超时") }; return@launch }
                         if (now - sampleTime >= 1000) {
                             val fps = frameCount.getAndSet(0) * 1000.0 / (now - sampleTime)
                             sampleTime = now

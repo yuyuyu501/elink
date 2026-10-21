@@ -86,6 +86,7 @@ class RemoteInputView(context: Context, private val session: StreamSession) : Vi
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         if (event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
+            padActive = true
             val axis = { code: Int -> event.getAxisValue(code) }
             val hatX = axis(MotionEvent.AXIS_HAT_X)
             val hatY = axis(MotionEvent.AXIS_HAT_Y)
@@ -120,6 +121,7 @@ class RemoteInputView(context: Context, private val session: StreamSession) : Vi
     }
 
     private var padButtons = 0
+    private var padActive = false
     private var padHat = 0
     private var padAxes = IntArray(6)
     private val gameKeys = mapOf(KeyEvent.KEYCODE_BUTTON_A to 0x1000, KeyEvent.KEYCODE_BUTTON_B to 0x2000,
@@ -130,10 +132,13 @@ class RemoteInputView(context: Context, private val session: StreamSession) : Vi
         KeyEvent.KEYCODE_DPAD_UP to 1, KeyEvent.KEYCODE_DPAD_DOWN to 2,
         KeyEvent.KEYCODE_DPAD_LEFT to 4, KeyEvent.KEYCODE_DPAD_RIGHT to 8)
 
-    private fun sendPad() = session.send(JSONObject().put("type", "pad").put("index", 0)
-        .put("values", JSONArray(listOf(padButtons or padHat) + padAxes.toList())), false)
+    private fun sendPad() {
+        if (padActive) session.send(JSONObject().put("type", "pad").put("index", 0)
+            .put("values", JSONArray(listOf(padButtons or padHat) + padAxes.toList())), false)
+    }
 
     fun virtualButton(mask: Int, down: Boolean) {
+        padActive = true
         padButtons = if (down) padButtons or mask else padButtons and mask.inv()
         sendPad()
     }
@@ -183,6 +188,7 @@ class RemoteInputView(context: Context, private val session: StreamSession) : Vi
         padHat = 0
         padAxes = IntArray(6)
         sendPad()
+        padActive = false
         session.focus(false)
     }
 }
