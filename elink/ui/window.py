@@ -127,6 +127,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在准备本机连接…" if auto_host else "诊断模式")
         self.statusBar().hide()
         self.load_config()
+        self.options.refresh_upscalers(self.runtime)
         self.make_tray()
         self.startup_enabled.toggled.connect(self.change_startup)
         self.close_to_tray.toggled.connect(lambda _: self.save_config())
@@ -449,6 +450,8 @@ class MainWindow(QMainWindow):
         self.runtime.submit(self.client.disconnect(), lambda _: self.set_busy(False), self.connect_failed)
 
     def update_session_preferences(self, values):
+        if values.get('upscaler') == 'rtx':
+            self.options.set_rtx_available(True)
         self.options.restore(values)
         self.save_config()
 
@@ -651,7 +654,7 @@ class MainWindow(QMainWindow):
                                   'mouse_sensitivity': value.get('mouse_sensitivity', 0),
                                   'resolution': value.get('stream_resolution', [1920, 1080]),
                                   'renderer': value.get('renderer', 'cpu'), 'render_scale': value.get('render_scale', 100),
-                                  'upscaler': value.get('upscaler', 'rtx')})
+                                  'upscaler': value.get('upscaler', 'fsr')})
             for name in ("audio", "controllers"):
                 getattr(self, name).setChecked(value.get(name, True))
             self.startup_enabled.setChecked(value.get('startup_enabled') is True)

@@ -86,3 +86,59 @@ def test_preferences_keep_scale_and_renderer_consistent():
     options.deleteLater()
     restored.deleteLater()
     app.processEvents()
+
+
+def test_rtx_option_requires_detection_and_old_preferences_fall_back():
+    from PySide6.QtWidgets import QApplication
+    from elink.ui.controls import StreamOptions
+    app = QApplication.instance() or QApplication([])
+    options = StreamOptions()
+    try:
+        assert options.upscaler.count() == 1 and options.upscaler.currentData() == 'fsr'
+        options.restore({'render_scale': 50, 'upscaler': 'rtx'})
+        assert options.values()['upscaler'] == 'fsr'
+        options.set_rtx_available(True)
+        assert options.upscaler.count() == 2 and options.upscaler.currentData() == 'rtx'
+        options.upscaler.setCurrentIndex(options.upscaler.findData('fsr'))
+        options.set_rtx_available(True)
+        assert options.upscaler.currentData() == 'fsr'
+        options.set_rtx_available(False)
+        assert options.upscaler.count() == 1 and options.upscaler.findData('rtx') == -1
+    finally:
+        options.deleteLater()
+        app.processEvents()
+
+
+def test_upscaler_detection_is_async_rechecks_and_ignores_stale_or_deleted_widget(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from elink.ui import rtx_video
+    from elink.ui.controls import StreamOptions
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(QApplication, 'platformName', lambda: 'windows')
+    detected = []
+    monkeypatch.setattr(rtx_video, 'rtx_available', lambda: detected.append(True) or True)
+    operations = []
+    runtime = SimpleNamespace(submit=lambda coro, done, failed: operations.append((coro, done)))
+    options = StreamOptions()
+    options.refresh_upscalers(runtime)
+    assert options.rtx_check_pending and options.upscaler.count() == 1
+    assert not detected
+    coro, done = operations.pop()
+    done(asyncio.run(coro))
+    assert detected and not options.rtx_check_pending and options.upscaler.findData('rtx') >= 0
+    options.refresh_upscalers(runtime)
+    old_coro, old_done = operations.pop()
+    options.refresh_upscalers(runtime)
+    new_coro, new_done = operations.pop()
+    old_coro.close()
+    new_coro.close()
+    new_done(False)
+    old_done(True)
+    assert options.upscaler.findData('rtx') == -1
+    options.refresh_upscalers(runtime)
+    coro, done = operations.pop()
+    coro.close()
+    options.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    done(True)

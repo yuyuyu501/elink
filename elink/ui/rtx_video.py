@@ -1,8 +1,11 @@
 """Driver-backed RTX VSR; decoded YUV is uploaded without a CPU RGB roundtrip."""
 import ctypes as C
+import logging
 import os
 import sys
+import threading
 import time
+import weakref
 from pathlib import Path
 from shiboken6 import delete
 
@@ -10,6 +13,28 @@ from PySide6.QtOpenGL import QOpenGLShader, QOpenGLShaderProgram, QOpenGLTexture
 
 from ..paths import bundle_dir
 from .gpu_video import color_parameters
+
+
+log = logging.getLogger(__name__)
+_processor_lock = threading.RLock()
+_processors = weakref.WeakSet()
+
+
+def rtx_available():
+    """Verify generated pixels, without probing beside an active VSR processor."""
+    with _processor_lock:
+        if any(p.enabled and p.effect_difference >= .01 for p in _processors):
+            return True
+        processor = None
+        try:
+            processor = RtxProcessor(960, 540, (1920, 1080))
+            return processor.effect_difference >= .01
+        except Exception as exc:
+            log.info('RTX VSR unavailable during capability detection: %s', exc)
+            return False
+        finally:
+            if processor:
+                processor.close()
 
 
 def native_library():
@@ -41,11 +66,14 @@ class RtxProcessor:
 
     def __init__(self, width, height, output_size, texture=0, *, enabled=True):
         self.input_size = width, height
-        self.library = native_library()
-        self.handle = self.library.elink_video_create(width, height, *output_size, texture, enabled)
-        if not self.handle:
-            raise RuntimeError(self.error())
-        self.effect_difference = self.library.elink_video_effect(self.handle)
+        self.enabled = enabled
+        with _processor_lock:
+            self.library = native_library()
+            self.handle = self.library.elink_video_create(width, height, *output_size, texture, enabled)
+            if not self.handle:
+                raise RuntimeError(self.error())
+            self.effect_difference = self.library.elink_video_effect(self.handle)
+            _processors.add(self)
 
     def error(self):
         return self.library.elink_video_error().decode('utf-8', errors='replace')
@@ -70,9 +98,11 @@ class RtxProcessor:
             raise RuntimeError(self.error())
 
     def close(self):
-        if self.handle:
-            handle, self.handle = self.handle, None
-            self.library.elink_video_destroy(handle)
+        with _processor_lock:
+            if self.handle:
+                handle, self.handle = self.handle, None
+                _processors.discard(self)
+                self.library.elink_video_destroy(handle)
 
 
 class RtxUpscaler:

@@ -42,3 +42,33 @@ def test_inactive_driver_is_an_error_not_an_active_rtx_label(monkeypatch):
     monkeypatch.setattr(rtx_video, 'native_library', lambda: library([],create=False))
     with pytest.raises(RuntimeError,match='inactive'):
         rtx_video.RtxProcessor(960,540,(1920,1080))
+
+
+def test_capability_detection_rejects_inactive_and_cleans_probe(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rtx_video, 'native_library', lambda: library(calls, create=False))
+    assert not rtx_video.rtx_available()
+    monkeypatch.setattr(rtx_video, 'native_library', lambda: library(calls))
+    assert rtx_video.rtx_available()
+    assert calls[-1] == ('destroy', 123)
+    assert not list(rtx_video._processors)
+
+
+def test_capability_detection_does_not_compete_with_active_vsr(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rtx_video, 'native_library', lambda: library(calls))
+    processor = rtx_video.RtxProcessor(960, 540, (1920, 1080), texture=99)
+    try:
+        assert rtx_video.rtx_available()
+        assert len(calls) == 1
+    finally:
+        processor.close()
+
+
+def test_accepted_extension_without_measurable_effect_is_not_available(monkeypatch):
+    calls = []
+    dll = library(calls)
+    dll.elink_video_effect = lambda _: 0
+    monkeypatch.setattr(rtx_video, 'native_library', lambda: dll)
+    assert not rtx_video.rtx_available()
+    assert calls[-1] == ('destroy', 123)

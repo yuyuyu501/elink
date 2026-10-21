@@ -73,14 +73,40 @@ def test_export_success_notice_disappears_after_three_seconds(monkeypatch, tmp_p
         app.processEvents()
 
 
-def test_new_error_is_not_hidden_by_previous_success_notice():
+def test_new_error_gets_its_own_three_second_timer():
     app, player, _ = make_player()
     try:
         player.show_error('性能报告已保存', timeout_ms=3000)
+        QTest.qWait(2750)
         player.show_error('连接失败')
-        QTest.qWait(3150)
+        QTest.qWait(400)
         assert player.error_label.isVisible()
         assert player.error_label.text() == '连接失败'
+        QTest.qWait(2750)
+        assert not player.error_bar.isVisible()
+    finally:
+        player.close()
+        app.processEvents()
+
+
+def test_session_error_can_be_dismissed_without_remote_click_and_does_not_repeat():
+    app, player, events = make_player()
+    try:
+        player.resize(640, 400)
+        player.show_error('连接错误 <plain text>\n' * 3)
+        app.processEvents()
+        assert player.error_bar.isVisible() and player.error_close.isVisible()
+        assert player.error_label.textFormat() == Qt.TextFormat.PlainText
+        assert player.error_label.geometry().right() < player.error_close.geometry().left()
+        before = list(events)
+        QTest.mouseClick(player.error_label, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(player.error_close, Qt.MouseButton.LeftButton)
+        assert events == before
+        assert not player.error_bar.isVisible() and not player.error_timer.isActive()
+        player.show_error('连接错误 <plain text>\n' * 3)
+        assert not player.error_bar.isVisible()
+        player.show_error('另一个错误')
+        assert player.error_bar.isVisible()
     finally:
         player.close()
         app.processEvents()

@@ -153,7 +153,7 @@ class YuvSurface(QOpenGLWidget):
         metadata = profile.snapshot()['metadata'] if profile else {}
         if self.player.preferences.get('render_scale', metadata.get('render_scale', 100)) != 100:
             size = self.player.preferences.get('resolution') or [metadata['output_width'], metadata['output_height']]
-            if self.player.preferences.get('upscaler', 'rtx') == 'rtx':
+            if self.player.preferences.get('upscaler', 'fsr') == 'rtx':
                 from .rtx_video import RtxUpscaler
                 self.upscaler = RtxUpscaler(self, size)
             else:
@@ -248,7 +248,7 @@ class YuvSurface(QOpenGLWidget):
                         self.upscaler.render(target, profile, True)
                         if profile:
                             profile.describe(upscaler_fallback=str(exc)[:240])
-                        self.player.show_error('RTX VSR 不可用，已回退 FSR 1：' + str(exc)[:160])
+                        self.player.rtx_unavailable(str(exc))
                 else:
                     gl.glViewport(*target)
                     self.draw_video()

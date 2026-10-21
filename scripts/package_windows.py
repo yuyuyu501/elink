@@ -45,6 +45,13 @@ def validate_gpu_test(report):
     live = report.get('live_settings', [])
     live_capture = report.get('live_capture', [])
     diagnostics = report.get('capture_diagnostics', {})
+    notices = report.get('session_notices', [])
+    if ({n.get('renderer') for n in notices} != {'cpu', 'gpu'}
+            or any(n.get(key) is not True for n in notices for key in ('native_banner', 'dismiss', 'auto_hide'))):
+        raise RuntimeError('Packaged dismissible session notice checks have not passed.')
+    if any(report.get('rtx_options', {}).get(key) is not True for key in
+           ('default_fsr', 'active_driver_exposed', 'unavailable_removed')):
+        raise RuntimeError('Packaged RTX capability option checks have not passed.')
     if any(diagnostics.get(key) is not True for key in
            ('ok', 'gray_start_recovered', 'continued_after_real_failure')):
         raise RuntimeError('Packaged D3D11 recovery/file diagnostic checks have not passed.')
@@ -85,7 +92,7 @@ def validate_gpu_test(report):
             or not isinstance(rtx.get('rtx_probe_mae'), (int, float)) or not rtx['rtx_probe_mae'] >= .01
             or not isinstance(rtx.get('rtx_gpu'), dict) or rtx['rtx_gpu'].get('samples', 0) <= 0
             or any(report.get('rtx_fallback', {}).get(key) is not True
-                   for key in ('fsr_fallback', 'native_video', 'notice'))
+                   for key in ('fsr_fallback', 'native_video', 'silent', 'preference_fsr'))
             or {(s.get('width'), s.get('height')) for s in capture} != {(1920, 1080), (1440, 810), (1280, 720)}
             or any(s.get('format') != 'nv12' or not isinstance(s.get('max_rgb_error'), (int, float))
                    or not 0 <= s['max_rgb_error'] <= 6

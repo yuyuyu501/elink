@@ -1,6 +1,9 @@
 """Shared stream preferences and keyboard-accessible device rows."""
+import asyncio
+
+from shiboken6 import isValid
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
                                QFrame, QLabel, QPushButton, QDoubleSpinBox, QSpinBox, QVBoxLayout, QWidget)
 from .icons import icon_label
 from ..core.mouse import MOUSE_MODES, mouse_mode, sensitivity_value
@@ -81,8 +84,11 @@ class StreamOptions(QWidget):
         for label, value in [('原生 100%', 100), ('75%', 75), ('66.7%', 67), ('50%', 50)]:
             self.render_scale.addItem(label, value)
         self.upscaler = QComboBox()
-        self.upscaler.addItem('RTX Video Super Resolution', 'rtx')
-        self.upscaler.addItem('FSR 1（兼容）', 'fsr')
+        self.upscaler.addItem('FSR 1', 'fsr')
+        self._requested_upscaler = 'fsr'
+        self._rtx_probe_generation = 0
+        self.rtx_check_pending = False
+        self.upscaler.currentIndexChanged.connect(self.remember_upscaler)
         self.upscaler.setEnabled(False)
         self.render_scale.currentIndexChanged.connect(
             lambda: self.renderer.setCurrentIndex(1) if self.render_scale.currentData() != 100 else None)
@@ -114,6 +120,37 @@ class StreamOptions(QWidget):
             widget.setChecked(True)
             form.addRow(widget)
 
+    def remember_upscaler(self):
+        self._requested_upscaler = self.upscaler.currentData()
+
+    def set_rtx_available(self, available):
+        self.upscaler.blockSignals(True)
+        self.upscaler.clear()
+        self.upscaler.addItem('FSR 1', 'fsr')
+        if available:
+            self.upscaler.addItem('RTX Video Super Resolution', 'rtx')
+        self.upscaler.setCurrentIndex(max(0, self.upscaler.findData(self._requested_upscaler)))
+        self.upscaler.blockSignals(False)
+
+    def refresh_upscalers(self, runtime):
+        self._rtx_probe_generation += 1
+        generation = self._rtx_probe_generation
+        self.rtx_check_pending = False
+        self.set_rtx_available(False)
+        if QApplication.platformName() in ('offscreen', 'minimal'):
+            return
+        self.rtx_check_pending = True
+
+        async def probe():
+            from .rtx_video import rtx_available
+            return await asyncio.to_thread(rtx_available)
+
+        def complete(available):
+            if isValid(self) and generation == self._rtx_probe_generation:
+                self.rtx_check_pending = False
+                self.set_rtx_available(available)
+        runtime.submit(probe(), complete, lambda _: complete(False))
+
     def values(self):
         return {name: (widget.currentData() if name in ('mouse_mode', 'resolution', 'renderer', 'render_scale', 'upscaler') else widget.currentIndex() if isinstance(widget, QComboBox) else
                        widget.isChecked() if isinstance(widget, QCheckBox) else widget.value())
@@ -127,7 +164,12 @@ class StreamOptions(QWidget):
             if name == 'resolution':
                 index = widget.findData(value) if isinstance(value, list) else -1
                 widget.setCurrentIndex(index if index >= 0 else 0)
-            elif name in ('renderer', 'render_scale', 'upscaler'):
+            elif name == 'upscaler':
+                self._requested_upscaler = 'rtx' if value == 'rtx' else 'fsr'
+                widget.blockSignals(True)
+                widget.setCurrentIndex(max(0, widget.findData(self._requested_upscaler)))
+                widget.blockSignals(False)
+            elif name in ('renderer', 'render_scale'):
                 widget.setCurrentIndex(max(0, widget.findData(value)))
             elif name == 'mouse_mode':
                 widget.setCurrentIndex(widget.findData(mouse_mode(value)))

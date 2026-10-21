@@ -232,7 +232,7 @@ public:
         effect_difference=difference/(size_t(out_width)*out_height*3);
         readback.Reset();
         if (effect_difference<.01)
-            throw std::runtime_error("RTX VSR driver is inactive; enable RTX Video Super Resolution in NVIDIA settings and reconnect");
+            throw std::runtime_error("RTX VSR driver is inactive; enable RTX Video Super Resolution in NVIDIA settings and reopen quality settings");
     }
 };
 }

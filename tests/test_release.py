@@ -66,7 +66,10 @@ def package_fixture(tmp_path, monkeypatch):
                                  rtx_colors=[dict(native_rgb_error=2)] * 5,
                                  rtx_stream=dict(render_scale=50, upscaler='RTX-VSR', native_video=True,
                                                  cpu_fallback=True, rtx_gpu=dict(samples=20), rtx_probe_mae=.5),
-                                 rtx_fallback=dict(fsr_fallback=True, native_video=True, notice=True),
+                                 rtx_options=dict(default_fsr=True, active_driver_exposed=True, unavailable_removed=True),
+                                 session_notices=[dict(renderer=r, native_banner=True, dismiss=True, auto_hide=True)
+                                                  for r in ('cpu', 'gpu')],
+                                 rtx_fallback=dict(fsr_fallback=True, native_video=True, silent=True, preference_fsr=True),
                                  native_capture=[dict(width=w, height=h, format='nv12', max_rgb_error=2,
                                                       colorspace=1, decoded_colorspace=1,
                                                       color_range=2, decoded_color_range=2)
@@ -81,7 +84,8 @@ def package_fixture(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('problem', ['checksum', 'commit', 'updater', 'source', 'gpu_missing', 'gpu_black',
                                    'fsr_missing', 'fsr_black', 'fsr_timer', 'capture_missing', 'capture_color',
-                                   'rtx_missing', 'rtx_fallback', 'rtx_timer', 'rtx_inactive', 'rtx_notice',
+                                   'rtx_missing', 'rtx_fallback', 'rtx_timer', 'rtx_inactive', 'rtx_notice', 'rtx_options',
+                                   'session_notices',
                                    'decoder_colors_missing', 'decoder_clipped', 'decoder_range', 'decoder_native',
                                    'live_missing', 'live_reconnect', 'live_black', 'live_capture',
                                    'capture_diagnostics'])
@@ -112,7 +116,11 @@ def test_publication_rejects_unverified_or_mismatched_package(tmp_path, monkeypa
     elif problem == 'rtx_inactive':
         receipt['gpu_test']['rtx_stream']['rtx_probe_mae'] = 0
     elif problem == 'rtx_notice':
-        receipt['gpu_test']['rtx_fallback']['notice'] = False
+        receipt['gpu_test']['rtx_fallback']['silent'] = False
+    elif problem == 'rtx_options':
+        receipt['gpu_test']['rtx_options']['active_driver_exposed'] = False
+    elif problem == 'session_notices':
+        receipt['gpu_test']['session_notices'][0]['dismiss'] = False
     elif problem == 'capture_missing':
         receipt['gpu_test'].pop('native_capture')
     elif problem == 'capture_color':

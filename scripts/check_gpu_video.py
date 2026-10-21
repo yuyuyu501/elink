@@ -332,7 +332,7 @@ def verify_stream(app, root, decoder, render_scale=100, upscaler='fsr'):
 
 
 def verify_rtx_fallback(app):
-    """An inactive driver must retain GPU video via FSR and explain the fallback."""
+    """An inactive driver retains GPU video via FSR without an error overlay."""
     from unittest.mock import patch
     from elink.ui import rtx_video
 
@@ -347,14 +347,73 @@ def verify_rtx_fallback(app):
             if (view.gpu_surface is None or view.gpu_surface.broken
                     or metadata.get('upscaler') != 'FSR1-EASU-RCAS'
                     or 'inactive RTX driver' not in metadata.get('upscaler_fallback', '')
-                    or not view.error_label.isVisible()):
-                raise AssertionError('Inactive RTX driver did not fall back to FSR with a notice')
+                    or view.error_bar.isVisible() or view.preferences.get('upscaler') != 'fsr'):
+                raise AssertionError('Inactive RTX driver did not fall back to FSR silently')
             verify_pixels(view, screen_image(app, view), frame.to_ndarray(format='rgb24'))
-            return dict(fsr_fallback=True, native_video=True, notice=True)
+            return dict(fsr_fallback=True, native_video=True, silent=True, preference_fsr=True)
         finally:
             view.close()
             view.deleteLater()
             app.processEvents()
+
+
+def verify_rtx_options(app):
+    from elink.core.runtime import Runtime as BackgroundRuntime
+    from elink.ui.controls import StreamOptions
+    runtime = BackgroundRuntime()
+    options = StreamOptions()
+    try:
+        assert options.upscaler.count() == 1 and options.upscaler.currentData() == 'fsr'
+        options.refresh_upscalers(runtime)
+        assert options.upscaler.findData('rtx') == -1
+        deadline = time.perf_counter() + 15
+        while options.rtx_check_pending:
+            settle(app, .03)
+            if time.perf_counter() > deadline:
+                raise AssertionError('RTX driver capability detection timed out')
+        assert options.upscaler.findData('rtx') >= 0, 'Local RTX VSR must be enabled for GPU package checks'
+        assert options.upscaler.currentData() == 'fsr'
+        options.restore({'upscaler': 'rtx'})
+        assert options.upscaler.currentData() == 'rtx'
+        options.set_rtx_available(False)
+        assert options.upscaler.findData('rtx') == -1 and options.upscaler.currentData() == 'fsr'
+        return dict(default_fsr=True, active_driver_exposed=True, unavailable_removed=True)
+    finally:
+        options.deleteLater()
+        app.processEvents()
+        runtime.stop()
+
+
+def verify_session_notices(app):
+    results = []
+    for mode in ('cpu', 'gpu'):
+        view = player(app, mode, statistics=False)
+        try:
+            rgb = np.full((360, 640, 3), 90, np.uint8)
+            frame = av.VideoFrame.from_ndarray(rgb, format='rgb24').reformat(format='nv12')
+            view.client.mailbox.put(frame if mode == 'gpu' else rgb)
+            settle(app)
+            view.show_error('Synthetic session error')
+            image = screen_image(app, view)
+            point = view.error_bar.pos() + QPoint(8, 10)
+            ratio = image.devicePixelRatio()
+            color = image.pixelColor(round(point.x() * ratio), round(point.y() * ratio)).getRgb()[:3]
+            assert max(abs(a - b) for a, b in zip(color, (255, 240, 238))) <= 5, 'Native error banner is covered'
+            assert view.error_close.isVisible()
+            QTest.mouseClick(view.error_close, Qt.MouseButton.LeftButton)
+            assert not view.error_bar.isVisible()
+            view.show_error('Synthetic session error')
+            assert not view.error_bar.isVisible()
+            view.show_error('A different session error')
+            settle(app, 3.15)
+            assert not view.error_bar.isVisible()
+            verify_pixels(view, screen_image(app, view), rgb)
+            results.append(dict(renderer=mode, native_banner=True, dismiss=True, auto_hide=True))
+        finally:
+            view.close()
+            view.deleteLater()
+            app.processEvents()
+    return results
 
 
 def verify_decoder_colors(app):
@@ -485,7 +544,9 @@ def main(argv=None):
                                                       for mode in ('cpu', 'gpu')],
                   super_resolution={str(scale): verify_colors(app, scale) for scale in (75, 67, 50)},
                   rtx_colors=verify_colors(app, 50, 'rtx'),
+                  rtx_options=verify_rtx_options(app),
                   rtx_fallback=verify_rtx_fallback(app),
+                  session_notices=verify_session_notices(app),
                   limitations='Synthetic CPU submission benchmark, not game FPS, GPU time or input-to-photon latency.')
     if args.stream_check:
         from scripts.check_gpu_capture import verify as verify_capture, verify_live_capture

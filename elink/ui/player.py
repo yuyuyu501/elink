@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import av
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, Signal
@@ -10,7 +11,7 @@ from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushBu
 
 from .controls import StreamOptions
 from .chrome import TITLE_HEIGHT, StreamTitleBar, make_resize_handles, place_resize_handles
-from .control_center import ControlCenter
+from .control_center import ControlCenter, LocalPanel
 from .icons import icon
 
 from ..core.statistics import StreamStats, overlay_lines
@@ -248,16 +249,29 @@ class Player(QWidget):
         self.stream_title = self.toolbar.title
         self.controls_button = self.toolbar.controls
         self.resize_handles = make_resize_handles(self)
-        self.error_label = QLabel(self)
-        self.error_label.setObjectName("errorNotice")
+        self.error_bar = LocalPanel(self)
+        self.error_bar.setObjectName('errorNotice')
+        row = QHBoxLayout(self.error_bar)
+        row.setContentsMargins(12, 10, 8, 10)
+        self.error_label = QLabel()
         self.error_label.setTextFormat(Qt.TextFormat.PlainText)
         self.error_label.setWordWrap(True)
         self.error_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.error_label.hide()
+        row.addWidget(self.error_label, 1)
+        self.error_close = QPushButton()
+        self.error_close.setObjectName('noticeClose')
+        self.error_close.setIcon(icon('x', '#a53232'))
+        self.error_close.setToolTip('关闭提示')
+        self.error_close.setAccessibleName('关闭提示')
+        self.error_close.setFixedSize(32, 32)
+        self.error_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.error_close.clicked.connect(self.dismiss_error)
+        row.addWidget(self.error_close, 0, Qt.AlignmentFlag.AlignTop)
+        self.error_bar.hide()
         self.error_timer = QTimer(self)
         self.error_timer.setSingleShot(True)
         self.error_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.error_timer.timeout.connect(self.error_label.hide)
+        self.error_timer.timeout.connect(self.dismiss_error)
 
     def video_viewport(self):
         return self.rect().adjusted(0, 0 if self.isFullScreen() else TITLE_HEIGHT, 0, 0)
@@ -267,7 +281,7 @@ class Player(QWidget):
         self.toolbar.setVisible(not self.isFullScreen() or not self.captured)
         self.toolbar.update_state()
         top = TITLE_HEIGHT if self.toolbar.isVisible() else 0
-        self.error_label.setGeometry(16, top + 8, self.width() - 32, 72)
+        self.error_bar.setGeometry(16, top + 8, self.width() - 32, 72)
         if self.gpu_surface:
             self.gpu_surface.setGeometry(self.rect())
             self.gpu_surface.lower()
@@ -306,12 +320,29 @@ class Player(QWidget):
         else:
             self.showMaximized()
 
-    def show_error(self, message, *, timeout_ms=0):
+    def dismiss_error(self):
         self.error_timer.stop()
-        self.error_label.setText(str(message))
-        self.error_label.show()
+        self.error_bar.hide()
+
+    def show_error(self, message, *, timeout_ms=3000):
+        message = str(message)
+        if message == self.error_label.text():
+            return
+        logging.getLogger(__name__).warning('%s', message)
+        self.error_timer.stop()
+        self.error_label.setText(message)
+        self.error_bar.show()
+        self.error_bar.raise_()
         if timeout_ms > 0:
             self.error_timer.start(timeout_ms)
+
+    def rtx_unavailable(self, reason):
+        logging.getLogger(__name__).info('RTX VSR fell back to FSR 1: %s', reason)
+        self.preferences['upscaler'] = 'fsr'
+        if self.settings_dialog:
+            self.settings_dialog.options.set_rtx_available(False)
+            self.settings_dialog.options.restore({'upscaler': 'fsr'})
+        self.settings_changed.emit({'upscaler': 'fsr'})
 
     def open_controls(self):
         if self._closed:
@@ -381,6 +412,7 @@ class Player(QWidget):
         options = StreamOptions()
         dialog.options = options
         options.restore(self.preferences)
+        options.refresh_upscalers(self.runtime)
         layout.addWidget(options)
         note = QLabel()
         dialog.note = note
@@ -458,6 +490,9 @@ class Player(QWidget):
 
     def update_mouse(self, force=False):
         if not self.captured:
+            return
+        if self.error_bar.isVisible() and self.error_bar.rect().contains(self.error_bar.mapFromGlobal(QCursor.pos())):
+            self.release(resume_on_hover=True)
             return
         if not self.isFullScreen() and QApplication.platformName() == 'windows':
             if self.release_outside_video(QPointF(self.mapFromGlobal(QCursor.pos()))):
