@@ -82,11 +82,11 @@ def wait_for(predicate, message, timeout=45):
     raise RuntimeError(message)
 
 
-def verify_portable_update(bundle, root):
+def verify_portable_update(bundle, root, *, installed_root=None):
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=False)
-    target = root / "Elink portable 中文 [1]"
-    workspace = root / '.Elink-update-smoke'
+    target = installed_root / 'app' if installed_root is not None else root / "Elink portable 中文 [1]"
+    workspace = target.parent / '.Elink-update-smoke'
     payload = workspace / 'payload' / 'Elink'
     data = root / 'userdata'
     data.mkdir()
@@ -109,7 +109,10 @@ def verify_portable_update(bundle, root):
             connection.close()
     sentinel = data / 'preserved-user-data.txt'
     sentinel.write_text('must survive the update', encoding='utf-8')
-    shutil.copytree(bundle, target)
+    if installed_root is None:
+        shutil.copytree(bundle, target)
+    elif not (target / 'Elink.exe').is_file():
+        raise RuntimeError('Installer update test requires an existing installed application.')
     shutil.copytree(bundle, payload)
     executable = target / 'Elink.exe'
     old_ready = root / 'old-ready'

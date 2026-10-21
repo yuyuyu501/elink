@@ -35,6 +35,8 @@ Only the client DLL is included, not vgamepad Python code, ViGEmBus installers o
 
 Tailscale is separately installed and not bundled. Its service/account terms apply: https://tailscale.com/terms . No Tailscale account credentials are collected.
 
+The optional offline Windows installer is built with Inno Setup (https://jrsoftware.org/), copyright Jordan Russell and Martijn Laan. Its license is preserved in `licenses/InnoSetup-LICENSE.txt` and at the installation root. The unmodified Simplified Chinese installer translation is from the official Inno Setup repository, maintained by Zhenghan Yang (Kira).
+
 FSR 1 EASU and RCAS use the unmodified upstream `ffx-fsr/ffx_a.h` and
 `ffx-fsr/ffx_fsr1.h`, pinned to the commit above and included under
 `elink/resources/fsr/`. Each header preserves its complete upstream MIT
