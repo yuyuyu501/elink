@@ -22,9 +22,7 @@ ORIGINAL_NAMES = ('SHA256SUMS.txt', 'verification.json')
 def installer_filenames(version, revision=1):
     if type(revision) is not int or not 1 <= revision <= 65535:
         raise ValueError('Installer revision must be an integer from 1 to 65535.')
-    suffix = f'-r{revision}' if revision > 1 else ''
-    return (f'Elink-{version}-windows-x64-Setup{suffix}.exe',
-            f'Setup{suffix}-SHA256SUMS.txt', f'setup{suffix}-verification.json')
+    return 'Setup.exe', 'Setup.sha256', 'Setup.verification.json'
 
 
 def sha256(path):
@@ -113,8 +111,10 @@ def package(directory, compiler, output=None, api=None, *, installer_revision=1)
                     f'/DOutputDir={destination}', str(script)], check=True, cwd=ROOT, timeout=600)
     setup = destination / setup_name
     from scripts.test_windows_installer import verify_installer
-    print('Verifying actual installation/update/uninstall: ' + str(work), flush=True)
-    verification = verify_installer(setup, bundle, work / 'installation', receipt['version'], manifest)
+    # Install outside the source tree: the installer deliberately rejects source subfolders.
+    test_root = Path(tempfile.mkdtemp(prefix='Elink-installer-test-')) / 'installation'
+    print('Verifying actual installation/update/uninstall: ' + str(test_root), flush=True)
+    verification = verify_installer(setup, bundle, test_root, receipt['version'], manifest)
     if source_snapshot() != snapshot or git('rev-parse', 'HEAD') != revision or git('status', '--porcelain'):
         raise RuntimeError('Packaging source changed during installer verification.')
     digest = sha256(setup)

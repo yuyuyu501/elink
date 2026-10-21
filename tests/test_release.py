@@ -9,6 +9,31 @@ from scripts import release_windows as workflow
 from scripts.check_decoder_colors import CASES as DECODER_COLOR_CASES
 
 
+def test_github_delete_handles_empty_success_response(monkeypatch):
+    class Response:
+        status = 204
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            pass
+        async def json(self):
+            raise AssertionError('A 204 response has no JSON body.')
+    class Session:
+        def __init__(self, **_):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            pass
+        def request(self, method, url, **_):
+            assert method == 'DELETE' and url == publisher.API + '/releases/assets/42'
+            return Response()
+    monkeypatch.setattr(publisher.aiohttp, 'ClientSession', Session)
+    github = publisher.GitHub.__new__(publisher.GitHub)
+    github.token = 'test-only'
+    assert github.api(publisher.API + '/releases/assets/42', 'DELETE') is None
+
+
 @pytest.mark.parametrize('failure', ['sync', 'package', None])
 def test_workflow_order_and_failure_stops_later_stages(tmp_path, monkeypatch, failure):
     notes = tmp_path / 'notes.md'

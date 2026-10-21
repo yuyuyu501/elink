@@ -6,7 +6,7 @@ Windows 独立远程桌面与游戏串流原型。Elink 自己负责采集、发
 
 Windows 10/11 x64，当前测试环境为 Windows + Python 3.13。
 
-直接使用请前往 [Releases](https://github.com/yuyuyu501/elink/releases)：下载 `Elink-<版本>-windows-x64-Setup.exe` 可离线安装完整应用，无需安装 Python。默认安装到 `%LOCALAPPDATA%\Programs\Elink`，提供开始菜单入口和卸载功能；也可以继续使用 ZIP 便携包。安装版和便携版使用相同的 `%LOCALAPPDATA%\Elink` 配置，卸载安装版会保留配置。Preview 安装包尚未签名。
+直接使用请前往 [Releases](https://github.com/yuyuyu501/elink/releases)：下载 `Setup.exe` 可离线安装完整应用，无需安装 Python。默认安装到 `%LOCALAPPDATA%\Programs\Elink`，提供开始菜单入口和卸载功能；也可以继续使用 ZIP 便携包。安装版和便携版使用相同的 `%LOCALAPPDATA%\Elink` 配置，卸载安装版会保留配置。Preview 安装包尚未签名。
 
 ```powershell
 python -m venv .venv

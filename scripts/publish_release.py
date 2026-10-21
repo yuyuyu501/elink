@@ -54,6 +54,8 @@ class GitHub:
                                            allow_redirects=False) as response:
                     if response.status >= 300:
                         raise urllib.error.HTTPError(url, response.status, response.reason, None, None)
+                    if response.status == 204:
+                        return None
                     return await response.json()
         try:
             return asyncio.run(request())

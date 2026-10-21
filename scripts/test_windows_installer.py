@@ -78,6 +78,25 @@ def verify_installer(setup, bundle, root, version, manifest):
             wait_for(lambda: not (target / 'unins000.exe').exists(), 'Uninstaller did not finish.', timeout=20)
 
     try:
+        source = root / 'Source Elink'
+        (source / '.git').mkdir(parents=True)
+        (source / 'keep.txt').write_text('source sentinel', encoding='ascii')
+        occupied = root / 'Occupied Elink'
+        occupied.mkdir()
+        (occupied / 'keep.txt').write_text('unrelated sentinel', encoding='ascii')
+        config_target = Path(os.environ['LOCALAPPDATA']) / 'Elink' / ('setup-test-' + uuid.uuid4().hex)
+        unsafe = (Path(str(source).swapcase()), source / 'new-subfolder', occupied, config_target)
+        for index, directory in enumerate(unsafe):
+            before = file_manifest(source), file_manifest(occupied)
+            log = root / f'rejected-{index}.log'
+            rejected = subprocess.run([str(setup), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART',
+                                       f'/DIR={directory}', f'/GROUP={group}', f'/LOG={log}'],
+                                      **dict(flags, check=False))
+            if (rejected.returncode == 0 or registration() is not None or shortcut.exists()
+                    or 'Unsafe install directory:' not in log.read_text(encoding='utf-8-sig')
+                    or (file_manifest(source), file_manifest(occupied)) != before
+                    or (source / 'new-subfolder').exists() or config_target.exists()):
+                raise RuntimeError('Installer failed to reject an unsafe directory without changing it.')
         install('install.log')
         environment = native_environment()
         environment['ELINK_DATA_DIR'] = str(root / 'self-test-data')
@@ -109,6 +128,7 @@ def verify_installer(setup, bundle, root, version, manifest):
                     self_test=result, repair=True, zip_update=update, uninstaller_preserved=True,
                     uninstall=True, added_files_removed=True, configuration_preserved=True,
                     unrelated_startup_preserved=True, unicode_path=True, case_insensitive_path=True,
+                    unsafe_directories_rejected=True,
                     note='Isolated same-version install/repair/update; manual two-machine acceptance pending.')
     finally:
         uninstall()

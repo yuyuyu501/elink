@@ -1,4 +1,4 @@
-"""Add a verified offline installer to an existing release without replacing any asset."""
+"""Publish a verified installer; optionally retire explicitly listed legacy installer assets."""
 import argparse
 import json
 from pathlib import Path
@@ -35,7 +35,7 @@ def validate_installer(directory, installer_revision=1):
     checks = report['installer_test']
     required = ('ok', 'offline_payload_identical', 'current_user_install', 'shortcut', 'repair',
                 'uninstaller_preserved', 'uninstall', 'added_files_removed', 'configuration_preserved',
-                'unrelated_startup_preserved', 'unicode_path')
+                'unrelated_startup_preserved', 'unicode_path', 'unsafe_directories_rejected')
     if any(checks.get(key) is not True for key in required):
         raise RuntimeError('Actual installer lifecycle verification did not pass.')
     validate_self_test(checks['self_test'])
@@ -54,13 +54,50 @@ def validate_installer(directory, installer_revision=1):
     return report, (setup, directory / checksum_name, directory / report_name)
 
 
-def publish(directory, api=None, *, installer_revision=1):
+def retirement_assets(plan, version):
+    if plan is None:
+        return []
+    if plan.get('version') != version or not isinstance(plan.get('assets'), list) or not plan['assets']:
+        raise RuntimeError('Retirement plan must identify this version and explicit legacy assets.')
+    patterns = (rf'Elink-{re.escape(version)}-windows-x64-Setup(?:-r[1-9][0-9]*)?\.exe',
+                r'Setup(?:-r[1-9][0-9]*)?-SHA256SUMS\.txt', r'setup(?:-r[1-9][0-9]*)?-verification\.json')
+    seen = set()
+    for asset in plan['assets']:
+        if (not any(re.fullmatch(pattern, asset.get('name', '')) for pattern in patterns)
+                or asset['name'] in seen or type(asset.get('id')) is not int or asset['id'] <= 0
+                or type(asset.get('size')) is not int or asset['size'] <= 0
+                or asset.get('state') != 'uploaded'
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', asset.get('digest', ''))):
+            raise RuntimeError('Retirement is limited to pinned legacy installer assets, never portable assets.')
+        seen.add(asset['name'])
+    return [identity(a) for a in plan['assets']]
+
+
+def verify_retirement_assets(release, retired):
+    for expected in retired:
+        actual = next((identity(a) for a in release['assets'] if a['name'] == expected['name']), None)
+        if actual is not None and actual != expected:
+            raise RuntimeError('Legacy installer changed since retirement was reviewed: ' + expected['name'])
+
+
+def verify_uploads(release, files):
+    for path in files:
+        asset = next((a for a in release['assets'] if a['name'] == path.name), {})
+        if (asset.get('state') != 'uploaded' or asset.get('size') != path.stat().st_size
+                or asset.get('digest') != 'sha256:' + sha256(path)):
+            raise RuntimeError('Final installer asset verification failed: ' + path.name)
+
+
+def publish(directory, api=None, *, installer_revision=1, retire=None):
     report, files = validate_installer(directory, installer_revision)
     api = api or GitHub().api
     ensure_synced_ci(api, report['packaging_commit'])
     release = published_release(api, report['version'], report['payload_commit'])
     verify_original_assets(release, report['original_assets'])
+    retired = retirement_assets(retire, report['version'])
+    verify_retirement_assets(release, retired)
     previous = [identity(a) for a in release['assets']]
+    retained = [a for a in previous if a['name'] not in {r['name'] for r in retired}]
     protected = {key: release.get(key) for key in
                  ('id', 'tag_name', 'target_commitish', 'name', 'body', 'draft', 'prerelease', 'published_at')}
     for path in files:
@@ -80,11 +117,27 @@ def publish(directory, api=None, *, installer_revision=1):
     if any(after.get(key) != value for key, value in protected.items()):
         raise RuntimeError('Published release metadata changed during additive upload.')
     verify_original_assets(after, previous)
-    for path in files:
-        asset = next((a for a in after['assets'] if a['name'] == path.name), {})
-        if (asset.get('state') != 'uploaded' or asset.get('size') != path.stat().st_size
-                or asset.get('digest') != 'sha256:' + sha256(path)):
-            raise RuntimeError('Final installer asset verification failed: ' + path.name)
+    verify_uploads(after, files)
+    # Only retire the reviewed legacy assets after all replacement downloads are verified.
+    verify_retirement_assets(after, retired)
+    for asset in retired:
+        current = published_release(api, report['version'], report['payload_commit'])
+        if any(current.get(key) != value for key, value in protected.items()):
+            raise RuntimeError('Release metadata changed before retirement.')
+        verify_original_assets(current, retained)
+        verify_uploads(current, files)
+        verify_retirement_assets(current, retired)
+        if any(a['id'] == asset['id'] for a in current['assets']):
+            api(API + '/releases/assets/' + str(asset['id']), 'DELETE')
+            print('Retired ' + asset['name'], flush=True)
+    if retired:
+        after = published_release(api, report['version'], report['payload_commit'])
+        if any(after.get(key) != value for key, value in protected.items()):
+            raise RuntimeError('Release metadata changed during retirement.')
+        verify_original_assets(after, retained)
+        verify_uploads(after, files)
+        if any(a['name'] in {r['name'] for r in retired} for a in after['assets']):
+            raise RuntimeError('Legacy installer retirement incomplete; retry the same reviewed plan.')
     print('Installer added: ' + after['html_url'], flush=True)
     return after['html_url']
 
@@ -93,8 +146,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--package', required=True, type=Path, help='Verified installer output directory.')
     parser.add_argument('--installer-revision', type=int, default=1)
+    parser.add_argument('--retire-assets', type=Path,
+                        help='User-authorized JSON plan with version and exact legacy asset identities.')
     args = parser.parse_args()
-    publish(args.package.resolve(), installer_revision=args.installer_revision)
+    retire = json.loads(args.retire_assets.read_text(encoding='utf-8')) if args.retire_assets else None
+    publish(args.package.resolve(), installer_revision=args.installer_revision, retire=retire)
 
 
 if __name__ == '__main__':
