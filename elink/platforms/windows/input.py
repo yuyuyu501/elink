@@ -537,7 +537,7 @@ class WindowsInput:
             detail = ('请在被控端的设置中，以管理员权限重新启动 Elink，再连接控制任务管理器等窗口。'
                       if not self.elevated else '当前已是管理员权限，请检查是否处于 UAC 安全桌面或受保护窗口。')
             log.error('SendInput failed: kind=%s win32=%s context=%s', kind, error, context)
-            raise RuntimeError(f'Windows 拒绝输入注入（阶段=SendInput，Win32={error}，上下文={context}）。{detail}')
+            raise RuntimeError(f'Windows 拒绝输入注入（阶段=SendInput，Win32={error}，管理员={self.elevated}）。{detail}')
 
     def close(self):
         if self.pads:

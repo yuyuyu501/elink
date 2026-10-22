@@ -49,7 +49,7 @@ def test_input_denial_logs_safe_foreground_and_desktop_context(monkeypatch, capl
     monkeypatch.setattr(sink, '_input_context', lambda: context)
     with pytest.raises(RuntimeError, match='Win32=5') as failure:
         sink.emit(dict(type='move', absolute=True, x=0, y=0))
-    assert 'SendInput' in str(failure.value) and 'foreground_pid' in str(failure.value)
+    assert 'SendInput' in str(failure.value) and 'foreground_pid' not in str(failure.value)
     assert '被控端' in str(failure.value) and '任务管理器' in str(failure.value)
     assert 'SendInput failed: kind=move win32=5' in caplog.text
     assert 'foreground_pid' in caplog.text and 'Default' in caplog.text
