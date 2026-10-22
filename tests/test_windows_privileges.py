@@ -33,7 +33,7 @@ def test_elevation_relaunch_quotes_paths_and_preserves_the_data_directory(tmp_pa
     assert '"' + str(root.resolve()) + '"' in calls[0][3]
 
 
-def test_input_denial_explains_host_elevation_and_keeps_the_native_error(monkeypatch):
+def test_input_denial_logs_safe_foreground_and_desktop_context(monkeypatch, caplog):
     from elink.platforms.windows import input as native, privileges
 
     def denied(*args):
@@ -43,9 +43,16 @@ def test_input_denial_explains_host_elevation_and_keeps_the_native_error(monkeyp
     monkeypatch.setattr(ctypes, 'WinDLL', lambda *args, **kwargs: SimpleNamespace(SendInput=denied))
     monkeypatch.setattr(privileges, 'is_elevated', lambda: False)
     sink = native.WindowsInput(lambda event: None)
+    context = {'pid': 123, 'elevated': False, 'foreground_pid': 456,
+               'thread_desktop': 'Default', 'input_desktop': 'Default',
+               'input_desktop_error': None}
+    monkeypatch.setattr(sink, '_input_context', lambda: context)
     with pytest.raises(RuntimeError, match='Win32=5') as failure:
         sink.emit(dict(type='move', absolute=True, x=0, y=0))
+    assert 'SendInput' in str(failure.value) and 'foreground_pid' in str(failure.value)
     assert '被控端' in str(failure.value) and '任务管理器' in str(failure.value)
+    assert 'SendInput failed: kind=move win32=5' in caplog.text
+    assert 'foreground_pid' in caplog.text and 'Default' in caplog.text
 
 
 def test_cancelled_admin_restart_does_not_close_the_current_instance(tmp_path, monkeypatch):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes as c
+import logging
 import math
 import os
 import time
@@ -9,6 +10,9 @@ from ctypes import wintypes as w
 
 from ...paths import resource_dir
 from ...core.input_session import InputSession, RecordingInput, PAD_BACKENDS, integer
+
+
+log = logging.getLogger(__name__)
 
 
 class Mouse(c.Structure):
@@ -402,6 +406,102 @@ class WindowsInput:
         from .privileges import is_elevated
         self.elevated = is_elevated()
 
+    @staticmethod
+    def _desktop_name(user, handle):
+        if not handle:
+            return None
+        needed = w.DWORD()
+        buffer = c.create_unicode_buffer(256)
+        if not user.GetUserObjectInformationW(handle, 2, buffer, c.sizeof(buffer), c.byref(needed)):
+            return None
+        return buffer.value[:128]
+
+    @staticmethod
+    def _integrity_level(kernel, advapi, process):
+        """Return a coarse token integrity label without reading process data."""
+        if not process:
+            return None
+        token = w.HANDLE()
+        if not advapi.OpenProcessToken(process, 0x0008, c.byref(token)):
+            return None
+        try:
+            needed = w.DWORD()
+            advapi.GetTokenInformation(token, 25, None, 0, c.byref(needed))
+            if not needed.value:
+                return None
+            buffer = (c.c_ubyte * needed.value)()
+            if not advapi.GetTokenInformation(token, 25, buffer, needed, c.byref(needed)):
+                return None
+            sid = c.cast(buffer, c.POINTER(c.c_void_p)).contents.value
+            if not sid:
+                return None
+            count = advapi.GetSidSubAuthorityCount(c.c_void_p(sid))[0]
+            rid = advapi.GetSidSubAuthority(c.c_void_p(sid), count - 1)[0]
+            return {0x1000: 'low', 0x2000: 'medium', 0x3000: 'high',
+                    0x4000: 'system'}.get(rid, f'0x{rid:x}')
+        finally:
+            kernel.CloseHandle(token)
+
+    def _input_context(self):
+        """Collect privacy-safe desktop context to diagnose SendInput denials."""
+        result = {"pid": os.getpid(), "elevated": self.elevated,
+                  "foreground_pid": None, "thread_desktop": None,
+                  "input_desktop": None, "input_desktop_error": None}
+        kernel = c.WinDLL("kernel32", use_last_error=True)
+        advapi = c.WinDLL("advapi32", use_last_error=True)
+        self.user.GetForegroundWindow.argtypes = []
+        self.user.GetForegroundWindow.restype = w.HWND
+        self.user.GetWindowThreadProcessId.argtypes = [w.HWND, c.POINTER(w.DWORD)]
+        self.user.GetWindowThreadProcessId.restype = w.DWORD
+        self.user.GetThreadDesktop.argtypes = [w.DWORD]
+        self.user.GetThreadDesktop.restype = c.c_void_p
+        self.user.OpenInputDesktop.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+        self.user.OpenInputDesktop.restype = c.c_void_p
+        self.user.CloseDesktop.argtypes = [c.c_void_p]
+        self.user.CloseDesktop.restype = w.BOOL
+        self.user.GetUserObjectInformationW.argtypes = [c.c_void_p, c.c_int, c.c_void_p,
+                                                        w.DWORD, c.POINTER(w.DWORD)]
+        self.user.GetUserObjectInformationW.restype = w.BOOL
+        kernel.GetCurrentThreadId.argtypes = []
+        kernel.GetCurrentThreadId.restype = w.DWORD
+        kernel.GetCurrentProcess.argtypes = []
+        kernel.GetCurrentProcess.restype = w.HANDLE
+        kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+        kernel.OpenProcess.restype = w.HANDLE
+        kernel.CloseHandle.argtypes = [w.HANDLE]
+        kernel.CloseHandle.restype = w.BOOL
+        advapi.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)]
+        advapi.OpenProcessToken.restype = w.BOOL
+        advapi.GetTokenInformation.argtypes = [w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.POINTER(w.DWORD)]
+        advapi.GetTokenInformation.restype = w.BOOL
+        advapi.GetSidSubAuthorityCount.argtypes = [c.c_void_p]
+        advapi.GetSidSubAuthorityCount.restype = c.POINTER(c.c_ubyte)
+        advapi.GetSidSubAuthority.argtypes = [c.c_void_p, w.DWORD]
+        advapi.GetSidSubAuthority.restype = c.POINTER(w.DWORD)
+        foreground = self.user.GetForegroundWindow()
+        if foreground:
+            process_id = w.DWORD()
+            self.user.GetWindowThreadProcessId(foreground, c.byref(process_id))
+            result["foreground_pid"] = process_id.value or None
+            if process_id.value:
+                process = kernel.OpenProcess(0x1000, False, process_id.value)
+                result["foreground_integrity"] = self._integrity_level(kernel, advapi, process)
+                if process:
+                    kernel.CloseHandle(process)
+        result["process_integrity"] = self._integrity_level(kernel, advapi, kernel.GetCurrentProcess())
+        thread_id = kernel.GetCurrentThreadId()
+        result["thread_desktop"] = self._desktop_name(self.user, self.user.GetThreadDesktop(thread_id))
+        c.set_last_error(0)
+        desktop = self.user.OpenInputDesktop(0, False, 0x0001)
+        if desktop:
+            try:
+                result["input_desktop"] = self._desktop_name(self.user, desktop)
+            finally:
+                self.user.CloseDesktop(desktop)
+        else:
+            result["input_desktop_error"] = c.get_last_error()
+        return result
+
     def emit(self, event):
         kind = event["type"]
         if kind == "pad":
@@ -430,9 +530,14 @@ class WindowsInput:
         c.set_last_error(0)
         if self.user.SendInput(1, c.byref(value), c.sizeof(value)) != 1:
             error = c.get_last_error()
+            try:
+                context = self._input_context()
+            except Exception as exc:
+                context = {"diagnostic_error": type(exc).__name__}
             detail = ('请在被控端的设置中，以管理员权限重新启动 Elink，再连接控制任务管理器等窗口。'
                       if not self.elevated else '当前已是管理员权限，请检查是否处于 UAC 安全桌面或受保护窗口。')
-            raise RuntimeError(f'Windows 拒绝输入注入（Win32={error}，管理员={self.elevated}）。{detail}')
+            log.error('SendInput failed: kind=%s win32=%s context=%s', kind, error, context)
+            raise RuntimeError(f'Windows 拒绝输入注入（阶段=SendInput，Win32={error}，上下文={context}）。{detail}')
 
     def close(self):
         if self.pads:
