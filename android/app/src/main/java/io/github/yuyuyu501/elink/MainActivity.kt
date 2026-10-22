@@ -61,7 +61,7 @@ class MainActivity : Activity() {
         val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(16)) }
         scroll.addView(layout)
         layout.addView(label("Elink", 28f))
-        layout.addView(label("0.5.0 · Android Preview", 13f))
+        layout.addView(label("0.5.3 · Android Preview", 13f))
         val row = LinearLayout(this)
         row.addView(command("添加设备") { addDevice() }, LinearLayout.LayoutParams(0, dp(52), 1f))
         row.addView(command("刷新") { refresh() }, LinearLayout.LayoutParams(0, dp(52), 1f))
