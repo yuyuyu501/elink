@@ -52,15 +52,22 @@ def test_registry_registration_roundtrip_in_isolated_test_key(monkeypatch):
 def test_general_settings_persist_and_registration_failures_are_visible(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     registrations = []
+    if os.name == 'nt':
+        from elink.platforms.windows import privileges
+        monkeypatch.setattr(privileges, 'is_elevated', lambda: True)
     monkeypatch.setattr(startup, 'set_enabled', registrations.append)
     window = MainWindow(tmp_path, auto_host=False, auto_refresh=False)
     try:
         assert not window.startup_enabled.isChecked() and not window.close_to_tray.isChecked()
+        if window.admin_startup:
+            assert not window.admin_startup.isChecked()
+            window.admin_startup.click()
         window.startup_enabled.click()
         window.close_to_tray.click()
         assert registrations == [True]
         config = json.loads(window.config_path.read_text(encoding='utf-8'))
         assert config['startup_enabled'] and config['close_to_tray']
+        assert config['admin_startup'] is bool(window.admin_startup and window.admin_startup.isChecked())
         def denied(enabled):
             raise PermissionError('test registry denied')
         monkeypatch.setattr(startup, 'set_enabled', denied)
@@ -74,6 +81,7 @@ def test_general_settings_persist_and_registration_failures_are_visible(tmp_path
     restored = MainWindow(tmp_path, auto_host=False, auto_refresh=False)
     try:
         assert restored.startup_enabled.isChecked() and restored.close_to_tray.isChecked()
+        assert bool(restored.admin_startup and restored.admin_startup.isChecked()) == (os.name == 'nt')
         assert registrations == [True, True]  # Portable path refreshed on startup.
         restored.startup_enabled.click()
         assert registrations[-1] is False

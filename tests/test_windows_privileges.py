@@ -35,6 +35,37 @@ def test_elevation_relaunch_quotes_paths_and_preserves_the_data_directory(tmp_pa
     assert '"' + str(root.resolve()) + '"' in calls[0][3]
 
 
+def test_elevation_relaunch_preserves_hidden_startup_mode(tmp_path, monkeypatch):
+    from elink.platforms.windows import privileges
+    calls = []
+
+    def execute(*args):
+        calls.append(args)
+        return 42
+
+    monkeypatch.setattr(ctypes, 'WinDLL', lambda *args, **kwargs: SimpleNamespace(ShellExecuteW=execute))
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'Elink.exe'))
+    privileges.restart_elevated(tmp_path / 'data', startup=True)
+    assert '--startup' in calls[0][3]
+
+
+def test_admin_startup_setting_requests_elevation_only_for_regular_launch(tmp_path, monkeypatch):
+    import json
+    from elink import app
+    from elink.platforms.windows import privileges
+    config = tmp_path / 'desktop-v3.json'
+    config.write_text(json.dumps({'admin_startup': True}), encoding='utf-8')
+    requests = []
+    monkeypatch.setattr(privileges, 'is_elevated', lambda: False)
+    monkeypatch.setattr(privileges, 'restart_elevated', lambda root, startup=False: requests.append((root, startup)))
+    assert app._restart_for_admin_startup(tmp_path, startup=True)
+    assert requests == [(tmp_path, True)]
+    monkeypatch.setattr(privileges, 'is_elevated', lambda: True)
+    assert not app._restart_for_admin_startup(tmp_path)
+    assert len(requests) == 1
+
+
 def test_input_denial_logs_safe_foreground_and_desktop_context(monkeypatch, caplog):
     from elink.platforms.windows import input as native, privileges
 
@@ -236,21 +267,22 @@ def test_cancelled_elevation_is_reported_once_without_throwing_into_rtc_callback
     assert 'UAC cancelled' in messages[0]
 
 
-def test_cancelled_admin_restart_does_not_close_the_current_instance(tmp_path, monkeypatch):
+def test_cancelled_admin_startup_reverts_setting_without_closing_instance(tmp_path, monkeypatch):
     from elink.platforms.windows import privileges
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(privileges, 'is_elevated', lambda: False)
-    monkeypatch.setattr(QMessageBox, 'question', lambda *args: QMessageBox.StandardButton.Yes)
 
-    def cancelled(root):
+    def cancelled(root, startup=False):
         raise OSError('UAC cancelled in test')
 
     monkeypatch.setattr(privileges, 'restart_elevated', cancelled)
     window = MainWindow(tmp_path, auto_host=False, auto_refresh=False)
     try:
-        assert window.admin_button.isEnabled()
-        window.admin_button.click()
+        assert window.admin_startup is not None
+        window.admin_startup.click()
         assert 'UAC cancelled' in window.notice.text()
+        assert not window.admin_startup.isChecked()
+        assert not __import__('json').loads(window.config_path.read_text(encoding='utf-8'))['admin_startup']
         assert not window._closing and window.runtime.thread.is_alive()
     finally:
         window.request_exit()

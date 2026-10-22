@@ -17,11 +17,29 @@ from .ui.theme import apply_theme
 from .ui.window import MainWindow
 
 
+def _admin_startup_enabled(root):
+    try:
+        value = json.loads((root / 'desktop-v3.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return False
+    return isinstance(value, dict) and value.get('admin_startup') is True
+
+
+def _restart_for_admin_startup(root, *, startup=False):
+    if os.name != 'nt' or not _admin_startup_enabled(root):
+        return False
+    from .platforms.windows.privileges import is_elevated, restart_elevated
+    if is_elevated():
+        return False
+    restart_elevated(root, startup=startup)
+    return True
+
+
 def main() -> int:
     if os.name == 'nt' and len(sys.argv) == 4 and sys.argv[1] == '--input-broker':
         from .platforms.windows.input_broker import run_input_broker
         return run_input_broker(int(sys.argv[2]), sys.argv[3])
-    if os.name == 'nt' and len(sys.argv) == 4 and sys.argv[1] == '--elevated-restart':
+    if os.name == 'nt' and len(sys.argv) in (4, 5) and sys.argv[1] == '--elevated-restart':
         from .platforms.windows.privileges import is_elevated, wait_for_previous
         if not is_elevated():
             return 1
@@ -45,6 +63,14 @@ def main() -> int:
         from pathlib import Path
         from .diagnostics import run
         return run(Path(sys.argv[2]).resolve(), desktop=sys.argv[1] == "--self-test-desktop")
+    root = data_dir()
+    try:
+        if _restart_for_admin_startup(root, startup='--startup' in sys.argv):
+            return 0
+    except OSError as exc:
+        startup_elevation_error = str(exc)
+    else:
+        startup_elevation_error = None
     app = QApplication(sys.argv)
     app.setApplicationName("Elink")
     app.setApplicationVersion(__version__)
@@ -53,7 +79,6 @@ def main() -> int:
     if os.name != 'nt' and not sys.platform.startswith('linux'):
         QMessageBox.critical(None, "Elink", "桌面端支持 Windows 和 Linux。")
         return 1
-    root = data_dir()
     try:
         ensure_dirs(root)
         lock = QLockFile(str(root / "elink.lock"))
@@ -62,6 +87,8 @@ def main() -> int:
             QMessageBox.information(None, "Elink", "此数据目录已有 Elink 实例正在运行。")
             return 1
         configure_logging(root)
+        if startup_elevation_error:
+            logging.getLogger(__name__).warning('Administrator startup was not approved: %s', startup_elevation_error)
         window = MainWindow(root)
         window.shutdown_complete.connect(app.quit)
     except Exception as exc:
@@ -83,6 +110,9 @@ def main() -> int:
         window.show_startup()
     else:
         window.show()
+    if startup_elevation_error:
+        QTimer.singleShot(0, lambda: window.report_error(
+            f'管理员启动未获批准，本次以普通权限运行：{startup_elevation_error}'))
     ready = os.environ.pop("ELINK_UPDATE_READY", "")
     failure = os.environ.pop("ELINK_UPDATE_FAILURE", "")
     if ready:

@@ -15,13 +15,15 @@ def is_elevated():
     return os.name == 'nt' and bool(C.windll.shell32.IsUserAnAdmin())
 
 
-def restart_elevated(data_root):
+def restart_elevated(data_root, *, startup=False):
     """Start a replacement which waits for the current instance's data lock."""
     if os.name != 'nt':
         raise OSError('Administrator restart is only available on Windows')
     executable = str(Path(sys.executable).resolve())
     arguments = [] if getattr(sys, 'frozen', False) else [str(Path(__file__).resolve().parents[3] / 'main.py')]
     arguments += ['--elevated-restart', str(os.getpid()), str(data_root.resolve())]
+    if startup:
+        arguments.append('--startup')
     shell = C.WinDLL('shell32', use_last_error=True)
     shell.ShellExecuteW.argtypes = [W.HWND, W.LPCWSTR, W.LPCWSTR, W.LPCWSTR, W.LPCWSTR, C.c_int]
     shell.ShellExecuteW.restype = C.c_void_p

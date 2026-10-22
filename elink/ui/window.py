@@ -133,6 +133,8 @@ class MainWindow(QMainWindow):
         self.make_tray()
         self.startup_enabled.toggled.connect(self.change_startup)
         self.close_to_tray.toggled.connect(lambda _: self.save_config())
+        if self.admin_startup:
+            self.admin_startup.toggled.connect(self.change_admin_startup)
         if self.startup_enabled.isChecked():
             self.change_startup(True)  # Refresh the path after moving a portable installation.
         self.timer = QTimer(self)
@@ -225,8 +227,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(section_heading('常规', 'settings'))
         self.startup_enabled = QCheckBox("开机时自启动")
         self.close_to_tray = QCheckBox("关闭时最小化到托盘")
+        self.admin_startup = QCheckBox('以管理员身份启动') if sys.platform == 'win32' else None
         layout.addWidget(OptionRow('开机时自启动', self.startup_enabled))
         layout.addWidget(OptionRow('关闭时最小化到托盘', self.close_to_tray))
+        if self.admin_startup:
+            layout.addWidget(OptionRow('以管理员身份启动', self.admin_startup))
+            layout.addWidget(text_label('每次启动都会请求 Windows 管理员授权；若同时启用开机自启动，登录时也会显示授权提示。', 'muted'))
         layout.addSpacing(24)
         layout.addWidget(section_heading('本机连接设置', 'monitor'))
         self.options = StreamOptions(self)
@@ -254,14 +260,6 @@ class MainWindow(QMainWindow):
         self.pad_backend.setMinimumWidth(360)
         self.pad_backend.setMaximumWidth(480)
         advanced_layout.addWidget(OptionRow('本机手柄后端', self.pad_backend))
-        if sys.platform == 'win32':
-            from ..platforms.windows.privileges import is_elevated
-            self.admin_button = button('以管理员权限重新启动', self.restart_as_admin, icon_name='refresh-cw')
-            elevated = is_elevated()
-            self.admin_button.setEnabled(not elevated)
-            advanced_layout.addWidget(OptionRow('管理员窗口控制', self.admin_button))
-            advanced_layout.addWidget(text_label('已使用管理员权限。仍不能控制 UAC 安全桌面。' if elevated else
-                                                '控制任务管理器等高权限窗口时，请在被控端以管理员权限启动 Elink。', 'muted'))
         advanced_layout.addSpacing(16)
         self.apply_host_button = button('应用连接设置', self.apply_host_settings, primary=True, icon_name='save')
         advanced_layout.addWidget(self.apply_host_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -269,18 +267,6 @@ class MainWindow(QMainWindow):
         advanced_layout.addWidget(text_label("ElinkPad 尚未签名或完成游戏验证。更改本机连接设置前需结束被控会话。", "muted"))
         layout.addWidget(self.advanced)
         layout.addStretch()
-
-    def restart_as_admin(self):
-        from ..platforms.windows.privileges import restart_elevated
-        if QMessageBox.question(self, '管理员窗口控制',
-                                '将断开当前会话并以管理员权限重新启动 Elink。\n请在本机确认 Windows 的权限提示。') != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            restart_elevated(self.root)
-        except OSError as exc:
-            self.report_error(str(exc))
-            return
-        self.request_exit()
 
     def change_startup(self, enabled):
         try:
@@ -292,6 +278,25 @@ class MainWindow(QMainWindow):
             self.report_error(f"无法修改开机自启：{exc}")
             return
         self.save_config()
+
+    def change_admin_startup(self, enabled):
+        if not self.admin_startup:
+            return
+        self.save_config()
+        from ..platforms.windows.privileges import is_elevated, restart_elevated
+        if enabled and not is_elevated():
+            try:
+                restart_elevated(self.root, startup='--startup' in sys.argv)
+            except OSError as exc:
+                self.admin_startup.blockSignals(True)
+                self.admin_startup.setChecked(False)
+                self.admin_startup.blockSignals(False)
+                self.save_config()
+                self.report_error(str(exc))
+                return
+            self.request_exit()
+        elif not enabled and is_elevated():
+            self.show_notice('设置已关闭。当前进程仍以管理员权限运行；完全退出后重新打开，才会切换为普通权限。', error=False)
 
     def make_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -685,6 +690,8 @@ class MainWindow(QMainWindow):
                 getattr(self, name).setChecked(value.get(name, True))
             self.startup_enabled.setChecked(value.get('startup_enabled') is True)
             self.close_to_tray.setChecked(value.get('close_to_tray') is True)
+            if self.admin_startup:
+                self.admin_startup.setChecked(value.get('admin_startup') is True)
         except (ValueError, TypeError, OSError, AttributeError) as exc:
             self.config_error = True
             self.report_error(f"设置文件读取失败，保留原文件：{exc}")
@@ -701,6 +708,7 @@ class MainWindow(QMainWindow):
         value['mouse_sensitivity'] = self.mouse_sensitivity.value()
         value['startup_enabled'] = self.startup_enabled.isChecked()
         value['close_to_tray'] = self.close_to_tray.isChecked()
+        value['admin_startup'] = bool(self.admin_startup and self.admin_startup.isChecked())
         value['stream_resolution'] = self.resolution.currentData()
         value['renderer'] = self.renderer.currentData()
         value['render_scale'] = self.options.render_scale.currentData()
