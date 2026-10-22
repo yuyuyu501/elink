@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QScrollArea, QFrame,
-                               QVBoxLayout, QWidget, QSystemTrayIcon, QMenu)
+                               QVBoxLayout, QWidget, QSystemTrayIcon, QMenu, QMessageBox)
 
 from ..core.runtime import Runtime
 from ..core.transport import Client, HostServer
@@ -254,6 +254,14 @@ class MainWindow(QMainWindow):
         self.pad_backend.setMinimumWidth(360)
         self.pad_backend.setMaximumWidth(480)
         advanced_layout.addWidget(OptionRow('本机手柄后端', self.pad_backend))
+        if sys.platform == 'win32':
+            from ..platforms.windows.privileges import is_elevated
+            self.admin_button = button('以管理员权限重新启动', self.restart_as_admin, icon_name='refresh-cw')
+            elevated = is_elevated()
+            self.admin_button.setEnabled(not elevated)
+            advanced_layout.addWidget(OptionRow('管理员窗口控制', self.admin_button))
+            advanced_layout.addWidget(text_label('已使用管理员权限。仍不能控制 UAC 安全桌面。' if elevated else
+                                                '控制任务管理器等高权限窗口时，请在被控端以管理员权限启动 Elink。', 'muted'))
         advanced_layout.addSpacing(16)
         self.apply_host_button = button('应用连接设置', self.apply_host_settings, primary=True, icon_name='save')
         advanced_layout.addWidget(self.apply_host_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -261,6 +269,18 @@ class MainWindow(QMainWindow):
         advanced_layout.addWidget(text_label("ElinkPad 尚未签名或完成游戏验证。更改本机连接设置前需结束被控会话。", "muted"))
         layout.addWidget(self.advanced)
         layout.addStretch()
+
+    def restart_as_admin(self):
+        from ..platforms.windows.privileges import restart_elevated
+        if QMessageBox.question(self, '管理员窗口控制',
+                                '将断开当前会话并以管理员权限重新启动 Elink。\n请在本机确认 Windows 的权限提示。') != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            restart_elevated(self.root)
+        except OSError as exc:
+            self.report_error(str(exc))
+            return
+        self.request_exit()
 
     def change_startup(self, enabled):
         try:

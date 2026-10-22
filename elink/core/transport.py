@@ -28,10 +28,12 @@ from ..discovery import NetworkScope, Responder, DISCOVERY_PORT, machine_id
 from .buffers import tune_receiver, tune_track
 from .profiling import PipelineProfile
 from .statistics import StreamStats, ReceiveSampler, selected_route
+from .session_diagnostics import SessionDiagnostics, channel_state
 
 
 SESSION_CLOSE_TIMEOUT = 5.0
 CONTROL_HEARTBEAT_TIMEOUT = 6.0
+CONTROL_RECOVERY_TIMEOUT = 20.0
 
 
 async def cleanup_step(awaitable, label, notify, timeout=SESSION_CLOSE_TIMEOUT):
@@ -151,6 +153,25 @@ class HostServer:
         self.clipboard_task = None
         self.clipboard_seen = None
         self.stream_config = None
+        self.clipboard_pending = None
+        self.diagnostics = SessionDiagnostics(root, 'host')
+        self.recovering = False
+        self.last_probe = 0.0
+        self.loop_lag_ms = 0.0
+        self.end_reason = ''
+
+    def diagnostic_state(self):
+        now = time.monotonic()
+        return dict(connection=getattr(self.pc, 'connectionState', 'absent'),
+                    ice=getattr(self.pc, 'iceConnectionState', 'absent'),
+                    control=channel_state(self.control_channel),
+                    heartbeat_age_seconds=round(now - (self.control_seen_at or self.created), 3),
+                    probe_age_seconds=round(now - self.last_probe, 3) if self.last_probe else None,
+                    input_active=bool(self.input and getattr(self.input, 'active', False)), loop_lag_ms=self.loop_lag_ms)
+
+    def record_failure(self, reason, exc=None):
+        self.end_reason = reason
+        self.diagnostics.record(reason, self.profile, self.diagnostic_state(), exc)
 
     async def start(self, bind=None, port=49200):
         if self.runner:
@@ -164,6 +185,7 @@ class HostServer:
         app.add_routes([web.get("/v1/info", self.info), web.get("/v1/apps", self.apps),
                         web.post("/v1/session", self.offer), web.delete("/v1/session/{id}", self.delete),
                         web.get("/v1/session/{id}/performance", self.performance),
+                        web.get("/v1/session/{id}/health", self.health),
                         web.post("/v1/session/{id}/settings", self.reconfigure),
                         web.get("/v1/session/{id}/display", self.retired_display),
                         web.post("/v1/session/{id}/display", self.retired_display)])
@@ -192,7 +214,7 @@ class HostServer:
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
                 "busy": self.pc is not None or self.ending,
-                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1", "live-settings-v1"],
+                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1", "live-settings-v1", "session-health-v1"],
                 'capabilities': capabilities()}
 
     async def info(self, request):
@@ -237,6 +259,10 @@ class HostServer:
                 raise web.HTTPForbidden()
             pc = self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
             self.device_id, self.session_id = device, secrets.token_hex(16)
+            self.diagnostics.reset(self.session_id)
+            self.recovering, self.last_probe = False, 0.0
+            self.end_reason = ''
+            self.clipboard_pending = None
             self.profile = PipelineProfile()
             coded_width, coded_height = encoding_size(config)
             self.profile.describe(width=config["width"], height=config["height"], fps=config["fps"],
@@ -277,6 +303,7 @@ class HostServer:
                     @channel.on('close')
                     def control_closed():
                         if self.pc is pc:
+                            self.record_failure('control_channel_closed')
                             asyncio.create_task(self.end_session(pc))
                 count, period = 0, time.monotonic()
 
@@ -296,12 +323,15 @@ class HostServer:
                         if (reliable and isinstance(event, dict) and event.get("type") == "clipboard"
                                 and isinstance(event.get("text"), str)
                                 and len(event["text"]) <= MAX_CLIPBOARD_CHARS):
-                            if write_text(event["text"]):
-                                self.clipboard_seen = event["text"]
+                            self.clipboard_pending = event["text"]
                             return
                         if len(raw) > 2048:
                             return
                         if reliable and isinstance(event, dict) and event.get('type') == 'disconnect':
+                            reason = event.get('reason')
+                            if reason in ('control_channel_closed', 'peer_failed', 'peer_closed', 'control_send_buffer_full',
+                                          'control_pong_timeout', 'video_timeout', 'video_track_failed'):
+                                self.record_failure('controller_' + reason)
                             asyncio.create_task(self.end_session(pc))
                             return
                         if reliable and isinstance(event, dict) and event.get('type') == 'cursor-mode':
@@ -322,10 +352,14 @@ class HostServer:
                             return
                         if input_session.receive(raw, reliable) and reliable and event.get('type') == 'heartbeat':
                             self.control_seen_at = now
+                            if self.recovering:
+                                self.recovering = False
+                                self.profile.event('control_heartbeat_recovered')
                     except Exception as exc:
                         message = str(exc)[:200]
                         if message not in self.input_errors:
                             self.input_errors.add(message)
+                            self.record_failure('input_receive_failed', exc)
                             feedback({"type": "warning", "message": message})
                             self.notify(message)
 
@@ -333,6 +367,7 @@ class HostServer:
             async def state():
                 self.notify(f"被控会话：{pc.connectionState}")
                 if pc.connectionState in ("failed", "closed") and self.pc is pc:
+                    self.record_failure('peer_' + pc.connectionState)
                     await self.end_session(pc)
 
             try:
@@ -341,6 +376,18 @@ class HostServer:
                 video.capture_backend = config['capture_backend']
                 video.gpu_capture_disabled = video.gpu_capture_disabled or config['capture_backend'] == 'dxcam'
                 video.notify = self.notify
+                def capture_state(paused, exc=None):
+                    def publish():
+                        if self.pc is not pc:
+                            return
+                        message = ('桌面暂不可采集（可能处于锁屏或 UAC 安全桌面），等待返回桌面后自动恢复。'
+                                   if paused else '桌面采集已恢复。')
+                        if paused:
+                            self.record_failure('capture_paused', exc)
+                        feedback(dict(type='capture-state', paused=paused, message=message))
+                        self.notify(message)
+                    loop.call_soon_threadsafe(publish)
+                video.capture_state = capture_state
                 video.network_budget = budget = NetworkBudget(config['bitrate'] * 1_000_000, self.profile)
                 self.tracks.append(video)
                 video_sender = pc.addTrack(video)
@@ -360,9 +407,17 @@ class HostServer:
                 if self.pc is not pc:
                     raise ValidationError("会话已取消。")
                 return web.json_response({"id": self.session_id, "type": pc.localDescription.type, "sdp": pc.localDescription.sdp})
-            except BaseException:
+            except BaseException as exc:
+                if isinstance(exc, Exception):
+                    self.record_failure('host_negotiation_failed', exc)
                 await self.end_session(pc)
                 raise
+
+    async def health(self, request):
+        if not self.pc or request.remote != self.device_id or request.match_info['id'] != self.session_id:
+            raise web.HTTPForbidden()
+        self.last_probe = time.monotonic()
+        return web.json_response(dict(ok=True, **self.diagnostic_state()))
 
     async def performance(self, request):
         if not self.pc or request.remote != self.device_id or request.match_info['id'] != self.session_id:
@@ -410,15 +465,31 @@ class HostServer:
         return web.json_response({"ok": True})
 
     async def watchdog(self):
+        previous = time.monotonic()
         while True:
             await asyncio.sleep(0.25)
+            now = time.monotonic()
+            lag = max(0, now - previous - .25)
+            previous = now
+            self.loop_lag_ms = round(lag * 1000, 3)
             if self.input:
                 self.input.watchdog()
             if self.pc:
-                now = time.monotonic()
+                if lag > 1 and not self.recovering:
+                    self.recovering = True
+                    self.record_failure('host_event_loop_stall')
+                    # Give already-arrived packets a turn after a local stall/resume.
+                    continue
                 expired = (now - self.control_seen_at > CONTROL_HEARTBEAT_TIMEOUT if self.control_seen_at
                            else now - self.created > 20)
                 if expired:
+                    if self.control_seen_at:
+                        if not self.recovering:
+                            self.recovering = True
+                            self.record_failure('control_heartbeat_late')
+                        if now - self.control_seen_at <= CONTROL_RECOVERY_TIMEOUT:
+                            continue
+                    self.record_failure('control_heartbeat_timeout')
                     self.notify("会话超时，已释放输入。")
                     await self.end_session()
 
@@ -444,7 +515,13 @@ class HostServer:
     async def watch_clipboard(self, pc, send):
         while self.pc is pc and not self.ending:
             await asyncio.sleep(0.35)
+            pending, self.clipboard_pending = self.clipboard_pending, None
+            if pending is not None:
+                if await asyncio.to_thread(write_text, pending) and self.pc is pc:
+                    self.clipboard_seen = pending
             value = await asyncio.to_thread(read_text)
+            if self.pc is not pc or self.clipboard_pending is not None:
+                continue
             if value is None or value == self.clipboard_seen:
                 continue
             self.clipboard_seen = value
@@ -464,7 +541,7 @@ class HostServer:
                 await cleanup_step(asyncio.gather(clipboard, return_exceptions=True), '剪贴板', self.notify)
             try:
                 if channel and channel.readyState == "open":
-                    channel.send(json.dumps({"type": "ended"}))
+                    channel.send(json.dumps({"type": "ended", "reason": self.end_reason}))
                     await asyncio.sleep(0.05)
             except Exception as exc:
                 self.notify(f'断开通知发送失败：{exc}')
@@ -578,6 +655,27 @@ class Client:
         self.config = None
         self.decoder = 'auto'
         self.live_settings_supported = False
+        self.health_supported = False
+        self.diagnostics = SessionDiagnostics(root, 'controller')
+        self.clipboard_pending = None
+        self.recovering = False
+        self.probe_task = None
+        self.last_probe_at = 0.0
+        self.loop_lag_ms = 0.0
+        self.disconnect_reason = ''
+
+    def diagnostic_state(self):
+        now = time.monotonic()
+        return dict(connection=getattr(self.pc, 'connectionState', 'absent'),
+                    ice=getattr(self.pc, 'iceConnectionState', 'absent'),
+                    control=channel_state(self.control), motion=channel_state(self.motion),
+                    pong_age_seconds=round(now - self.last_pong, 3),
+                    video_age_seconds=round(now - (self.mailbox.updated or self.connected_at), 3),
+                    video_frames=self.mailbox.received, loop_lag_ms=self.loop_lag_ms)
+
+    def record_failure(self, reason, exc=None):
+        self.disconnect_reason = reason
+        self.diagnostics.record(reason, self.profile, self.diagnostic_state(), exc)
 
     def schedule_disconnect(self):
         if self.close_task is None or self.close_task.done():
@@ -600,6 +698,7 @@ class Client:
                     raise ValidationError('主机不支持超分采样，请更新被控端或选择原生 100%。')
             self.performance_supported = "performance-v1" in info.get("features", [])
             self.live_settings_supported = 'live-settings-v1' in info.get('features', [])
+            self.health_supported = 'session-health-v1' in info.get('features', [])
             self.cursor_supported = 'cursor-modes-v1' in info.get('features', [])
             self.cursor_applied, self.cursor_visible, self.cursor_updated = 'remote', None, 0.0
             if info.get("busy") is True:
@@ -626,6 +725,10 @@ class Client:
             codecs.metrics.update(decoder="未启动", decode_ms=0.0)
             self.encoder = "--"
             self.connected_at = time.monotonic()
+            self.recovering, self.probe_task, self.last_probe_at = False, None, 0.0
+            self.clipboard_pending = None
+            self.disconnect_reason = ''
+            self.diagnostics.reset('')
             self.last_pong = self.connected_at
             self.control = pc.createDataChannel("control", ordered=True)
             self.motion = pc.createDataChannel("motion", ordered=False, maxRetransmits=0)
@@ -640,6 +743,7 @@ class Client:
             @self.control.on("close")
             def control_closed():
                 if self.pc is pc:
+                    self.record_failure('control_channel_closed')
                     self.schedule_disconnect()
 
             @self.control.on("message")
@@ -654,13 +758,15 @@ class Client:
                         return
                     if (event.get("type") == "clipboard" and isinstance(event.get("text"), str)
                             and len(event["text"]) <= MAX_CLIPBOARD_CHARS):
-                        if write_text(event["text"]):
-                            self.clipboard_seen = event["text"]
+                        self.clipboard_pending = event['text']
                     elif len(raw) > 2048:
                         return
                     elif event.get("type") == "pong" and type(event.get("time")) in (int, float):
                         self.rtt_ms = max(0, (time.monotonic() - event["time"]) * 1000)
                         self.last_pong = time.monotonic()
+                        if self.recovering:
+                            self.recovering = False
+                            self.profile.event('control_pong_recovered')
                         if event.get('cursor_mode') in ('smart', 'remote', 'local'):
                             self.cursor_applied = event['cursor_mode']
                             visible = event.get('cursor_visible')
@@ -670,9 +776,22 @@ class Client:
                         if isinstance(encoder, str) and encoder in ('h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'):
                             self.encoder = encoder
                     elif event.get("type") == "ended":
+                        if event.get('reason') in ('control_heartbeat_timeout', 'peer_failed', 'input_receive_failed'):
+                            self.record_failure('host_' + event['reason'])
                         self.schedule_disconnect()
                     elif event.get("type") == "warning":
-                        self.notify(str(event.get("message", ""))[:200])
+                        warning = str(event.get('message', ''))[:200]
+                        self.record_failure('host_warning', RuntimeError(warning))
+                        self.notify(warning)
+                    elif event.get('type') == 'capture-state' and type(event.get('paused')) is bool:
+                        paused = event['paused']
+                        message = str(event.get('message', ''))[:200]
+                        self.profile.describe(host_capture_paused=paused)
+                        if paused:
+                            self.record_failure('host_capture_paused', RuntimeError(message))
+                        else:
+                            self.profile.event('host_capture_resumed')
+                        self.notify(message)
                     elif event.get("type") == "rumble":
                         from .input_session import integer
                         if integer(event.get("index"), 0, 3) and all(integer(event.get(k), 0, 65535) for k in ("left", "right")):
@@ -689,6 +808,7 @@ class Client:
             async def state():
                 self.notify(f"控制端会话：{pc.connectionState}")
                 if pc.connectionState in ("failed", "closed") and self.pc is pc:
+                    self.record_failure('peer_' + pc.connectionState)
                     self.schedule_disconnect()
 
             pc.addTransceiver("video", direction="recvonly")
@@ -702,6 +822,7 @@ class Client:
                 response = await request(self.endpoint, self.fp, "POST", "/v1/session", token=self.token,
                                          payload={"type": pc.localDescription.type, "sdp": pc.localDescription.sdp, "settings": config})
                 self.session_id = response["id"]
+                self.diagnostics.reset(self.session_id)
                 self.config, self.decoder = config, decoder
                 await pc.setRemoteDescription(RTCSessionDescription(response["sdp"], response["type"]))
                 mark_rtc_sockets(pc)
@@ -710,7 +831,9 @@ class Client:
                 self.task(self.heartbeat())
                 self.task(self.sample_statistics(pc, config["bitrate"]))
                 self.task(self.probe_statistics_route(pc))
-            except BaseException:
+            except BaseException as exc:
+                if isinstance(exc, Exception):
+                    self.record_failure('controller_negotiation_failed', exc)
                 await self._disconnect()
                 raise
 
@@ -803,7 +926,13 @@ class Client:
     async def watch_clipboard(self, pc):
         while self.pc is pc:
             await asyncio.sleep(0.35)
+            pending, self.clipboard_pending = self.clipboard_pending, None
+            if pending is not None:
+                if await asyncio.to_thread(write_text, pending) and self.pc is pc:
+                    self.clipboard_seen = pending
             value = await asyncio.to_thread(read_text)
+            if self.pc is not pc or self.clipboard_pending is not None:
+                continue
             if value is None or value == self.clipboard_seen:
                 continue
             self.clipboard_seen = value
@@ -879,6 +1008,7 @@ class Client:
             raise
         except Exception as exc:
             if self.pc and self.pc.connectionState != "closed":
+                self.record_failure(track.kind + '_track_failed', exc)
                 self.notify(f"{track.kind} 轨道结束：{exc}")
                 if track.kind == "video":
                     self.schedule_disconnect()
@@ -904,6 +1034,7 @@ class Client:
         if channel.bufferedAmount > 65536:
             # Stop the session rather than dropping a reliable key-up indefinitely.
             if channel is self.control:
+                self.record_failure('control_send_buffer_full')
                 self.schedule_disconnect()
             return
         self.sequence += 1
@@ -923,21 +1054,54 @@ class Client:
             self.send({"type": "release"})
 
     async def heartbeat(self):
+        previous = time.monotonic()
         while self.pc:
+            now = time.monotonic()
+            lag = max(0, now - previous - .5)
+            previous = now
+            self.loop_lag_ms = round(lag * 1000, 3)
             if self.cursor_supported:
                 self.send({'type': 'cursor-mode', 'mode': self.cursor_mode})
             self.send({"type": "heartbeat", "active": self.active})
             self.send({"type": "ping", "time": time.monotonic()})
             now = time.monotonic()
+            if lag > 1 and not self.recovering:
+                self.recovering = True
+                self.record_failure('controller_event_loop_stall')
+                await asyncio.sleep(.5)
+                continue
             if self.control and self.control.readyState == "open" and now - self.last_pong > 5:
+                if not self.recovering:
+                    self.recovering = True
+                    self.record_failure('control_pong_late')
+                if self.health_supported and now - self.last_probe_at > 2 and (not self.probe_task or self.probe_task.done()):
+                    self.last_probe_at = now
+                    self.probe_task = self.task(self.probe_health(self.pc, self.session_id))
+                if now - self.last_pong <= CONTROL_RECOVERY_TIMEOUT:
+                    await asyncio.sleep(.5)
+                    continue
+                self.record_failure('control_pong_timeout')
                 self.notify("主机心跳响应超时，已断开会话。")
                 self.schedule_disconnect()
                 return
             if now - (self.mailbox.updated or self.connected_at) > 15:
+                self.record_failure('video_timeout')
                 self.notify("15 秒未收到画面，已断开会话。")
                 self.schedule_disconnect()
                 return
             await asyncio.sleep(0.5)
+
+    async def probe_health(self, pc, identifier):
+        try:
+            result = await asyncio.wait_for(request(self.endpoint, self.fp, 'GET',
+                                                   f'/v1/session/{identifier}/health'), 2)
+            if self.pc is pc:
+                self.profile.event('https_session_probe', ok=result.get('ok') is True,
+                                   host_heartbeat_age=result.get('heartbeat_age_seconds'))
+                self.record_failure('control_probe_response')
+        except Exception as exc:
+            if self.pc is pc:
+                self.record_failure('control_probe_failed', exc)
 
     async def disconnect(self):
         if self.disconnect_task is None or self.disconnect_task.done():
@@ -951,7 +1115,7 @@ class Client:
     async def _disconnect(self):
         try:
             self.focus(False)
-            self.send({'type': 'disconnect'})
+            self.send({'type': 'disconnect', 'reason': self.disconnect_reason})
         except Exception:
             pass  # HTTPS and the host watchdog are independent fallbacks.
         pc, self.pc = self.pc, None

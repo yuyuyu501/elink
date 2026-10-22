@@ -18,6 +18,12 @@ from .ui.window import MainWindow
 
 
 def main() -> int:
+    if os.name == 'nt' and len(sys.argv) == 4 and sys.argv[1] == '--elevated-restart':
+        from .platforms.windows.privileges import is_elevated, wait_for_previous
+        if not is_elevated():
+            return 1
+        wait_for_previous(int(sys.argv[2]))
+        os.environ['ELINK_DATA_DIR'] = sys.argv[3]
     if len(sys.argv) == 3 and sys.argv[1] == '--self-test-gpu':
         from pathlib import Path
         output = Path(sys.argv[2])

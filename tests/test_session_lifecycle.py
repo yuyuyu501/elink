@@ -89,6 +89,7 @@ def test_client_notifies_host_before_local_transport_finishes(tmp_path, monkeypa
 def test_lost_controller_and_missing_heartbeat_release_host_for_reconnect(tmp_path, monkeypatch):
     async def scenario():
         monkeypatch.setattr(transport, 'CONTROL_HEARTBEAT_TIMEOUT', 1.0)
+        monkeypatch.setattr(transport, 'CONTROL_RECOVERY_TIMEOUT', 1.5)
         host = HostServer(tmp_path / 'host', synthetic=True, backend_factory=RecordingInput)
         client = Client(tmp_path / 'client', play_audio=False)
         try:

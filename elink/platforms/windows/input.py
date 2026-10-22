@@ -399,6 +399,8 @@ class WindowsInput:
         self.pad_error = ""
         self.feedback = feedback
         self.pad_backend, self.notify = pad_backend, notify
+        from .privileges import is_elevated
+        self.elevated = is_elevated()
 
     def emit(self, event):
         kind = event["type"]
@@ -425,8 +427,12 @@ class WindowsInput:
             value.mouse.flags = flags[event["button"]][0 if event["down"] else 1]
         elif kind == "wheel":
             value.mouse.flags, value.mouse.data = 0x800, event["delta"] & 0xffffffff
+        c.set_last_error(0)
         if self.user.SendInput(1, c.byref(value), c.sizeof(value)) != 1:
-            raise RuntimeError("Windows 拒绝输入注入（请检查目标程序权限或安全桌面）。")
+            error = c.get_last_error()
+            detail = ('请在被控端的设置中，以管理员权限重新启动 Elink，再连接控制任务管理器等窗口。'
+                      if not self.elevated else '当前已是管理员权限，请检查是否处于 UAC 安全桌面或受保护窗口。')
+            raise RuntimeError(f'Windows 拒绝输入注入（Win32={error}，管理员={self.elevated}）。{detail}')
 
     def close(self):
         if self.pads:

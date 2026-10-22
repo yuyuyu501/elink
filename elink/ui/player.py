@@ -89,7 +89,7 @@ class Player(QWidget):
             self.mouse_mode = available[0]
         self.mouse_sensitivity = MouseSensitivity(self.preferences.get('mouse_sensitivity', 0))
         self._absolute_last = self._absolute_pos = None
-        self._relative_last = None
+        self._host_cursor_visible = None
         self.game_mouse = False  # Effective input mapping; independent of cursor rendering.
         self.local_cursor = False
         self.software_cursor = False
@@ -504,18 +504,23 @@ class Player(QWidget):
     def update_mouse(self, force=False):
         if not self.captured:
             return
-        if self.error_bar.isVisible() and self.error_bar.rect().contains(self.error_bar.mapFromGlobal(QCursor.pos())):
-            self.release(resume_on_hover=True)
-            return
-        if not self.isFullScreen() and QApplication.platformName() == 'windows':
-            if self.release_outside_video(QPointF(self.mapFromGlobal(QCursor.pos()))):
-                return
         fresh = time.monotonic() - getattr(self.client, 'cursor_updated', 0) < 2
         visible = getattr(self.client, 'cursor_visible', None) if fresh else None
         supported = getattr(self.client, 'cursor_supported', False)
+        if supported and type(visible) is bool:
+            self._host_cursor_visible = visible
+        # A delayed/unknown sample is not evidence that a game showed its cursor.
+        visible = self._host_cursor_visible if supported else None
         relative = relative_mouse(self.mouse_mode, visible)
         if not supported and self.mouse_mode == 'smart':
-            relative = False  # Older hosts cannot report whether games hide their cursor.
+            relative = False
+        if (not relative and self.error_bar.isVisible()
+                and self.error_bar.rect().contains(self.error_bar.mapFromGlobal(QCursor.pos()))):
+            self.release(resume_on_hover=True)
+            return
+        if not relative and QApplication.platformName() == 'windows':
+            if self.release_outside_video(QPointF(self.mapFromGlobal(QCursor.pos()))):
+                return
         # The host omits its system cursor in local mode. Keep the controller's
         # OS cursor hidden and paint a software arrow over the received frame;
         # this avoids a duplicate cursor while still making the pointer visible.
@@ -526,12 +531,10 @@ class Player(QWidget):
             self.refresh_video()
         if force or relative != self.game_mouse:
             self._absolute_last = self._absolute_pos = None
-            self._relative_last = QPointF(self.mapFromGlobal(QCursor.pos()))
             self.mouse_sensitivity.remainder = [0.0, 0.0]
             if relative:
                 self.grabMouse(QCursor(Qt.CursorShape.BlankCursor))
-                if self.isFullScreen():
-                    QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
+                QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
                 try:
                     self.raw_mouse.start(int(self.winId()))
                 except OSError as exc:
@@ -549,9 +552,9 @@ class Player(QWidget):
         if force or local != self.local_cursor:
             self.setCursor(Qt.CursorShape.ArrowCursor if local else Qt.CursorShape.BlankCursor)
             self.local_cursor = local
-        # Windowed sessions release at the video edge. Only fullscreen games
-        # need a confined pointer for continuous relative movement.
-        if relative and self.isFullScreen() and QApplication.platformName() == 'windows':
+        # Raw Input supplies deltas but does not constrain the physical pointer.
+        # Games need both, including windowed sessions with title/letterbox bars.
+        if relative and QApplication.platformName() == 'windows':
             try:
                 rect = self.rect_image.intersected(self.video_viewport())
                 self.cursor_confinement.confine(int(self.winId()), rect.getRect(), (self.width(), self.height()))
@@ -566,7 +569,6 @@ class Player(QWidget):
         self._resume_on_hover = resume_on_hover
         self.keyboard_hook.stop()
         self.raw_mouse.stop()
-        self._relative_last = None
         self.cursor_confinement.release()
         self.runtime.call(self.client.focus, False)
         self.releaseMouse()
@@ -763,13 +765,10 @@ class Player(QWidget):
             # device counts instead of Qt's accelerated pointer coordinates.
             if not self.raw_mouse.active:
                 position = event.position()
-                origin = QPointF(self.rect_image.center()) if self.isFullScreen() else self._relative_last
-                delta = position - (origin if origin is not None else position)
-                self._relative_last = QPointF(position)
+                delta = position - QPointF(self.rect_image.center())
                 if not delta.isNull():
                     self.send_relative_motion(delta.x(), delta.y())
-                    if self.isFullScreen():
-                        QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
+                    QCursor.setPos(self.mapToGlobal(self.rect_image.center()))
             event.accept()
             return
         else:
@@ -816,10 +815,6 @@ class Player(QWidget):
         if self.captured and self.game_mouse:
             delta = self.raw_mouse.delta(message)
             if delta and (delta[0] or delta[1]):
-                # WM_INPUT can arrive before Qt reports the pointer leaving.
-                # Stop remote input before the same movement reaches local UI.
-                if self.release_outside_video(QPointF(self.mapFromGlobal(QCursor.pos()))):
-                    return False, 0
                 self.send_relative_motion(*delta)
                 return True, 0
         return super().nativeEvent(event_type, message)
@@ -879,11 +874,10 @@ class Player(QWidget):
         self.capture()
 
     def release_outside_video(self, position):
-        if not (self.game_mouse and self.isFullScreen()) and not self.video_contains(position):
-            if not self.game_mouse:
-                # The last move can jump over an edge or arrive after the poll.
-                # Order the final desktop position before the focus epoch ends.
-                self.send_absolute_motion(position, reliable=True, adjust=False)
+        if not self.game_mouse and not self.video_contains(position):
+            # The last move can jump over an edge or arrive after the poll.
+            # Order the final desktop position before the focus epoch ends.
+            self.send_absolute_motion(position, reliable=True, adjust=False)
             self.release(resume_on_hover=True)
             return True
         return False

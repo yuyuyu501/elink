@@ -8,6 +8,18 @@ import time
 log = logging.getLogger(__name__)
 
 
+def desktop_unavailable(exc, *, reading=False):
+    """Errors documented by DXGI for desktop switches and unavailable desktops."""
+    if isinstance(exc, (PermissionError, av.error.PermissionError)):
+        return True
+    # ddagrab maps AcquireNextFrame/ACCESS_LOST to AVERROR_EXTERNAL without
+    # preserving the HRESULT. Recreate a previously initialized duplication.
+    if reading and isinstance(exc, av.error.ExternalError):
+        return True
+    code = getattr(exc, 'hresult', None)
+    return isinstance(code, int) and code & 0xffffffff in (0x80070005, 0x887A0026, 0x887A0028)
+
+
 class ColorCalibrationPending(RuntimeError):
     """The desktop cannot yet distinguish the driver's matrix/range."""
 

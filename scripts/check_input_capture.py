@@ -1,4 +1,4 @@
-"""Check windowed pointer exit and fullscreen capture on CPU/GPU players.
+"""Check desktop pointer exit and game confinement on CPU/GPU players.
 
 Run on an unlocked Windows desktop. Moves the local pointer briefly, restores
 it afterwards, and never injects remote input. Uses only isolated test players.
@@ -59,6 +59,8 @@ def present(view, renderer, source_size):
 
 
 def check_windowed(app, view, client, events, before, mode, visible, fallback=False):
+    if not visible:
+        return check_game(app, view, client, events, before, mode, fallback)
     client.cursor_visible = visible
     view.set_mouse_mode(mode)
     rect = view.rect_image
@@ -131,6 +133,38 @@ def check_windowed(app, view, client, events, before, mode, visible, fallback=Fa
     return dict(mode=mode, host_cursor_visible=visible, fallback=fallback, four_edges=True,
                 reentry_without_click=True,
                 desktop_aligned=True if visible else None)
+
+
+def check_game(app, view, client, events, before, mode, fallback):
+    view.release()
+    client.cursor_visible, client.cursor_updated = False, time.monotonic()
+    view.set_mouse_mode(mode)
+    rect = view.rect_image
+    QCursor.setPos(view.mapToGlobal(rect.center()))
+    view.capture()
+    settle(app)
+    assert view.captured and view.game_mouse and (fallback or view.raw_mouse.active)
+    assert clip_bounds() == view.cursor_confinement._bounds and clip_bounds() != before
+    for point in (QPoint(rect.left() - 40, rect.center().y()), QPoint(rect.right() + 40, rect.center().y()),
+                  QPoint(rect.center().x(), rect.top() - 40), QPoint(rect.center().x(), rect.bottom() + 40)):
+        QCursor.setPos(view.mapToGlobal(point))
+        settle(app)
+        assert view.captured and view.video_contains(view.mapFromGlobal(QCursor.pos())), (
+            mode, fallback, rect.getRect(), view.mapFromGlobal(QCursor.pos()), clip_bounds())
+    client.cursor_updated -= 3
+    view.update_mouse()
+    assert view.captured and view.game_mouse and clip_bounds() != before
+    client.cursor_visible, client.cursor_updated = True, time.monotonic()
+    view.update_mouse()
+    assert not view.game_mouse and clip_bounds() == before
+    client.cursor_visible = False
+    view.update_mouse()
+    QTest.keyClick(view, Qt.Key.Key_F8)
+    settle(app)
+    assert not view.captured and not view.raw_mouse.active and clip_bounds() == before
+    view.control_menu.hide()
+    return dict(mode=mode, host_cursor_visible=False, fallback=fallback, confined_four_edges=True,
+                stale_state_keeps_capture=True, visible_cursor_releases_constraint=True, f8_releases=True)
 
 
 def check(app, renderer):
@@ -241,7 +275,7 @@ def check(app, renderer):
         QCursor.setPos(view.mapToGlobal(view.rect_image.center()))
         view.capture()
         view.update_mouse()
-        assert clip_bounds() == before
+        assert clip_bounds() == view.cursor_confinement._bounds and clip_bounds() != before
         QTest.keyClick(view, Qt.Key.Key_F8)
         settle(app)
         assert not view.captured and clip_bounds() == before
@@ -252,7 +286,7 @@ def check(app, renderer):
         QApplication.sendEvent(view, QEvent(QEvent.Type.WindowDeactivate))
         assert not view.captured and not view.raw_mouse.active and clip_bounds() == before
         return dict(renderer=renderer, windowed=windowed, fullscreen_confined=True,
-                    f8_release=True, focus_release=True, offscreen_unconfined=True,
+                    f8_release=True, focus_release=True, offscreen_confined=True,
                     local_window_return=True, covered_video_ignored=True, outside_click_dismisses=True)
     finally:
         view.close()

@@ -57,8 +57,64 @@ class DesktopTrack(MediaStreamTrack):
         self.platform_capture = None
         self.gpu_capture_disabled = capture_backend == 'dxcam' or os.name != 'nt'
         self.notify = lambda message: None
+        self.capture_state = lambda paused, exc=None: None
+        self.capture_paused = False
+        self.capture_retry_at = 0
+        self.capture_done = threading.Event()
+        self.last_frame = None
 
     def capture(self):
+        if self.capture_paused:
+            self.capture_done.wait(max(0, self.capture_retry_at - time.monotonic()))
+        if self.capture_done.is_set():
+            raise MediaStreamError
+        try:
+            frame = self._capture()
+        except Exception as exc:
+            from ..platforms.windows.capture import desktop_unavailable
+            if os.name != 'nt' or self.synthetic or not desktop_unavailable(exc, reading=self.gpu_capture is not None):
+                raise
+            if not self.capture_paused:
+                self.record_capture_error('capture_paused', exc, self.width, self.height, self.fps)
+                self.profile.describe(capture_paused=True)
+                self.capture_state(True, exc)
+            self.capture_paused = True
+            self.capture_retry_at = time.monotonic() + .25
+            self.cursor_visible = None
+            self.reset_windows_capture()
+            # Keep RTP alive using only the last ordinary desktop (or black
+            # before the first frame). Never try to capture the secure desktop.
+            if self.last_frame and (self.last_frame.width, self.last_frame.height) == (self.width, self.height):
+                pixels = self.last_frame.to_ndarray(format='yuv420p')
+            else:
+                pixels = np.full((self.height * 3 // 2, self.width), 128, dtype=np.uint8)
+                pixels[:self.height] = 16
+            frame = av.VideoFrame.from_ndarray(pixels, format='yuv420p')
+            if self.last_frame:
+                frame.colorspace, frame.color_range = self.last_frame.colorspace, self.last_frame.color_range
+            frame.opaque = dict(profile=self.profile, network_budget=self.network_budget,
+                                stream_fps=self.fps, captured_at=time.perf_counter(), capture_paused=True)
+            self.profile.count('capture_pause_frames')
+            return frame
+        if self.capture_paused:
+            self.capture_paused = False
+            self.profile.describe(capture_paused=False)
+            self.profile.event('capture_resumed')
+            self.capture_state(False)
+        return frame
+
+    def reset_windows_capture(self):
+        for name in ('gpu_capture', 'camera'):
+            capture = getattr(self, name)
+            setattr(self, name, None)
+            if capture:
+                try:
+                    capture.close() if name == 'gpu_capture' else capture.release()
+                except Exception:
+                    log.exception('Cannot release %s during desktop recovery', name)
+        self.last = None
+
+    def _capture(self):
         started = time.perf_counter()
         if not self.synthetic and os.name != 'nt':
             from ..platforms import backend
@@ -92,6 +148,9 @@ class DesktopTrack(MediaStreamTrack):
                                       capture_format='nv12', capture_calibration='pending' if pending else 'ready')
                 return self.finish_capture(frame, started)
             except (av.FFmpegError, RuntimeError, ValueError, OSError) as exc:
+                from ..platforms.windows.capture import desktop_unavailable
+                if desktop_unavailable(exc, reading=self.gpu_capture is not None):
+                    raise
                 self.record_capture_error('capture', exc, self.width, self.height, self.fps)
                 if self.gpu_capture:
                     self.gpu_capture.close()
@@ -158,6 +217,7 @@ class DesktopTrack(MediaStreamTrack):
                   stage, width, height, fps, self.capture_backend, exc_info=exc)
 
     def finish_capture(self, frame, started):
+        self.last_frame = frame
         frame.opaque = {"profile": self.profile, "captured_at": started, 'network_budget': self.network_budget,
                         'stream_fps': self.fps}
         self.profile.mark("capture_interval")
@@ -243,6 +303,7 @@ class DesktopTrack(MediaStreamTrack):
         if self.readyState != "live":
             return
         super().stop()
+        self.capture_done.set()
         if self.capture_future is not None:
             self.capture_future.cancel()
             self.capture_future = None

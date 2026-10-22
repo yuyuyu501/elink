@@ -77,8 +77,16 @@ def test_slow_negotiation_does_not_consume_live_control_heartbeat_deadline(tmp_p
                 pass
         assert not disconnected, 'a newly opened channel must get a full heartbeat response interval'
 
-        # Keep the existing liveness timeout after the channel opens.
+        # Late pongs get a bounded recovery interval, without consuming startup.
         clock[0] += 5.1
+        with monkeypatch.context() as tick:
+            tick.setattr(asyncio, 'sleep', one_tick)
+            try:
+                await client.heartbeat()
+            except asyncio.CancelledError:
+                pass
+        assert not disconnected and client.recovering
+        clock[0] += transport.CONTROL_RECOVERY_TIMEOUT
         await client.heartbeat()
         assert disconnected == [True]
 
