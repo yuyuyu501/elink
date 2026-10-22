@@ -393,7 +393,7 @@ def create_pads(backend, feedback, notify):
 
 
 class WindowsInput:
-    def __init__(self, feedback, pad_backend="vigem", notify=lambda message: None):
+    def __init__(self, feedback, pad_backend="vigem", notify=lambda message: None, *, allow_broker=True):
         if pad_backend not in PAD_BACKENDS:
             raise ValueError("未知手柄后端。")
         self.user = c.WinDLL("user32", use_last_error=True)
@@ -403,6 +403,9 @@ class WindowsInput:
         self.pad_error = ""
         self.feedback = feedback
         self.pad_backend, self.notify = pad_backend, notify
+        self.broker = None
+        self.allow_broker = allow_broker
+        self.broker_attempted = False
         from .privileges import is_elevated
         self.elevated = is_elevated()
 
@@ -527,6 +530,9 @@ class WindowsInput:
             value.mouse.flags = flags[event["button"]][0 if event["down"] else 1]
         elif kind == "wheel":
             value.mouse.flags, value.mouse.data = 0x800, event["delta"] & 0xffffffff
+        if self.broker is not None:
+            self.broker.emit(event)
+            return
         c.set_last_error(0)
         if self.user.SendInput(1, c.byref(value), c.sizeof(value)) != 1:
             error = c.get_last_error()
@@ -534,12 +540,27 @@ class WindowsInput:
                 context = self._input_context()
             except Exception as exc:
                 context = {"diagnostic_error": type(exc).__name__}
+            log.error('SendInput failed: kind=%s win32=%s context=%s', kind, error, context)
+            if (self.allow_broker and not self.broker_attempted and not self.elevated
+                    and error in (0, 5) and context.get('foreground_integrity') in ('high', 'system')
+                    and context.get('thread_desktop') == context.get('input_desktop') == 'Default'):
+                from .input_broker import ElevatedInputBroker
+                self.broker_attempted = True
+                self.broker = ElevatedInputBroker(self.notify)
+                try:
+                    self.broker.emit(event)
+                    return
+                except Exception as exc:
+                    log.exception('Elevated input broker unavailable')
+                    raise RuntimeError(f'Windows 拒绝输入注入（Win32={error}）。管理员输入辅助失败：{exc}') from exc
             detail = ('请在被控端的设置中，以管理员权限重新启动 Elink，再连接控制任务管理器等窗口。'
                       if not self.elevated else '当前已是管理员权限，请检查是否处于 UAC 安全桌面或受保护窗口。')
-            log.error('SendInput failed: kind=%s win32=%s context=%s', kind, error, context)
             raise RuntimeError(f'Windows 拒绝输入注入（阶段=SendInput，Win32={error}，管理员={self.elevated}）。{detail}')
 
     def close(self):
+        if self.broker:
+            self.broker.close()
+            self.broker = None
         if self.pads:
             self.pads.close()
             self.pads = None

@@ -22,10 +22,10 @@ def environment_details():
                 system=system, av_version=av.__version__)
 
 
-def configure_logging(root):
+def configure_logging(root, filename='elink.log'):
     directory = root / 'logs'
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / 'elink.log'
+    path = directory / filename
     logger = logging.getLogger('elink')
     sources = [logger, logging.getLogger('aiortc.rtcrtpsender'), logging.getLogger('aiortc.rtcrtpreceiver')]
     previous = set()

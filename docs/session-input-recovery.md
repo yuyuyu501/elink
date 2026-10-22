@@ -41,6 +41,25 @@ confirmed cursor visibility survives missing samples; a new visible sample,
 F8, focus loss, explicit release or disconnect releases confinement. This follows
 the relative-input behavior documented by SDL and used in Moonlight.
 
+## High-integrity input options
+
+`SendInput` is the supported system-wide path for ordinary desktop and game input,
+but Windows User Interface Privilege Isolation (UIPI) limits a medium-integrity
+process from injecting into a high-integrity target. The older `keybd_event` and
+`mouse_event` APIs are compatibility wrappers around the same input subsystem;
+switching to either does not bypass UIPI. `PostMessage` and `SendMessage` can
+place window messages in a target queue, but they do not provide system-wide
+pointer movement, do not work for games that consume Raw Input or DirectInput,
+and cannot reliably control arbitrary Task Manager UI.
+
+The implementation therefore keeps `SendInput` for the normal path and starts a
+short-lived, same-session elevated broker only after a high-integrity foreground
+window causes a denial. A kernel input driver or a virtual HID driver could
+cross more integrity boundaries, but it would require installation, signing and
+additional security review; this project does not install such a driver. The
+broker path is the next test target: confirm the UAC prompt, verify the broker
+log and then test Task Manager on both updated Windows machines.
+
 ## Validation
 
 - Native Windows CPU/GPU players: two sizes, 16:9 and 4:3 video, all three mouse

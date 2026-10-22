@@ -13,6 +13,6 @@ def gamepads():
 
 def capabilities():
     return dict(platform='windows', roles=['controller', 'host'],
-                capture=['d3d11', 'dxcam'], input=['sendinput'],
+                capture=['d3d11', 'dxcam'], input=['sendinput', 'elevated-broker'],
                 cursor_modes=['smart', 'remote', 'local'], clipboard=True,
                 gamepad=['vigem', 'elinkpad'], gamepad_feedback=True)

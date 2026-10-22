@@ -18,6 +18,9 @@ from .ui.window import MainWindow
 
 
 def main() -> int:
+    if os.name == 'nt' and len(sys.argv) == 4 and sys.argv[1] == '--input-broker':
+        from .platforms.windows.input_broker import run_input_broker
+        return run_input_broker(int(sys.argv[2]), sys.argv[3])
     if os.name == 'nt' and len(sys.argv) == 4 and sys.argv[1] == '--elevated-restart':
         from .platforms.windows.privileges import is_elevated, wait_for_previous
         if not is_elevated():
