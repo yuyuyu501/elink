@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QTimer, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QEvent
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QScrollArea, QFrame,
@@ -24,7 +24,7 @@ from .. import startup
 from .player import Player
 from .about import AboutPage
 from .controls import StreamOptions, DeviceCard, OptionRow, section_heading
-from .chrome import window_icon
+from .chrome import window_icon, MainTitleBar, make_resize_handles, place_resize_handles
 from .icons import icon, icon_label
 from .. import __version__
 
@@ -78,7 +78,13 @@ class MainWindow(QMainWindow):
         self.poll_pending = False
         self.config_path = root / "desktop-v3.json"
         self.config_error = False
+        self.resize_handles = []
+        self.titlebar = None
         self.setWindowTitle(f"Elink · {__version__}")
+        if sys.platform == 'win32':
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+            self.titlebar = MainTitleBar(self)
+            self.setMenuWidget(self.titlebar)
         self.resize(1040, 760)
         self.setMinimumSize(900, 680)
         outer = QWidget()
@@ -93,7 +99,7 @@ class MainWindow(QMainWindow):
             self.sidebar.setObjectName('navigationSidebar')
             self.sidebar.setFixedWidth(204)
             navigation = QVBoxLayout(self.sidebar)
-            navigation.setContentsMargins(16, 28, 16, 20)
+            navigation.setContentsMargins(16, 16, 16, 16)
             navigation.setSpacing(8)
             shell.addWidget(self.sidebar)
             body = QWidget()
@@ -103,25 +109,20 @@ class MainWindow(QMainWindow):
             layout = QVBoxLayout(outer)
         layout.setContentsMargins(28, 22, 28, 18)
         layout.setSpacing(16)
-        title = QHBoxLayout()
-        title.setSpacing(14)
-        brand = icon_label('link', 44, '#ffffff', glyph_size=28)
-        brand.setObjectName('brandMark')
-        title.addWidget(brand)
-        brand_text = QVBoxLayout()
-        brand_text.setSpacing(2)
-        brand_text.addWidget(text_label('Elink', 'brandTitle'))
         if self.sidebar is None:
+            title = QHBoxLayout()
+            title.setSpacing(14)
+            brand = icon_label('link', 44, '#ffffff', glyph_size=28)
+            brand.setObjectName('brandMark')
+            title.addWidget(brand)
+            brand_text = QVBoxLayout()
+            brand_text.setSpacing(2)
+            brand_text.addWidget(text_label('Elink', 'brandTitle'))
             brand_text.addWidget(text_label('你的设备，随时连接。', 'muted'))
-        title.addLayout(brand_text)
-        title.addStretch()
-        platform_label = 'WINDOWS' if sys.platform == 'win32' else 'LINUX'
-        version = text_label(f'{platform_label}  /  {__version__}\nPREVIEW', 'versionLabel')
-        if self.sidebar is not None:
-            navigation.addLayout(title)
-            navigation.addSpacing(32)
-        else:
-            title.addWidget(version, 0, Qt.AlignmentFlag.AlignTop)
+            title.addLayout(brand_text)
+            title.addStretch()
+            title.addWidget(text_label(f'LINUX  /  {__version__}\nPREVIEW', 'versionLabel'),
+                            0, Qt.AlignmentFlag.AlignTop)
             layout.addLayout(title)
         self.setWindowIcon(icon('link', '#2855eb'))
         self.notice_bar = QFrame()
@@ -166,12 +167,20 @@ class MainWindow(QMainWindow):
                 entry.setCursor(Qt.CursorShape.PointingHandCursor)
                 self.navigation_group.addButton(entry, index)
                 self.navigation_buttons.append(entry)
-                navigation.addWidget(entry)
+            navigation.addWidget(self.navigation_buttons[0])
+            navigation.addWidget(self.navigation_buttons[2])
             navigation.addStretch()
-            navigation.addWidget(version)
+            separator = QFrame()
+            separator.setObjectName('sidebarSeparator')
+            separator.setFixedHeight(1)
+            navigation.addWidget(separator)
+            navigation.addWidget(self.navigation_buttons[1])
+            QWidget.setTabOrder(self.navigation_buttons[0], self.navigation_buttons[2])
+            QWidget.setTabOrder(self.navigation_buttons[2], self.navigation_buttons[1])
             self.navigation_group.idClicked.connect(self.tabs.setCurrentIndex)
             self.tabs.currentChanged.connect(self.update_navigation)
             self.update_navigation(self.tabs.currentIndex())
+            self.resize_handles = make_resize_handles(self)
         self.statusBar().showMessage("正在准备本机连接…" if auto_host else "诊断模式")
         self.statusBar().hide()
         self.load_config()
@@ -193,6 +202,22 @@ class MainWindow(QMainWindow):
         if auto_refresh:
             self.discovery_timer.start(10000)
             QTimer.singleShot(100, self.refresh_network)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.resize_handles:
+            place_resize_handles(self)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange and self.titlebar is not None:
+            self.titlebar.update_state()
+            place_resize_handles(self)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.resize_handles:
+            place_resize_handles(self)
 
     def update_navigation(self, index):
         for number, entry in enumerate(self.navigation_buttons):

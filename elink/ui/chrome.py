@@ -5,11 +5,68 @@ from .icons import icon, icon_label
 
 
 TITLE_HEIGHT = 40
+MAIN_TITLE_HEIGHT = 56
 RESIZE_MARGIN = 5
 
 
 def window_icon(kind):
     return icon({'minimize': 'minus', 'maximize': 'square', 'restore': 'copy'}.get(kind, 'x'))
+
+
+class MainTitleBar(QFrame):
+    def __init__(self, window):
+        super().__init__(window)
+        self.owner = window
+        self.setObjectName('mainTitleBar')
+        self.setFixedHeight(MAIN_TITLE_HEIGHT)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(18, 0, 0, 0)
+        row.setSpacing(10)
+        row.addWidget(icon_label('link', 20, '#2855eb'))
+        title = QLabel('Elink')
+        title.setObjectName('mainWindowTitle')
+        title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        row.addWidget(title)
+        row.addStretch()
+        for name, kind, callback in (
+                ('最小化', 'minimize', window.showMinimized),
+                ('最大化', 'maximize', self.toggle_maximized),
+                ('关闭', 'close', window.close)):
+            control = QPushButton()
+            control.setObjectName('mainClose' if kind == 'close' else 'mainCaptionButton')
+            control.setToolTip(name)
+            control.setAccessibleName(name)
+            control.setIcon(window_icon(kind))
+            control.setIconSize(QSize(16, 16))
+            control.setFixedSize(48, MAIN_TITLE_HEIGHT)
+            control.clicked.connect(callback)
+            row.addWidget(control)
+            setattr(self, 'close_button' if kind == 'close' else kind, control)
+        row.setSpacing(0)
+        self.update_state()
+
+    def update_state(self):
+        maximized = self.owner.isMaximized()
+        self.maximize.setIcon(window_icon('restore' if maximized else 'maximize'))
+        name = '还原' if maximized else '最大化'
+        self.maximize.setAccessibleName(name)
+        self.maximize.setToolTip(name)
+
+    def toggle_maximized(self):
+        if self.owner.isMaximized():
+            self.owner.showNormal()
+        else:
+            self.owner.showMaximized()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.owner.windowHandle():
+            self.owner.windowHandle().startSystemMove()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle_maximized()
+        event.accept()
 
 
 class StreamTitleBar(QFrame):
@@ -97,7 +154,9 @@ class ResizeHandle(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.player.windowHandle():
-            self.player.release()
+            release = getattr(self.player, 'release', None)
+            if release:
+                release()
             self.player.windowHandle().startSystemResize(self.edges)
         event.accept()
 
@@ -115,7 +174,7 @@ def place_resize_handles(player):
     m, w, h = RESIZE_MARGIN, player.width(), player.height()
     rectangles = [(m, 0, w - 2*m, m), (m, h-m, w-2*m, m), (0, m, m, h-2*m),
                   (w-m, m, m, h-2*m), (0, 0, m, m), (w-m, 0, m, m), (0, h-m, m, m), (w-m, h-m, m, m)]
-    visible = not player.captured and not player.isFullScreen() and not player.isMaximized()
+    visible = not getattr(player, 'captured', False) and not player.isFullScreen() and not player.isMaximized()
     for handle, rect in zip(player.resize_handles, rectangles):
         handle.setGeometry(*rect)
         handle.setVisible(visible)

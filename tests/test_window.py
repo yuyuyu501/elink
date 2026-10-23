@@ -1,5 +1,7 @@
 import os
+import sys
 import time
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,6 +18,61 @@ def pump(app, predicate, timeout=10):
         if time.monotonic() > end:
             raise AssertionError("UI timeout")
         time.sleep(0.01)
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason="Windows main-window chrome")
+def test_main_titlebar_and_sectioned_sidebar_preserve_window_actions(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QLabel, QFrame
+    from elink.ui.chrome import MAIN_TITLE_HEIGHT
+    app = QApplication.instance() or QApplication([])
+    apply_theme(app)
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
+    window.show()
+    app.processEvents()
+    try:
+        assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
+        assert window.titlebar.height() == MAIN_TITLE_HEIGHT
+        assert window.centralWidget().geometry().top() >= MAIN_TITLE_HEIGHT
+        assert not window.sidebar.findChildren(QLabel)
+        devices, settings, about = window.navigation_buttons
+        divider = window.sidebar.findChild(QFrame, 'sidebarSeparator')
+        assert devices.geometry().bottom() < about.geometry().top()
+        assert about.geometry().bottom() < divider.geometry().top() < settings.geometry().top()
+        assert window.sidebar.height() - settings.geometry().bottom() <= 20
+        for control, index in ((about, 2), (settings, 1), (devices, 0)):
+            control.click()
+            assert window.tabs.currentIndex() == index and control.isChecked()
+        calls = []
+        with monkeypatch.context() as patch:
+            patch.setattr(window, 'windowHandle', lambda: SimpleNamespace(
+                startSystemMove=lambda: calls.append('move'),
+                startSystemResize=lambda edges: calls.append(edges)))
+            QTest.mouseClick(window.titlebar, Qt.MouseButton.LeftButton, pos=QPoint(280, 24))
+            QTest.mouseClick(window.resize_handles[3], Qt.MouseButton.LeftButton)
+        assert calls == ['move', Qt.Edge.RightEdge]
+        QTest.mouseDClick(window.titlebar, Qt.MouseButton.LeftButton, pos=QPoint(280, 24))
+        app.processEvents()
+        assert window.isMaximized()
+        if app.platformName() == 'windows':
+            assert window.screen().availableGeometry().contains(window.frameGeometry())
+        assert window.titlebar.maximize.accessibleName() == '还原'
+        assert not any(handle.isVisible() for handle in window.resize_handles)
+        window.titlebar.maximize.click()
+        app.processEvents()
+        assert not window.isMaximized()
+        assert all(handle.isVisible() for handle in window.resize_handles)
+        window.titlebar.minimize.click()
+        app.processEvents()
+        assert window.isMinimized()
+        window.showNormal()
+        window.titlebar.close_button.click()
+        pump(app, lambda: window._closed)
+    finally:
+        window.request_exit()
+        pump(app, lambda: window._closed)
 
 
 def test_window_automatic_host_start_settings_and_shutdown(tmp_path, monkeypatch):
