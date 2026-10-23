@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
 
-class Signaling(val address: HostAddress, private val preferences: SharedPreferences) {
+class Signaling(val address: HostAddress, private val preferences: SharedPreferences, probe: Boolean = false) {
     private var fingerprint: String? = preferences.getString("pin:${address.authority}", null)
     private var observed: String? = null
     private val trust = object : X509TrustManager {
@@ -32,12 +32,15 @@ class Signaling(val address: HostAddress, private val preferences: SharedPrefere
             val digest = cert?.let { MessageDigest.getInstance("SHA-256").digest(it.encoded).joinToString("") { b -> "%02x".format(b) } }
             digest != null && digest == (fingerprint ?: observed)
         }.followRedirects(false).followSslRedirects(false)
-        .connectTimeout(8, TimeUnit.SECONDS).readTimeout(40, TimeUnit.SECONDS).build()
+        .connectTimeout(if (probe) 2 else 8, TimeUnit.SECONDS)
+        .readTimeout(if (probe) 3 else 40, TimeUnit.SECONDS)
+        .apply { if (probe) callTimeout(4, TimeUnit.SECONDS) }.build()
 
-    fun request(method: String, path: String, value: JSONObject? = null): JSONObject {
+    fun request(method: String, path: String, value: JSONObject? = null, presence: String? = null): JSONObject {
         require(path.startsWith("/v1/"))
         val body = value?.toString()?.toRequestBody("application/json".toMediaType())
-        val request = Request.Builder().url("https://${address.authority}$path").method(method, body).build()
+        val request = Request.Builder().url("https://${address.authority}$path").method(method, body)
+            .apply { if (presence != null) header("X-Elink-Presence", presence) }.build()
         client.newCall(request).execute().use { response ->
             val source = response.body ?: error("主机响应为空")
             source.byteStream().use { stream ->
@@ -57,8 +60,8 @@ class Signaling(val address: HostAddress, private val preferences: SharedPrefere
         }
     }
 
-    fun info(): JSONObject {
-        val result = request("GET", "/v1/info")
+    fun info(presence: String? = null): JSONObject {
+        val result = request("GET", "/v1/info", presence = presence)
         require(result.optString("protocol") == "elink" && result.optInt("version") == 2) { "不兼容的 Elink 主机" }
         if (fingerprint == null) {
             fingerprint = observed ?: error("未取得主机证书")

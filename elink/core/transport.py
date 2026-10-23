@@ -216,11 +216,12 @@ class HostServer:
         return {"protocol": "elink", "version": 2, "host_id": self.host_id,
                 "name": socket.gethostname()[:80], "codec": "H264", "port": self.port,
                 "busy": self.pc is not None or self.ending,
-                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1", "live-settings-v1", "session-health-v1"],
+                "features": ["cursor-modes-v1", "performance-v1", "spatial-upscale-v1", "live-settings-v1", "session-health-v1", "presence-https-v1"],
                 'capabilities': capabilities()}
 
     async def info(self, request):
-        return web.json_response(self.host_info())
+        accepted = self.scope.introduce(request.headers.get('X-Elink-Presence'), request.remote)
+        return web.json_response(dict(self.host_info(), presence_received=accepted))
 
     async def refresh_scope(self):
         while True:

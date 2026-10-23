@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import ctypes as C
 from ctypes import wintypes as W
 from dataclasses import dataclass, field
@@ -117,7 +119,24 @@ class NetworkScope:
             if len(self.presence) >= 512:
                 self.online()
             if key in self.presence or len(self.presence) < 512:
+                if key not in self.presence:
+                    log.info('Discovery learned platform=%s roles=%s source=%s',
+                             info.get('capabilities', {}).get('platform', ''), next(iter(hosts.values())).roles, ip)
                 self.presence[key] = (time.monotonic(), presence_info(info))
+                return True
+        return False
+
+    def introduce(self, header, ip):
+        """Accept compact presence on an existing HTTPS info request too."""
+        if not header or len(header) > 2732 or not self.allows(ip):
+            return False
+        try:
+            data = base64.b64decode(header, validate=True)
+            if len(data) > 2048:
+                return False
+            return self.remember(json.loads(data), ip)
+        except (ValueError, TypeError, binascii.Error):
+            return False
 
     def online(self, local_id=''):
         hosts = {}

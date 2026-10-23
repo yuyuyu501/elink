@@ -4,7 +4,7 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.SystemClock
-import android.util.Log
+import android.util.Base64
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -34,7 +34,7 @@ internal data class LanDevice(
 }
 
 /** Bidirectional presence: requests introduce controller-only devices too. */
-internal class DeviceDiscovery(context: Context) {
+internal class DeviceDiscovery(context: Context, private val diagnostics: Diagnostics = Diagnostics(context)) {
     private val preferences = context.getSharedPreferences("elink", Context.MODE_PRIVATE)
     private val id = preferences.getString("discoveryId", null) ?: MessageDigest.getInstance("SHA-256")
         .digest(UUID.randomUUID().toString().toByteArray()).joinToString("") { "%02x".format(it) }
@@ -50,12 +50,20 @@ internal class DeviceDiscovery(context: Context) {
     private val wifiLock = (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)
         ?.createMulticastLock("elink-presence")?.apply { setReferenceCounted(false) }
 
+    fun introduction(): String = Base64.encodeToString(own.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+    fun localDevice() = LanDevice(id, own.getString("name"), localAddresses().joinToString(" · "),
+        0, "android", listOf("controller"))
+    fun localAddresses() = interfaces().mapNotNull { it.address.hostAddress }.distinct()
+    fun report() = "listener=${listener?.isBound == true && listener?.isClosed == false}; " +
+        "interfaces=${interfaces().joinToString { "${it.address.hostAddress}/${it.networkPrefixLength}" }}; " +
+        "peers=${snapshot().joinToString { "${it.platform}:${it.authority}:${it.roles}" }}"
+
     private fun interfaces(): List<InterfaceAddress> = try {
         NetworkInterface.getNetworkInterfaces().toList()
             .filter { it.isUp && !it.isLoopback }.flatMap { it.interfaceAddresses }
             .filter { it.address is Inet4Address && it.networkPrefixLength in 1..32 }
     } catch (failure: SocketException) {
-        Log.w("ElinkDiscovery", "Cannot enumerate network interfaces", failure)
+        diagnostics.record("discovery.interfaces", "Cannot enumerate network interfaces", failure)
         emptyList()
     }
 
@@ -82,7 +90,10 @@ internal class DeviceDiscovery(context: Context) {
         if (device.id == id) return
         if (peers.size >= 512) snapshot()
         val key = "${device.id}@${device.address}"
-        if (peers.containsKey(key) || peers.size < 512) peers[key] = Seen(device, SystemClock.elapsedRealtime())
+        if (peers.containsKey(key) || peers.size < 512) {
+            if (!peers.containsKey(key)) diagnostics.record("discovery.learned", "${device.platform} ${device.authority} ${device.roles}")
+            peers[key] = Seen(device, SystemClock.elapsedRealtime())
+        }
     }
 
     fun snapshot(): List<LanDevice> {
@@ -94,13 +105,15 @@ internal class DeviceDiscovery(context: Context) {
 
     fun start(scope: CoroutineScope) {
         if (job != null) return
-        runCatching { wifiLock?.acquire() }.onFailure { Log.w("ElinkDiscovery", "Wi-Fi reception lock unavailable", it) }
+        runCatching { wifiLock?.acquire() }.onFailure { diagnostics.record("discovery.lock", "Wi-Fi reception lock unavailable", it) }
         job = scope.launch(Dispatchers.IO) {
+          while (isActive) {
             try {
                 DatagramSocket(null).use { socket ->
                     listener = socket
                     socket.broadcast = true
                     socket.bind(InetSocketAddress("0.0.0.0", 49201))
+                    diagnostics.record("discovery.listen", "UDP 49201 ready; ${localAddresses()}")
                     socket.soTimeout = 500
                     var window = 0L
                     var count = 0
@@ -121,13 +134,15 @@ internal class DeviceDiscovery(context: Context) {
                         } catch (_: SocketTimeoutException) {
                         } catch (failure: Exception) {
                             if (socket.isClosed) break
-                            Log.w("ElinkDiscovery", "Presence packet failed", failure)
+                            diagnostics.record("discovery.packet", "Presence packet failed", failure)
                         }
                     }
                 }
             } catch (failure: Exception) {
-                Log.e("ElinkDiscovery", "Cannot start presence listener", failure)
+                if (isActive) diagnostics.record("discovery.listen", "Cannot start presence listener; retry in 5 seconds", failure)
             } finally { listener = null }
+            delay(5000)
+          }
         }
     }
 
@@ -149,8 +164,8 @@ internal class DeviceDiscovery(context: Context) {
                         local.broadcast?.let { targets.add(it) }
                         for (target in targets) runCatching {
                             socket.send(DatagramPacket(query, query.size, target, 49201))
-                        }.onFailure { Log.w("ElinkDiscovery", "Discovery send failed on ${local.address}", it) }
-                    }.onFailure { Log.w("ElinkDiscovery", "Discovery interface failed", it) }
+                        }.onFailure { diagnostics.record("discovery.send", "Discovery send failed on ${local.address}", it) }
+                    }.onFailure { diagnostics.record("discovery.interface", "Discovery interface failed", it) }
                 }
                 val deadline = SystemClock.elapsedRealtime() + 1100
                 while (SystemClock.elapsedRealtime() < deadline && sockets.isNotEmpty()) {
@@ -163,7 +178,7 @@ internal class DeviceDiscovery(context: Context) {
                             val info = JSONObject(String(packet.data, 0, packet.length, Charsets.UTF_8))
                             if (info.optString("nonce") == nonce) remember(info, packet.address)
                         } catch (_: SocketTimeoutException) {
-                        } catch (failure: Exception) { Log.w("ElinkDiscovery", "Discovery reply failed", failure) }
+                        } catch (failure: Exception) { diagnostics.record("discovery.reply", "Discovery reply failed", failure) }
                     }
                 }
             } finally { sockets.forEach { it.close() } }
