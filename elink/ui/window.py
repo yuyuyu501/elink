@@ -8,7 +8,8 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QTimer, Signal, QEvent
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QEvent, QRectF
+from PySide6.QtGui import QPainterPath, QRegion
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QScrollArea, QFrame,
@@ -24,7 +25,7 @@ from .. import startup
 from .player import Player
 from .about import AboutPage
 from .controls import StreamOptions, DeviceCard, OptionRow, section_heading
-from .chrome import window_icon, MainTitleBar, make_resize_handles, place_resize_handles
+from .chrome import window_icon, MainTitleBar, MAIN_TITLE_HEIGHT, make_resize_handles, place_resize_handles
 from .icons import icon, icon_label
 from .. import __version__
 
@@ -82,6 +83,7 @@ class MainWindow(QMainWindow):
         self.titlebar = None
         self.setWindowTitle(f"Elink · {__version__}")
         if sys.platform == 'win32':
+            self.setObjectName('mainWindow')
             self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
             self.titlebar = MainTitleBar(self)
             self.setMenuWidget(self.titlebar)
@@ -103,6 +105,7 @@ class MainWindow(QMainWindow):
             navigation.setSpacing(8)
             shell.addWidget(self.sidebar)
             body = QWidget()
+            body.setObjectName('mainContent')
             shell.addWidget(body, 1)
             layout = QVBoxLayout(body)
         else:
@@ -205,19 +208,33 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.update_window_corners()
         if self.resize_handles:
             place_resize_handles(self)
 
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange and self.titlebar is not None:
+            self.update_window_corners()
             self.titlebar.update_state()
             place_resize_handles(self)
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.update_window_corners()
         if self.resize_handles:
             place_resize_handles(self)
+
+    def update_window_corners(self):
+        if sys.platform != 'win32':
+            return
+        if self.isMaximized() or self.isFullScreen():
+            self.clearMask()
+            return
+        radius = MAIN_TITLE_HEIGHT / 4
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), radius, radius)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def update_navigation(self, index):
         for number, entry in enumerate(self.navigation_buttons):

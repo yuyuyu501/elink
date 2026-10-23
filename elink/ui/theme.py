@@ -1,3 +1,5 @@
+import sys
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
@@ -133,6 +135,36 @@ QMenu::separator { height: 1px; background: #e1e7f0; margin: 5px 8px; }
 QToolTip { background: #172b46; color: #ffffff; border: 0; padding: 7px; }
 """
 
+WINDOWS_STYLE = """
+QMainWindow#mainWindow, QWidget#mainContent { background: #fafbfd; }
+QWidget#mainContent { border-top-left-radius: 13px; border-bottom-right-radius: 13px; }
+QFrame#navigationSidebar, QFrame#mainTitleBar { background: #f5f7fb; }
+QFrame#mainTitleBar { border-top-left-radius: 13px; border-top-right-radius: 13px; }
+QFrame#navigationSidebar { border-bottom-left-radius: 13px; }
+QPushButton, QToolButton, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox,
+QListWidget, QPlainTextEdit { border-radius: 10px; }
+QLabel#brandMark, QLabel#deviceIcon { border-radius: 11px; }
+QPushButton#deviceCard { border-radius: 22px; }
+QFrame#localDevice { border-radius: 23px; }
+QFrame#optionRow { border-radius: 12px; }
+QFrame#connectAction { border-radius: 8px; }
+QPushButton#navigationItem { border-radius: 12px; }
+QFrame#mainTitleBar QPushButton { min-height: 49px; max-height: 49px; border-radius: 12px; }
+QPushButton#noticeClose { border-radius: 8px; }
+QLabel#notice, QLabel#errorNotice, QFrame#notice, QFrame#errorNotice,
+QFrame#controlCenter, QFrame#mouseSubmenu, QMenu { border-radius: 12px; }
+QFrame#controlCenter QPushButton, QFrame#controlCenter QFrame#optionRow,
+QComboBox QAbstractItemView, QMenu::item { border-radius: 9px; }
+QComboBox QAbstractItemView::item { border-radius: 9px; }
+QCheckBox::indicator { border-radius: 5px; }
+QScrollBar::handle:vertical { border-radius: 2px; }
+QProgressBar, QProgressBar::chunk { border-radius: 2px; }
+QSlider::groove:horizontal, QSlider::sub-page:horizontal { border-radius: 1px; }
+QSlider::handle:horizontal { border-radius: 4px; }
+QFrame#streamToolbar QPushButton { border-radius: 10px; }
+QDialog { border-radius: 13px; }
+"""
+
 
 class AppStyle(QProxyStyle):
     def __init__(self):
@@ -156,5 +188,6 @@ def apply_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor('#ffffff'))
     palette.setColor(QPalette.ColorRole.Link, QColor('#2855eb'))
     app.setPalette(palette)
-    app.setStyleSheet(STYLE.replace('@RES@', resource_dir().as_posix()))
+    style = STYLE + (WINDOWS_STYLE if sys.platform == 'win32' else '')
+    app.setStyleSheet(style.replace('@RES@', resource_dir().as_posix()))
     app.setProperty('elinkThemeApplied', True)

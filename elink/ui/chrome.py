@@ -5,7 +5,7 @@ from .icons import icon, icon_label
 
 
 TITLE_HEIGHT = 40
-MAIN_TITLE_HEIGHT = 56
+MAIN_TITLE_HEIGHT = 50
 RESIZE_MARGIN = 5
 
 
