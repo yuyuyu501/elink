@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QScrollArea, QFrame,
-                               QVBoxLayout, QWidget, QSystemTrayIcon, QMenu, QMessageBox)
+                               QVBoxLayout, QWidget, QSystemTrayIcon, QMenu, QMessageBox, QButtonGroup)
 
 from ..core.runtime import Runtime
 from ..core.transport import Client, HostServer
@@ -83,7 +83,24 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 680)
         outer = QWidget()
         self.setCentralWidget(outer)
-        layout = QVBoxLayout(outer)
+        self.sidebar = None
+        self.navigation_buttons = []
+        if sys.platform == 'win32':
+            shell = QHBoxLayout(outer)
+            shell.setContentsMargins(0, 0, 0, 0)
+            shell.setSpacing(0)
+            self.sidebar = QFrame()
+            self.sidebar.setObjectName('navigationSidebar')
+            self.sidebar.setFixedWidth(204)
+            navigation = QVBoxLayout(self.sidebar)
+            navigation.setContentsMargins(16, 28, 16, 20)
+            navigation.setSpacing(8)
+            shell.addWidget(self.sidebar)
+            body = QWidget()
+            shell.addWidget(body, 1)
+            layout = QVBoxLayout(body)
+        else:
+            layout = QVBoxLayout(outer)
         layout.setContentsMargins(28, 22, 28, 18)
         layout.setSpacing(16)
         title = QHBoxLayout()
@@ -94,12 +111,18 @@ class MainWindow(QMainWindow):
         brand_text = QVBoxLayout()
         brand_text.setSpacing(2)
         brand_text.addWidget(text_label('Elink', 'brandTitle'))
-        brand_text.addWidget(text_label('你的设备，随时连接。', 'muted'))
+        if self.sidebar is None:
+            brand_text.addWidget(text_label('你的设备，随时连接。', 'muted'))
         title.addLayout(brand_text)
         title.addStretch()
         platform_label = 'WINDOWS' if sys.platform == 'win32' else 'LINUX'
-        title.addWidget(text_label(f'{platform_label}  /  {__version__}\nPREVIEW', 'versionLabel'), 0, Qt.AlignmentFlag.AlignTop)
-        layout.addLayout(title)
+        version = text_label(f'{platform_label}  /  {__version__}\nPREVIEW', 'versionLabel')
+        if self.sidebar is not None:
+            navigation.addLayout(title)
+            navigation.addSpacing(32)
+        else:
+            title.addWidget(version, 0, Qt.AlignmentFlag.AlignTop)
+            layout.addLayout(title)
         self.setWindowIcon(icon('link', '#2855eb'))
         self.notice_bar = QFrame()
         self.notice_bar.setObjectName('errorNotice')
@@ -120,12 +143,35 @@ class MainWindow(QMainWindow):
         self.notice_bar.hide()
         layout.addWidget(self.notice_bar)
         self.tabs = QTabWidget()
+        if self.sidebar is not None:
+            self.tabs.setObjectName('sidebarPages')
+            self.tabs.tabBar().hide()
         layout.addWidget(self.tabs, 1)
         self.make_remote()
         self.make_host()
         self.make_network()
         self.about = AboutPage(self)
         self.tabs.addTab(self.about, "关于")
+        if self.sidebar is not None:
+            self.navigation_group = QButtonGroup(self)
+            for index, glyph in enumerate(('monitor', 'settings', 'link')):
+                name = self.tabs.tabText(index)
+                entry = QPushButton(name)
+                entry.setObjectName('navigationItem')
+                entry.setAccessibleName(name)
+                entry.setCheckable(True)
+                entry.setFixedHeight(48)
+                entry.setIconSize(QSize(20, 20))
+                entry.setProperty('navigationIcon', glyph)
+                entry.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.navigation_group.addButton(entry, index)
+                self.navigation_buttons.append(entry)
+                navigation.addWidget(entry)
+            navigation.addStretch()
+            navigation.addWidget(version)
+            self.navigation_group.idClicked.connect(self.tabs.setCurrentIndex)
+            self.tabs.currentChanged.connect(self.update_navigation)
+            self.update_navigation(self.tabs.currentIndex())
         self.statusBar().showMessage("正在准备本机连接…" if auto_host else "诊断模式")
         self.statusBar().hide()
         self.load_config()
@@ -148,10 +194,15 @@ class MainWindow(QMainWindow):
             self.discovery_timer.start(10000)
             QTimer.singleShot(100, self.refresh_network)
 
+    def update_navigation(self, index):
+        for number, entry in enumerate(self.navigation_buttons):
+            entry.setChecked(number == index)
+            entry.setIcon(icon(entry.property('navigationIcon'), '#2855eb' if number == index else '#536781'))
+
     def page(self, name, scroll=False):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 20, 4, 10)
+        layout.setContentsMargins(4, 0 if self.sidebar is not None else 20, 4, 10)
         if scroll:
             area = QScrollArea()
             area.setWidgetResizable(True)
@@ -170,7 +221,12 @@ class MainWindow(QMainWindow):
         introduction.addWidget(text_label('全部设备', 'pageTitle'))
         self.discovery_state = text_label('正在寻找同局域网 / Tailscale 中的设备…', 'muted')
         introduction.addWidget(self.discovery_state)
-        heading.addLayout(introduction, 1)
+        if self.sidebar is not None:
+            layout.addLayout(introduction)
+            layout.addSpacing(12)
+            heading.addStretch()
+        else:
+            heading.addLayout(introduction, 1)
         self.refresh_button = button('刷新', self.refresh_network, icon_name='refresh-cw')
         heading.addWidget(self.refresh_button)
         self.manual_button = button('通过地址连接', self.manual_connect, icon_name='link')
@@ -224,6 +280,9 @@ class MainWindow(QMainWindow):
     def make_host(self):
         layout = self.page("设置", scroll=True)
         layout.setSpacing(0)
+        if self.sidebar is not None:
+            layout.addWidget(text_label('设置', 'pageTitle'))
+            layout.addSpacing(16)
         layout.addWidget(section_heading('常规', 'settings'))
         self.startup_enabled = QCheckBox("开机时自启动")
         self.close_to_tray = QCheckBox("关闭时最小化到托盘")

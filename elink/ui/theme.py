@@ -89,6 +89,16 @@ QTabWidget::pane { border: 0; border-top: 1px solid #dce4ef; top: -1px; }
 QTabBar::tab { padding: 13px 24px; margin-right: 6px; background: transparent; color: #6c7b90; border-bottom: 3px solid transparent; }
 QTabBar::tab:selected { color: #2855eb; border-bottom-color: #2855eb; font-weight: 600; }
 QTabBar::tab:hover { color: #2855eb; background: #edf2ff; }
+QFrame#navigationSidebar { background: #ffffff; border: 0; border-right: 1px solid #dce4ef; }
+QFrame#navigationSidebar QLabel#brandTitle { font-size: 24px; }
+QFrame#navigationSidebar QLabel#versionLabel { padding: 8px; color: #536781; }
+QPushButton#navigationItem { text-align: left; padding: 0 16px; border: 1px solid transparent;
+    min-height: 46px; max-height: 46px; border-radius: 6px;
+    background: transparent; color: #536781; font-size: 14px; }
+QPushButton#navigationItem:hover { background: #f0f4fc; color: #172b46; }
+QPushButton#navigationItem:checked { background: #eaf0ff; color: #2855eb; font-weight: 600; }
+QPushButton#navigationItem:focus { border-color: #2855eb; }
+QTabWidget#sidebarPages::pane { border: 0; top: 0; }
 QFrame#streamToolbar { background: #f0f4fa; border: 0; border-bottom: 1px solid #dce4ef; }
 QFrame#controlCenter, QFrame#mouseSubmenu { background: #ffffff; border: 1px solid #dce4ef; border-radius: 8px; }
 QFrame#controlCenter QPushButton { text-align: left; min-height: 20px; border: 1px solid transparent; border-radius: 4px; padding: 7px 10px; }
