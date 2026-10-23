@@ -140,6 +140,30 @@ def test_device_single_click_failure_and_refresh_preserves_busy(tmp_path, monkey
         close(window, app)
 
 
+def test_controller_only_card_stays_visible_and_disabled(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
+    attempts = []
+    monkeypatch.setattr(window, 'connect_remote', lambda: attempts.append(True))
+    phone = DiscoveredHost('c' * 64, 'Phone', {'192.168.0.50': '局域网'}, 'android', ('controller',))
+    host = DiscoveredHost('d' * 64, 'Linux', {'192.168.0.129': '局域网'}, 'linux')
+    try:
+        window.display_hosts([phone, host])
+        assert len(window.device_buttons) == 2
+        assert '2 台在线设备' in window.discovery_state.text()
+        for busy in (True, False):
+            window.set_busy(busy)
+            assert not window.device_buttons[0].isEnabled()
+            assert window.device_buttons[1].isEnabled() is not busy
+        window.device_buttons[0].click()
+        window.select_host(phone)
+        assert attempts == []
+        window.device_buttons[1].click()
+        assert attempts == [True]
+    finally:
+        close(window, app)
+
+
 def test_controls_apply_in_same_session_and_cancel_does_not_change_options(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(tmp_path / 'ui', auto_refresh=False, auto_host=False)

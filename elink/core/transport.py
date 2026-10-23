@@ -196,13 +196,15 @@ class HostServer:
             site = web.TCPSite(self.runner, bind, port, ssl_context=self.identity.context)
             await site.start()
             self.port = site._server.sockets[0].getsockname()[1]
+            self.scope.local_info = self.host_info
             self.watch_task = asyncio.create_task(self.watchdog())
             if bind not in ("127.0.0.1", "::1"):
                 await self.scope.refresh()
                 self.network_task = asyncio.create_task(self.refresh_scope())
                 try:
                     self.discovery_transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
-                        lambda: Responder(self.scope, self.host_info), local_addr=("0.0.0.0", DISCOVERY_PORT))
+                        lambda: Responder(self.scope, self.host_info), local_addr=("0.0.0.0", DISCOVERY_PORT),
+                        allow_broadcast=True)
                 except OSError as exc:
                     self.notify(f"自动发现端口不可用，可使用主机地址直接连接：{exc}")
         except BaseException:

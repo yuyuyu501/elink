@@ -400,7 +400,7 @@ class MainWindow(QMainWindow):
         self.busy = busy
         self.manual_button.setEnabled(not busy)
         for widget in self.device_buttons:
-            widget.setEnabled(not busy)
+            widget.setEnabled(not busy and widget.connectable)
 
     def connect_remote(self):
         if self.busy or self._closing:
@@ -588,7 +588,7 @@ class MainWindow(QMainWindow):
         self.runtime.submit(snapshot(), display, lambda _: setattr(self, "poll_pending", False))
 
     def select_host(self, host):
-        if self.busy:
+        if self.busy or not host.connectable:
             return
         self.selected_host = host
         self.address.setText(host.address)
@@ -604,9 +604,12 @@ class MainWindow(QMainWindow):
             if host.id == self.local_id:
                 continue
             routes = " / ".join(dict.fromkeys(host.routes.values()))
-            card = DeviceCard(host.name, f"{routes}  ·  {host.address}")
+            platform = {'android': 'Android', 'windows': 'Windows', 'linux': 'Linux'}.get(host.platform, '')
+            state = '仅控制端 · 不支持被控' if not host.connectable else '控制中' if host.busy else '在线'
+            card = DeviceCard(host.name, f"{platform} · {state}  ·  {routes}  ·  {host.address}",
+                              connectable=host.connectable)
             card.clicked.connect(lambda checked=False, host=host: self.select_host(host))
-            card.setEnabled(not self.busy)
+            card.setEnabled(not self.busy and host.connectable)
             self.device_buttons.append(card)
             self.devices_layout.insertWidget(self.devices_layout.count() - 1, card)
         if not self.device_buttons:
@@ -614,7 +617,7 @@ class MainWindow(QMainWindow):
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setMinimumHeight(160)
             self.devices_layout.insertWidget(0, empty)
-        self.discovery_state.setText(f"{len(self.device_buttons)} 台可连接设备 · 点击即可连接 · 自动刷新")
+        self.discovery_state.setText(f"{len(self.device_buttons)} 台在线设备 · 支持被控的设备可点击连接 · 自动刷新")
         self.device_count.setText(f'{len(self.device_buttons) + 1} 台设备')
 
     def refresh_network(self):

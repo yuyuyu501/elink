@@ -188,12 +188,13 @@ class StreamOptions(QWidget):
 
 
 class DeviceCard(QPushButton):
-    def __init__(self, name, description, parent=None):
+    def __init__(self, name, description, parent=None, *, connectable=True):
         super().__init__(parent)
         self.setObjectName('deviceCard')
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(88)
-        self.setAccessibleName(f'连接 {name}')
+        self.connectable = connectable
+        self.setAccessibleName(f'连接 {name}' if connectable else f'{name}，仅控制端')
         self.setToolTip(description)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -217,7 +218,7 @@ class DeviceCard(QPushButton):
         action_row = QHBoxLayout(action)
         action_row.setContentsMargins(14, 9, 12, 9)
         action_row.setSpacing(8)
-        arrow = QLabel('连接')
+        arrow = QLabel('连接' if connectable else '仅控制端')
         arrow.setObjectName('deviceAction')
         action_row.addWidget(arrow)
         action_row.addWidget(icon_label('chevron-right', 16, '#ffffff'))

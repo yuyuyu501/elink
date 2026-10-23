@@ -12,11 +12,6 @@ import android.widget.*
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import org.webrtc.SurfaceViewRenderer
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.net.NetworkInterface
-import java.util.UUID
 
 class MainActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -36,12 +31,21 @@ class MainActivity : Activity() {
     private var status: TextView? = null
     private var virtualPad: LinearLayout? = null
     private var errorDialog: AlertDialog? = null
+    private val discovery by lazy { DeviceDiscovery(this) }
+    private var presenceJob: Job? = null
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         config = StreamConfig(preferences.getInt("width", 1920), preferences.getInt("height", 1080),
             preferences.getInt("fps", 60), preferences.getInt("bitrate", 20))
         home()
+        discovery.start(scope)
+        presenceJob = scope.launch {
+            while (isActive) {
+                delay(10000)
+                if (session == null && !connecting && resumed && refreshJob?.isActive != true) refresh() else discovery.scan()
+            }
+        }
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
@@ -61,7 +65,7 @@ class MainActivity : Activity() {
         val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(16)) }
         scroll.addView(layout)
         layout.addView(label("Elink", 28f))
-        layout.addView(label("0.5.3 · Android Preview", 13f))
+        layout.addView(label("0.5.4 · Android Preview", 13f))
         val row = LinearLayout(this)
         row.addView(command("添加设备") { addDevice() }, LinearLayout.LayoutParams(0, dp(52), 1f))
         row.addView(command("刷新") { refresh() }, LinearLayout.LayoutParams(0, dp(52), 1f))
@@ -83,8 +87,9 @@ class MainActivity : Activity() {
         devices.removeAllViews()
         saved().sorted().forEach { address -> device(address, preferences.getString("name:$address", address) ?: address) }
     }
-    private fun device(address: String, name: String) {
+    private fun device(address: String, name: String, connectable: Boolean = true) {
         val button = command("$name\n$address") { connect(address) }
+        button.isEnabled = connectable
         button.gravity = Gravity.START or Gravity.CENTER_VERTICAL
         button.isAllCaps = false
         button.setPadding(dp(18), dp(12), dp(18), dp(12))
@@ -120,48 +125,35 @@ class MainActivity : Activity() {
         refreshJob?.cancel()
         refreshJob = scope.launch {
             status?.text = "正在查找设备…"
-            val found = withContext(Dispatchers.IO) { discover() }
-            val addresses = saved().apply { addAll(found.keys) }
-            preferences.edit().putStringSet("devices", addresses).apply()
-            devices.removeAllViews()
-            for (address in addresses.sorted()) {
-                val info = withContext(Dispatchers.IO) {
-                    runCatching { Signaling(HostAddress.parse(address), preferences).info() }.getOrNull()
-                }
-                val name = info?.optString("name") ?: found[address] ?: preferences.getString("name:$address", address)!!
-                if (info != null) preferences.edit().putString("name:$address", name).apply()
-                device(address, name + if (info?.optBoolean("busy") == true) " · 控制中" else if (info == null) " · 离线" else " · 在线")
+            val found = discovery.scan()
+            fun canonical(address: String) = runCatching { HostAddress.parse(address).authority }.getOrDefault(address)
+            val online = found.filter { it.connectable }.associateBy { canonical(it.authority) }
+            val addresses = (saved().map { canonical(it) } + online.keys).toSortedSet()
+            val checked = withContext(Dispatchers.IO) {
+                addresses.map { address -> async {
+                    address to if (address in online) null else
+                        runCatching { Signaling(HostAddress.parse(address), preferences).info() }.getOrNull()
+                } }.awaitAll().toMap()
             }
-            status?.text = "${addresses.size} 台设备"
+            ensureActive()
+            devices.removeAllViews()
+            val displayedIds = mutableSetOf<String>()
+            for (address in addresses.sorted()) {
+                val info = checked[address]
+                val peer = online[address]
+                val identity = peer?.id ?: info?.optString("host_id")?.takeIf { it.isNotEmpty() }
+                if (identity != null && !displayedIds.add(identity)) continue
+                val name = peer?.name ?: info?.optString("name") ?: preferences.getString("name:$address", address)!!
+                if (info != null) preferences.edit().putString("name:$address", name).apply()
+                device(address, name + if (peer?.busy == true || info?.optBoolean("busy") == true) " · 控制中"
+                    else if (peer == null && info == null) " · 离线" else " · 在线")
+            }
+            for (peer in found.filter { !it.connectable }) {
+                if (displayedIds.add(peer.id)) device(peer.address, "${peer.name} · 在线 · 仅控制端", false)
+            }
+            status?.text = "${devices.childCount} 台设备 · 自动刷新"
         }
     }
-
-    private fun discover(): Map<String, String> = runCatching {
-        val result = mutableMapOf<String, String>()
-        DatagramSocket().use { socket ->
-            socket.broadcast = true
-            socket.soTimeout = 250
-            val nonce = UUID.randomUUID().toString().replace("-", "")
-            val query = JSONObject().put("protocol", "elink-discovery-v2").put("nonce", nonce).toString().toByteArray()
-            val broadcasts = NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }
-                .flatMap { it.interfaceAddresses }.mapNotNull { it.broadcast }.toMutableList()
-            broadcasts.add(InetAddress.getByName("255.255.255.255"))
-            broadcasts.distinct().forEach { address -> runCatching { socket.send(DatagramPacket(query, query.size, address, 49201)) } }
-            val deadline = android.os.SystemClock.elapsedRealtime() + 1000
-            while (android.os.SystemClock.elapsedRealtime() < deadline) {
-                val packet = DatagramPacket(ByteArray(4096), 4096)
-                runCatching {
-                    socket.receive(packet)
-                    val info = JSONObject(String(packet.data, 0, packet.length, Charsets.UTF_8))
-                    if (info.optString("nonce") == nonce && info.optString("protocol") == "elink" && info.optInt("version") == 2) {
-                        val port = info.optInt("port", 49200)
-                        if (port in 1024..65535) result["${packet.address.hostAddress}:$port"] = info.optString("name", packet.address.hostAddress ?: "Elink")
-                    }
-                }
-            }
-        }
-        result
-    }.getOrDefault(emptyMap())
 
     private fun connect(address: String) {
         if (connecting || session != null) return
@@ -372,8 +364,9 @@ class MainActivity : Activity() {
     override fun onPause() { input?.releaseInput(); super.onPause() }
     override fun onResume() {
         super.onResume(); resumed = true
-        if (session?.connected == true) session?.focus(true) else if (::devices.isInitialized) refresh()
+        if (session?.connected == true) session?.focus(true)
+        else if (session == null && !connecting && ::devices.isInitialized) refresh()
     }
     override fun onStop() { resumed = false; if (session != null && !isChangingConfigurations) disconnect(); super.onStop() }
-    override fun onDestroy() { refreshJob?.cancel(); connectJob?.cancel(); input?.releaseInput(); session?.dispose(); scope.cancel(); super.onDestroy() }
+    override fun onDestroy() { discovery.close(); presenceJob?.cancel(); refreshJob?.cancel(); connectJob?.cancel(); input?.releaseInput(); session?.dispose(); scope.cancel(); super.onDestroy() }
 }

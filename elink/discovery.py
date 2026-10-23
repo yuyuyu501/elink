@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import secrets
 import socket
@@ -20,6 +21,8 @@ from .network import TailnetStatus, tailnet_status, tailscale_path
 
 DISCOVERY_PORT = 49201
 PROTOCOL = 'elink-discovery-v2'
+PRESENCE_TTL = 35.0
+log = logging.getLogger(__name__)
 
 
 def machine_id():
@@ -44,7 +47,10 @@ def lan_interfaces():
     if os.name != 'nt':
         import psutil
         interfaces = []
+        states = psutil.net_if_stats()
         for name, addresses in psutil.net_if_addrs().items():
+            if name not in states or not states[name].isup:
+                continue
             for row in addresses:
                 if row.family != socket.AF_INET or not row.netmask:
                     continue
@@ -100,6 +106,28 @@ class NetworkScope:
         self.tail_addresses = set()
         self.refresh_lock = asyncio.Lock()
         self.updated = 0.0
+        self.local_info = None
+        self.presence = {}
+
+    def remember(self, info, ip):
+        hosts = {}
+        add_host(hosts, info, ip, self)
+        if hosts:
+            key = (next(iter(hosts)), str(address_ip(ip)))
+            if len(self.presence) >= 512:
+                self.online()
+            if key in self.presence or len(self.presence) < 512:
+                self.presence[key] = (time.monotonic(), presence_info(info))
+
+    def online(self, local_id=''):
+        hosts = {}
+        now = time.monotonic()
+        for key, (seen, info) in list(self.presence.items()):
+            if now - seen > PRESENCE_TTL or not self.allows(key[1]):
+                del self.presence[key]
+            else:
+                add_host(hosts, info, key[1], self, local_id)
+        return hosts
 
     def allows(self, address):
         try:
@@ -134,7 +162,7 @@ class Responder(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data, address):
-        if len(data) > 512 or not self.scope.allows(address[0]):
+        if len(data) > 2048 or not self.scope.allows(address[0]):
             return
         now = time.monotonic()
         if now - self.window >= 1:
@@ -147,9 +175,21 @@ class Responder(asyncio.DatagramProtocol):
             if query.get('protocol') != PROTOCOL or not isinstance(nonce, str) or len(nonce) != 32:
                 return
             self.count += 1
-            self.transport.sendto(json.dumps(dict(self.info(), nonce=nonce)).encode(), address)
+            self.scope.remember(query.get('device'), address[0])
+            self.transport.sendto(json.dumps(dict(presence_info(self.info()), nonce=nonce)).encode(), address)
         except (ValueError, TypeError, KeyError, OSError):
             pass
+
+    def error_received(self, exc):
+        log.warning('Discovery UDP responder failed: %s', exc)
+
+
+def presence_info(info):
+    """Keep LAN datagrams small and omit session/certificate data."""
+    result = {key: info[key] for key in ('protocol', 'version', 'host_id', 'name', 'port', 'busy') if key in info}
+    caps = info.get('capabilities', {})
+    result['capabilities'] = {key: caps[key] for key in ('platform', 'roles') if key in caps}
+    return result
 
 
 @dataclass
@@ -157,6 +197,13 @@ class DiscoveredHost:
     id: str
     name: str
     routes: dict[str, str] = field(default_factory=dict)
+    platform: str = ''
+    roles: tuple[str, ...] = ('controller', 'host')
+    busy: bool = False
+
+    @property
+    def connectable(self):
+        return 'host' in self.roles
 
     @property
     def address(self):
@@ -167,22 +214,37 @@ def add_host(hosts, info, ip, scope, local_id=''):
     if not scope.allows(ip) or not isinstance(info, dict):
         return
     identifier, name, port = info.get('host_id'), info.get('name'), info.get('port')
+    caps = info.get('capabilities', {})
+    if not isinstance(caps, dict):
+        return
+    roles = caps.get('roles', ['controller', 'host'])
+    if (not isinstance(roles, list) or not roles or len(roles) > 2
+            or any(role not in ('controller', 'host') for role in roles)):
+        return
+    controller_only = 'host' not in roles
     if (info.get('protocol') != 'elink' or info.get('version') != 2
             or not isinstance(identifier, str) or len(identifier) != 64
             or any(c not in '0123456789abcdef' for c in identifier) or identifier == local_id
             or not isinstance(name, str) or not 0 < len(name) <= 80
-            or type(port) is not int or not 1024 <= port <= 65535):
+            or type(port) is not int
+            or (port != 0 if controller_only else not 1024 <= port <= 65535)):
         return
-    endpoint = Endpoint(str(address_ip(ip)), port)
+    address = str(address_ip(ip)) if controller_only else Endpoint(str(address_ip(ip)), port).authority
     host = hosts.setdefault(identifier, DiscoveredHost(identifier, name))
-    host.routes[endpoint.authority] = 'Tailscale' if str(address_ip(ip)) in scope.tail_addresses else '局域网'
+    host.name, host.roles = name, tuple(dict.fromkeys(roles))
+    host.platform = caps.get('platform', '') if isinstance(caps.get('platform', ''), str) else ''
+    host.busy = info.get('busy') is True
+    host.routes[address] = 'Tailscale' if str(address_ip(ip)) in scope.tail_addresses else '局域网'
 
 
 async def discover(scope, local_id='', manual_address='', *, duration=1.0, extra_targets=()):
     await scope.refresh()
     hosts, transports = {}, []
     nonce = secrets.token_hex(16)
-    query = json.dumps(dict(protocol=PROTOCOL, nonce=nonce)).encode()
+    payload = dict(protocol=PROTOCOL, nonce=nonce)
+    if scope.local_info:
+        payload['device'] = presence_info(scope.local_info())
+    query = json.dumps(payload).encode()
     class Collector(asyncio.DatagramProtocol):
         def datagram_received(self, data, address):
             if len(data) > 2048:
@@ -190,6 +252,7 @@ async def discover(scope, local_id='', manual_address='', *, duration=1.0, extra
             try:
                 info = json.loads(data)
                 if isinstance(info, dict) and info.get('nonce') == nonce:
+                    scope.remember(info, address[0])
                     add_host(hosts, info, address[0], scope, local_id)
             except (ValueError, TypeError):
                 pass
@@ -198,6 +261,10 @@ async def discover(scope, local_id='', manual_address='', *, duration=1.0, extra
         targets = [(str(i.ip), [(str(i.network.broadcast_address), DISCOVERY_PORT)])
                    for i in scope.interfaces if i.network.prefixlen < 31]
         unicast = [(p.address, DISCOVERY_PORT) for p in scope.tailnet.peers if p.online and ':' not in p.address]
+        # A peer that heard our broadcast can introduce itself even if broadcasts
+        # in the opposite direction are filtered by Wi-Fi/AP or interface routing.
+        scope.online(local_id)
+        unicast += [(ip, DISCOVERY_PORT) for identifier, ip in scope.presence if identifier != local_id]
         targets.append(('0.0.0.0', unicast + list(extra_targets)))
         for bind, destinations in targets:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -207,11 +274,13 @@ async def discover(scope, local_id='', manual_address='', *, duration=1.0, extra
                 sock.bind((bind, 0))
                 transport, _ = await loop.create_datagram_endpoint(Collector, sock=sock)
             except OSError:
+                log.warning('Cannot bind discovery interface %s', bind, exc_info=True)
                 sock.close()
                 continue
             transports.append(transport)
-            for destination in destinations:
+            for destination in set(destinations):
                 transport.sendto(query, destination)
+        log.debug('Discovery interfaces=%s targets=%s', [str(i) for i in scope.interfaces], targets)
         await asyncio.sleep(duration)
     finally:
         for transport in transports:
@@ -234,8 +303,11 @@ async def discover(scope, local_id='', manual_address='', *, duration=1.0, extra
                     endpoint = Endpoint(ip, endpoint.port)
                     fp = await fingerprint(endpoint)
                     info = await request(endpoint, fp, 'GET', '/v1/info')
+                    scope.remember(info, ip)
                     add_host(hosts, info, ip, scope, local_id)
             except (Exception, asyncio.TimeoutError):
                 pass
     await asyncio.gather(*(probe(a) for a in sorted(candidates - known)[:128]))
+    hosts = scope.online(local_id)
+    log.debug('Discovery online=%s', [(h.name, h.platform, h.roles, list(h.routes)) for h in hosts.values()])
     return sorted(hosts.values(), key=lambda h: (h.name.casefold(), h.id))
