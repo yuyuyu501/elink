@@ -115,6 +115,8 @@ def test_device_single_click_failure_and_refresh_preserves_busy(tmp_path, monkey
     host = DiscoveredHost('a' * 64, '游戏电脑', {'127.0.0.1:49200': '局域网'})
     window.show()
     try:
+        removed_actions = {'刷新', '刷新设备与地址', '通过地址连接', '添加设备'}
+        assert removed_actions.isdisjoint(control.text() for control in window.findChildren(QPushButton))
         window.display_hosts([host])
         app.processEvents()
         assert window.device_buttons[0].height() >= 88

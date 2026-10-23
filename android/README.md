@@ -1,8 +1,9 @@
 # Android Controller Preview
 
 Minimum Android 11 (API 30), arm64-v8a. This APK is a controller; it does not
-share the Android screen as a host. Connect to Elink 0.5.3 on the same reachable
-LAN or use a manually entered Tailscale IP/MagicDNS name. Tailscale is separate.
+share the Android screen as a host. Devices are discovered automatically on
+reachable local networks. Tailscale is separate; no manual address-entry or
+refresh button is required.
 
 Uses Kotlin native Views, libwebrtc H.264/Opus and SurfaceViewRenderer/EGL.
 Quality settings are filtered against the hardware decoder's declared size/rate

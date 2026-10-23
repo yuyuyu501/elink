@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.yuyuyu501.elink"
         minSdk = 30
         targetSdk = 35
-        versionCode = 505
-        versionName = "0.5.5"
+        versionCode = 506
+        versionName = "0.5.6"
         ndk { abiFilters += "arm64-v8a" }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

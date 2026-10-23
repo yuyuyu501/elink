@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f7fc">
+  <title>Elink Android 预览</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #f4f7fc;
+      --surface: #ffffff;
+      --ink: #142b49;
+      --muted: #627792;
+      --blue: #2f63f4;
+      --blue-soft: #edf3ff;
+      --line: #e2e9f4;
+      --green: #09704b;
+      --shadow: 0 10px 26px rgba(28, 57, 99, .08);
+      font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      min-width: 320px;
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background: #eaf0f8;
+      color: var(--ink);
+    }
+
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 3px solid #84a8ff;
+      outline-offset: 2px;
+    }
+
+    .phone {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      width: min(410px, 100vw);
+      height: min(900px, 100dvh);
+      min-height: 620px;
+      overflow: hidden;
+      background: var(--canvas);
+      border: 8px solid #172b47;
+      border-radius: 38px;
+      box-shadow: 0 28px 80px rgba(21, 40, 67, .22);
+    }
+
+    .statusbar {
+      height: 28px;
+      flex: 0 0 28px;
+      padding: 2px 17px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #344a66;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .status-icons { display: flex; align-items: center; gap: 7px; }
+    .status-icons svg { width: 14px; height: 14px; stroke-width: 2; }
+    .battery {
+      width: 22px;
+      height: 11px;
+      position: relative;
+      border: 1.5px solid #536983;
+      border-radius: 3px;
+    }
+    .battery::before {
+      content: "";
+      position: absolute;
+      inset: 2px 5px 2px 2px;
+      background: var(--green);
+      border-radius: 1px;
+    }
+    .battery::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      right: -4px;
+      width: 2px;
+      height: 4px;
+      background: #536983;
+      border-radius: 0 2px 2px 0;
+    }
+
+    .pages {
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+      padding: 4px 20px 22px;
+    }
+    .pages::-webkit-scrollbar { display: none; }
+    .page { display: none; }
+    .page.active { display: block; }
+
+    .page-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 52px;
+      margin-bottom: 4px;
+    }
+    h1 {
+      flex: 1;
+      margin: 0;
+      font-size: 23px;
+      line-height: 1.3;
+      font-weight: 720;
+      letter-spacing: 0;
+    }
+    .intro { margin: 0 0 17px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+
+    .button {
+      min-height: 46px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 14px;
+      border: 1px solid transparent;
+      border-radius: 24px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 650;
+      transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+    }
+    .button:hover { background: #e3ecff; }
+    .button:active { transform: scale(.98); }
+    .button svg { width: 18px; height: 18px; }
+    .button.icon-only {
+      width: 46px;
+      min-width: 46px;
+      padding: 0;
+      background: var(--surface);
+      border-color: var(--line);
+      color: var(--muted);
+    }
+
+    .status {
+      min-height: 31px;
+      padding: 2px 0 9px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .card {
+      padding: 16px;
+      margin-bottom: 12px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .device-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 88px;
+      padding: 14px 12px;
+      border-color: #dce4ef;
+      border-radius: 8px;
+      box-shadow: none;
+    }
+    .device-card.local { background: #f0f4fa; }
+    .device-icon {
+      width: 40px;
+      height: 40px;
+      flex: 0 0 40px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      color: white;
+      background: var(--blue);
+    }
+    .local .device-icon { color: var(--muted); background: transparent; }
+    .icon-tile {
+      width: 48px;
+      height: 48px;
+      flex: 0 0 48px;
+      display: grid;
+      place-items: center;
+      border-radius: 15px;
+      color: var(--blue);
+      background: var(--blue-soft);
+    }
+    .device-icon svg, .icon-tile svg { width: 24px; height: 24px; }
+    .device-meta { min-width: 0; flex: 1; }
+    .device-name { margin: 0 0 3px; font-size: 15px; line-height: 1.4; font-weight: 700; overflow-wrap: anywhere; }
+    .device-detail, .device-address { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .device-address { margin-top: 3px; font-size: 11px; }
+    .device-action {
+      flex: 0 0 auto;
+      min-height: 48px;
+      border: 0;
+      border-radius: 6px;
+      background: var(--blue);
+      color: white;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 0 12px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .device-action svg { width: 16px; height: 16px; }
+    .device-action:disabled { background: var(--blue-soft); color: var(--muted); cursor: default; }
+
+    .section-card { margin-bottom: 12px; padding: 16px; }
+    .section-title { display: flex; align-items: center; gap: 12px; }
+    .section-title .icon-tile { width: 44px; height: 44px; flex-basis: 44px; }
+    .section-title h2 { flex: 1; margin: 0; font-size: 16px; line-height: 1.35; font-weight: 700; }
+    .section-title .chevron { width: 20px; height: 20px; color: var(--muted); }
+    .quality-card {
+      display: block;
+      width: 100%;
+      margin: 0 0 12px;
+      color: var(--ink);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .quality-card:hover { border-color: #c9d8f5; }
+    .quality-values { display: grid; grid-template-columns: 1.2fr .9fr 1fr; gap: 7px; padding-top: 14px; }
+    .metric {
+      min-width: 0;
+      padding: 9px 3px;
+      border-radius: 12px;
+      background: var(--blue-soft);
+      text-align: center;
+    }
+    .metric span { display: block; color: var(--muted); font-size: 11px; line-height: 1.35; }
+    .metric strong {
+      display: block;
+      margin-top: 3px;
+      color: var(--blue);
+      font-size: 12px;
+      line-height: 1.35;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .setting-line { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 12px; }
+    .setting-line strong { font-size: 15px; }
+    .helper { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .switch {
+      position: relative;
+      width: 50px;
+      height: 30px;
+      flex: 0 0 50px;
+      appearance: none;
+      border: 0;
+      border-radius: 20px;
+      background: #c9d2df;
+      cursor: pointer;
+      transition: background-color 160ms ease;
+    }
+    .switch::after {
+      content: "";
+      position: absolute;
+      left: 3px;
+      top: 3px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: white;
+      box-shadow: 0 1px 3px rgba(18, 39, 70, .25);
+      transition: transform 160ms ease;
+    }
+    .switch:checked { background: var(--blue); }
+    .switch:checked::after { transform: translateX(20px); }
+    .switch:focus-visible { outline: 3px solid #84a8ff; outline-offset: 2px; }
+    .address-label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 12px; }
+    .address-list {
+      margin: 0;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: var(--blue-soft);
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+      user-select: text;
+    }
+
+    .about-identity { display: flex; align-items: center; gap: 14px; padding: 17px; }
+    .about-logo {
+      width: 50px;
+      height: 50px;
+      flex: 0 0 50px;
+      display: grid;
+      place-items: center;
+      border-radius: 15px;
+      background: var(--blue);
+      color: white;
+    }
+    .about-logo svg { width: 29px; height: 29px; }
+    .about-identity strong { display: block; margin-bottom: 3px; font-size: 19px; }
+    .about-identity span { color: var(--muted); font-size: 13px; }
+    .subhead { display: flex; align-items: center; gap: 10px; margin: 17px 2px 7px; font-size: 15px; font-weight: 700; }
+    .subhead svg { width: 19px; height: 19px; color: var(--muted); }
+    .description { margin: 0 2px 15px; color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .action-row {
+      width: 100%;
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 8px;
+      padding: 7px 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      color: var(--ink);
+      text-align: left;
+      text-decoration: none;
+      cursor: pointer;
+      font-size: 15px;
+      font-weight: 620;
+      transition: background-color 140ms ease, border-color 140ms ease;
+    }
+    .action-row:hover { background: #fbfcff; border-color: #cad8f2; }
+    .action-icon {
+      width: 36px;
+      height: 36px;
+      flex: 0 0 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+    .action-icon svg { width: 19px; height: 19px; }
+    .action-row .arrow { width: 18px; height: 18px; margin-left: auto; color: var(--muted); }
+    .diagnostic-note { margin: 3px 2px 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+
+    .bottom-nav {
+      flex: 0 0 auto;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      margin: 0;
+      padding: 6px;
+      border-radius: 0;
+      background: var(--surface);
+      box-shadow: 0 4px 18px rgba(28, 57, 99, .08);
+    }
+    .tab {
+      min-width: 0;
+      min-height: 70px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      border: 0;
+      border-radius: 18px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      transition: background-color 140ms ease, color 140ms ease;
+    }
+    .tab svg { width: 23px; height: 23px; }
+    .tab.active { background: var(--blue-soft); color: var(--blue); }
+    .tab:hover:not(.active) { background: #f7f9fd; }
+    .gesture {
+      height: 10px;
+      flex: 0 0 10px;
+      display: grid;
+      place-items: start center;
+      padding-bottom: env(safe-area-inset-bottom);
+      background: var(--surface);
+    }
+    .gesture::after { content: ""; width: 104px; height: 4px; border-radius: 5px; background: #8290a2; }
+    .toast {
+      position: absolute;
+      z-index: 3;
+      left: 50%;
+      bottom: 104px;
+      max-width: calc(100% - 40px);
+      padding: 11px 15px;
+      border-radius: 12px;
+      background: #18304f;
+      color: white;
+      font-size: 13px;
+      line-height: 1.4;
+      text-align: center;
+      opacity: 0;
+      transform: translate(-50%, 8px);
+      pointer-events: none;
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+    .toast.visible { opacity: 1; transform: translate(-50%, 0); }
+    dialog {
+      width: min(350px, calc(100% - 36px));
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      color: var(--ink);
+      box-shadow: 0 24px 70px rgba(15, 35, 65, .25);
+    }
+    dialog::backdrop { background: rgba(12, 29, 53, .38); }
+    .dialog-inner { padding: 20px; }
+    .dialog-inner h2 { margin: 0 0 16px; font-size: 19px; }
+    .dialog-inner label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 13px; }
+    .dialog-inner input, .dialog-inner select {
+      width: 100%;
+      min-height: 44px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: white;
+      color: var(--ink);
+    }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+    .dialog-actions .plain { background: #f2f5fa; color: var(--muted); }
+
+    @media (max-width: 480px) {
+      body { min-height: 100dvh; display: block; background: var(--canvas); }
+      .phone {
+        width: 100%;
+        height: 100dvh;
+        min-height: 600px;
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+        padding-top: env(safe-area-inset-top);
+      }
+      .gesture { padding-bottom: max(4px, env(safe-area-inset-bottom)); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1"/><path d="M8 21h8M12 17v4"/></symbol>
+    <symbol id="refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></symbol>
+    <symbol id="sliders" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16M8 4v4M15 10v4M10 16v4"/></symbol>
+    <symbol id="touch" viewBox="0 0 24 24"><path d="M8 11V5a2 2 0 0 1 4 0v5M12 9a2 2 0 0 1 4 0v2M16 11a2 2 0 0 1 4 0v5a6 6 0 0 1-6 6h-2a6 6 0 0 1-5.2-3L4 15a2 2 0 0 1 3-2l2 2"/></symbol>
+    <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></symbol>
+    <symbol id="chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="settings" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16M8 4v4M15 10v4M10 16v4"/></symbol>
+    <symbol id="file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h8"/></symbol>
+    <symbol id="home" viewBox="0 0 24 24"><path d="m3 10.5 9-7.5 9 7.5M5 9v12h14V9M9 21v-7h6v7"/></symbol>
+    <symbol id="activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  </svg>
+
+  <main class="phone" aria-label="Elink Android 应用预览">
+    <div class="statusbar">
+      <span>9:41</span>
+      <div class="status-icons" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 9a14 14 0 0 1 18 0M6 12a9 9 0 0 1 12 0M9 15a4 4 0 0 1 6 0M12 19h.01"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 19V5M9 19V9M14 19V3M19 19v-7"/></svg>
+        <span class="battery"></span>
+      </div>
+    </div>
+    <div class="pages">
+      <section class="page active" id="page-devices" aria-labelledby="title-devices">
+        <div class="page-head">
+          <h1 id="title-devices">设备列表</h1>
+        </div>
+        <div class="status" id="device-status" role="status">2 台在线设备 · 自动发现</div>
+
+        <article class="card device-card local">
+          <div class="device-icon" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#monitor"/></svg></div>
+          <div class="device-meta">
+            <h2 class="device-name">M2012K11AC · 本机</h2>
+            <p class="device-detail">Android · 在线 · 仅控制端</p>
+            <p class="device-address">192.168.0.115 · 10.19.105.195</p>
+          </div>
+        </article>
+
+        <article class="card device-card">
+          <div class="device-icon" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#monitor"/></svg></div>
+          <div class="device-meta">
+            <h2 class="device-name">游戏电脑</h2>
+            <p class="device-detail">Windows · 在线</p>
+            <p class="device-address">192.168.0.91</p>
+          </div>
+          <button class="device-action" type="button" data-toast="网页预览不建立实际连接">连接<svg fill="none" stroke="currentColor" stroke-width="2"><use href="#chevron"/></svg></button>
+        </article>
+      </section>
+
+      <section class="page" id="page-settings" aria-labelledby="title-settings">
+        <h1 id="title-settings">设置</h1>
+        <p class="intro">个性化配置您的设备</p>
+
+        <button class="card section-card quality-card" id="quality-open" type="button" aria-label="打开画质设置">
+          <div class="section-title">
+            <span class="icon-tile" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#sliders"/></svg></span>
+            <h2>画质</h2>
+            <svg class="chevron" fill="none" stroke="currentColor" stroke-width="2"><use href="#chevron"/></svg>
+          </div>
+          <div class="quality-values">
+            <div class="metric"><span>分辨率</span><strong id="resolution-value">1920×1080</strong></div>
+            <div class="metric"><span>帧率</span><strong id="fps-value">60 FPS</strong></div>
+            <div class="metric"><span>码率</span><strong id="bitrate-value">20 Mbps</strong></div>
+          </div>
+        </button>
+
+        <section class="card section-card">
+          <div class="section-title">
+            <span class="icon-tile" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#touch"/></svg></span>
+            <h2>输入</h2>
+          </div>
+          <div class="setting-line">
+            <strong>直接触控</strong>
+            <input class="switch" id="touch-switch" type="checkbox" role="switch" aria-label="直接触控" checked>
+          </div>
+          <p class="helper">关闭后使用触控板模式。连接后的控制中心提供游戏鼠标、键盘、剪贴板和虚拟手柄。</p>
+        </section>
+
+        <section class="card section-card">
+          <div class="section-title">
+            <span class="icon-tile" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#globe"/></svg></span>
+            <h2>网络</h2>
+          </div>
+          <div class="setting-line"><strong>自动发现同一局域网设备</strong></div>
+          <span class="address-label">本机地址</span>
+          <p class="address-list">192.168.0.115<br>10.19.105.195</p>
+        </section>
+      </section>
+
+      <section class="page" id="page-about" aria-labelledby="title-about">
+        <h1 id="title-about">关于 Elink</h1>
+        <p class="intro">让远程连接更简单</p>
+
+        <section class="card about-identity">
+          <div class="about-logo" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#monitor"/></svg></div>
+          <div><strong>Elink</strong><span>0.5.6 · Android Preview</span></div>
+        </section>
+
+        <h2 class="subhead"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#file"/></svg>版本说明</h2>
+        <p class="description">Android 当前支持控制 Windows 和 Linux；本机作为仅控制端显示。</p>
+
+        <button class="action-row" type="button" data-toast="网页预览不连接更新服务">
+          <span class="action-icon"><svg fill="none" stroke="currentColor" stroke-width="2"><use href="#refresh"/></svg></span>
+          <span>检查更新</span><svg class="arrow" fill="none" stroke="currentColor" stroke-width="2"><use href="#chevron"/></svg>
+        </button>
+        <a class="action-row" href="https://github.com/yuyuyu501/elink" target="_blank" rel="noreferrer">
+          <span class="action-icon"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#home"/></svg></span>
+          <span>项目主页</span><svg class="arrow" fill="none" stroke="currentColor" stroke-width="2"><use href="#chevron"/></svg>
+        </a>
+
+        <h2 class="subhead"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#activity"/></svg>诊断</h2>
+        <button class="action-row" type="button" data-toast="诊断日志导出在 Android 应用中可用">
+          <span class="action-icon"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#file"/></svg></span>
+          <span>导出诊断日志</span><svg class="arrow" fill="none" stroke="currentColor" stroke-width="2"><use href="#chevron"/></svg>
+        </button>
+        <p class="diagnostic-note">日志包含设备地址、发现结果和错误详情，可用于排查设备未显示或连接失败。</p>
+      </section>
+    </div>
+
+    <nav class="bottom-nav" aria-label="主导航">
+      <button class="tab active" type="button" data-page="devices" aria-current="page"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#monitor"/></svg><span>设备</span></button>
+      <button class="tab" type="button" data-page="settings"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#settings"/></svg><span>设置</span></button>
+      <button class="tab" type="button" data-page="about"><svg fill="none" stroke="currentColor" stroke-width="1.8"><use href="#info"/></svg><span>关于</span></button>
+    </nav>
+    <div class="gesture" aria-hidden="true"></div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </main>
+
+  <dialog id="quality-dialog">
+    <form class="dialog-inner" method="dialog" id="quality-form">
+      <h2>画质设置</h2>
+      <label for="resolution">分辨率</label>
+      <select id="resolution"><option>1920×1080</option><option>1280×720</option><option>2560×1440</option></select>
+      <label for="fps">帧率</label>
+      <select id="fps"><option>60 FPS</option><option>90 FPS</option><option>120 FPS</option></select>
+      <label for="bitrate">码率 (Mbps)</label>
+      <input id="bitrate" inputmode="numeric" value="20">
+      <div class="dialog-actions">
+        <button class="button plain" value="cancel">取消</button>
+        <button class="button" id="quality-submit" value="default">应用</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    const pages = [...document.querySelectorAll(".page")];
+    const tabs = [...document.querySelectorAll(".tab")];
+    const toast = document.querySelector("#toast");
+    let toastTimer;
+
+    function notify(message) {
+      toast.textContent = message;
+      toast.classList.add("visible");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("visible"), 2600);
+    }
+
+    tabs.forEach(tab => tab.addEventListener("click", () => {
+      const name = tab.dataset.page;
+      pages.forEach(page => page.classList.toggle("active", page.id === `page-${name}`));
+      tabs.forEach(item => {
+        const active = item === tab;
+        item.classList.toggle("active", active);
+        if (active) item.setAttribute("aria-current", "page");
+        else item.removeAttribute("aria-current");
+      });
+      document.querySelector(".pages").scrollTop = 0;
+    }));
+
+    document.querySelector("#quality-open").addEventListener("click", () => document.querySelector("#quality-dialog").showModal());
+    document.querySelector("#quality-form").addEventListener("submit", event => {
+      event.preventDefault();
+      const resolution = document.querySelector("#resolution").value;
+      const fps = document.querySelector("#fps").value;
+      const bitrate = document.querySelector("#bitrate").value;
+      document.querySelector("#resolution-value").textContent = resolution;
+      document.querySelector("#fps-value").textContent = fps;
+      document.querySelector("#bitrate-value").textContent = `${bitrate} Mbps`;
+      document.querySelector("#quality-dialog").close();
+      notify("预览画质已更新");
+    });
+
+    document.querySelectorAll("[data-toast]").forEach(button => {
+      button.addEventListener("click", () => notify(button.dataset.toast));
+    });
+  </script>
+</body>
+</html>

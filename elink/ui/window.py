@@ -25,7 +25,7 @@ from .. import startup
 from .player import Player
 from .about import AboutPage
 from .controls import StreamOptions, DeviceCard, OptionRow, section_heading
-from .chrome import window_icon, MainTitleBar, MAIN_TITLE_HEIGHT, make_resize_handles, place_resize_handles
+from .chrome import window_icon, MainTitleBar, MAIN_TITLE_HEIGHT, MAIN_WINDOW_SIZE, MAIN_CORNER_RADIUS
 from .icons import icon, icon_label
 from .. import __version__
 
@@ -79,7 +79,6 @@ class MainWindow(QMainWindow):
         self.poll_pending = False
         self.config_path = root / "desktop-v3.json"
         self.config_error = False
-        self.resize_handles = []
         self.titlebar = None
         self.setWindowTitle(f"Elink · {__version__}")
         if sys.platform == 'win32':
@@ -87,8 +86,10 @@ class MainWindow(QMainWindow):
             self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
             self.titlebar = MainTitleBar(self)
             self.setMenuWidget(self.titlebar)
-        self.resize(1040, 760)
-        self.setMinimumSize(900, 680)
+            self.setFixedSize(*MAIN_WINDOW_SIZE)
+        else:
+            self.resize(1040, 760)
+            self.setMinimumSize(900, 680)
         outer = QWidget()
         self.setCentralWidget(outer)
         self.sidebar = None
@@ -183,7 +184,6 @@ class MainWindow(QMainWindow):
             self.navigation_group.idClicked.connect(self.tabs.setCurrentIndex)
             self.tabs.currentChanged.connect(self.update_navigation)
             self.update_navigation(self.tabs.currentIndex())
-            self.resize_handles = make_resize_handles(self)
         self.statusBar().showMessage("正在准备本机连接…" if auto_host else "诊断模式")
         self.statusBar().hide()
         self.load_config()
@@ -209,21 +209,15 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_window_corners()
-        if self.resize_handles:
-            place_resize_handles(self)
 
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange and self.titlebar is not None:
             self.update_window_corners()
-            self.titlebar.update_state()
-            place_resize_handles(self)
 
     def showEvent(self, event):
         super().showEvent(event)
         self.update_window_corners()
-        if self.resize_handles:
-            place_resize_handles(self)
 
     def update_window_corners(self):
         if sys.platform != 'win32':
@@ -231,7 +225,7 @@ class MainWindow(QMainWindow):
         if self.isMaximized() or self.isFullScreen():
             self.clearMask()
             return
-        radius = MAIN_TITLE_HEIGHT / 4
+        radius = MAIN_CORNER_RADIUS
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), radius, radius)
         self.setMask(QRegion(path.toFillPolygon().toPolygon()))
@@ -256,26 +250,18 @@ class MainWindow(QMainWindow):
 
     def make_remote(self):
         layout = self.page("设备")
-        heading = QHBoxLayout()
-        heading.setSpacing(10)
         introduction = QVBoxLayout()
         introduction.setSpacing(5)
         introduction.addWidget(text_label('全部设备', 'pageTitle'))
         self.discovery_state = text_label('正在寻找同局域网 / Tailscale 中的设备…', 'muted')
         introduction.addWidget(self.discovery_state)
-        if self.sidebar is not None:
-            layout.addLayout(introduction)
-            layout.addSpacing(12)
-            heading.addStretch()
-        else:
-            heading.addLayout(introduction, 1)
-        self.refresh_button = button('刷新', self.refresh_network, icon_name='refresh-cw')
-        heading.addWidget(self.refresh_button)
-        self.manual_button = button('通过地址连接', self.manual_connect, icon_name='link')
-        heading.addWidget(self.manual_button)
+        layout.addLayout(introduction)
+        layout.addSpacing(12)
         self.network_button = button('网络诊断', self.show_network_diagnostics, icon_name='activity')
-        heading.addWidget(self.network_button)
-        layout.addLayout(heading)
+        if self.sidebar is not None:
+            layout.addWidget(self.network_button, alignment=Qt.AlignmentFlag.AlignRight)
+        else:
+            layout.addWidget(self.network_button, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addSpacing(12)
         self.device_count = text_label('', 'muted')
         layout.addWidget(section_heading('设备列表', 'monitor', self.device_count))
@@ -310,14 +296,6 @@ class MainWindow(QMainWindow):
         self.display_hosts([])
         self.address = QLineEdit(self)
         self.address.hide()  # Persist the last/manual endpoint without a permanent form.
-
-    def manual_connect(self):
-        from PySide6.QtWidgets import QInputDialog
-        address, accepted = QInputDialog.getText(self, "通过地址连接", "IP 或主机名（可附端口）", text=self.address.text())
-        if accepted and address.strip():
-            self.selected_host = None
-            self.address.setText(address.strip())
-            self.connect_remote()
 
     def make_host(self):
         layout = self.page("设置", scroll=True)
@@ -443,7 +421,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 18, 20, 18)
         layout.addWidget(text_label("无需自建服务器。有可达地址时直接连接；没有直连路径时使用外部 Tailscale。当前未提供独立的公网打洞或中继服务。", "notice"))
         row = QHBoxLayout()
-        row.addWidget(button("刷新设备与地址", self.refresh_network))
         row.addWidget(button("探测当前主机路径", self.probe_route))
         row.addWidget(button("检测 UDP / NAT", self.check_nat))
         row.addStretch()
@@ -467,6 +444,7 @@ class MainWindow(QMainWindow):
     def show_network_diagnostics(self):
         if self._closing:
             return
+        self.refresh_network()
         self.network_dialog.show()
         self.network_dialog.raise_()
         self.network_dialog.activateWindow()
@@ -499,7 +477,6 @@ class MainWindow(QMainWindow):
 
     def set_busy(self, busy):
         self.busy = busy
-        self.manual_button.setEnabled(not busy)
         for widget in self.device_buttons:
             widget.setEnabled(not busy and widget.connectable)
 
@@ -569,7 +546,7 @@ class MainWindow(QMainWindow):
     def connect_failed(self, message):
         self.resume_view = None
         self.set_busy(False)
-        self.report_error(f"连接失败：{message or '连接超时或对端未响应'}\n请确认对端 Elink 正在运行、设备可以互访，或刷新设备后重试。")
+        self.report_error(f"连接失败：{message or '连接超时或对端未响应'}\n请确认对端 Elink 正在运行且设备可以互访；设备列表会自动更新。")
 
     def disconnect_remote(self):
         self.resume_view = None
@@ -725,7 +702,6 @@ class MainWindow(QMainWindow):
         if self.discovery_pending or self._closing:
             return
         self.discovery_pending = True
-        self.refresh_button.setEnabled(False)
         address = self.address.text()
         async def probe():
             hosts = await discover(self.scope, self.local_id, address)
@@ -733,7 +709,6 @@ class MainWindow(QMainWindow):
         def done():
             self.discovery_pending = False
             self.discovery_future = None
-            self.refresh_button.setEnabled(True)
         def display(result):
             done()
             if self._closing:
@@ -749,7 +724,7 @@ class MainWindow(QMainWindow):
         def failed(message):
             done()
             if not self._closing:
-                self.discovery_state.setText(f"发现暂不可用：{message}，可通过地址连接。")
+                self.discovery_state.setText(f"发现暂不可用：{message}，正在自动重试。")
         self.discovery_future = self.runtime.submit(probe(), display, failed)
 
     def select_peer(self, item):

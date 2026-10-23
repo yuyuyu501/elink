@@ -105,7 +105,6 @@ QLabel#mainWindowTitle { font-family: 'Segoe UI'; font-size: 15px; font-weight: 
 QFrame#mainTitleBar QPushButton { min-height: 55px; max-height: 55px; min-width: 48px; max-width: 48px;
     padding: 0; border: 0; border-radius: 0; background: transparent; }
 QFrame#mainTitleBar QPushButton:hover { background: #edf2ff; }
-QFrame#mainTitleBar QPushButton:focus { background: #e2eaff; border-bottom: 2px solid #2855eb; }
 QFrame#mainTitleBar QPushButton#mainClose:hover { background: #f9dce2; }
 QFrame#streamToolbar { background: #f0f4fa; border: 0; border-bottom: 1px solid #dce4ef; }
 QFrame#controlCenter, QFrame#mouseSubmenu { background: #ffffff; border: 1px solid #dce4ef; border-radius: 8px; }
@@ -137,32 +136,32 @@ QToolTip { background: #172b46; color: #ffffff; border: 0; padding: 7px; }
 
 WINDOWS_STYLE = """
 QMainWindow#mainWindow, QWidget#mainContent { background: #fafbfd; }
-QWidget#mainContent { border-top-left-radius: 13px; border-bottom-right-radius: 13px; }
-QFrame#navigationSidebar, QFrame#mainTitleBar { background: #f5f7fb; }
-QFrame#mainTitleBar { border-top-left-radius: 13px; border-top-right-radius: 13px; }
-QFrame#navigationSidebar { border-bottom-left-radius: 13px; }
+QWidget#mainContent { border-top-left-radius: 7px; border-bottom-right-radius: 7px; }
+QFrame#navigationSidebar, QFrame#mainTitleBar { background: #f2f5f9; }
+QFrame#mainTitleBar { border-top-left-radius: 7px; border-top-right-radius: 7px; }
+QFrame#navigationSidebar { border-bottom-left-radius: 7px; }
 QPushButton, QToolButton, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox,
-QListWidget, QPlainTextEdit { border-radius: 10px; }
-QLabel#brandMark, QLabel#deviceIcon { border-radius: 11px; }
-QPushButton#deviceCard { border-radius: 22px; }
-QFrame#localDevice { border-radius: 23px; }
-QFrame#optionRow { border-radius: 12px; }
-QFrame#connectAction { border-radius: 8px; }
-QPushButton#navigationItem { border-radius: 12px; }
-QFrame#mainTitleBar QPushButton { min-height: 49px; max-height: 49px; border-radius: 12px; }
-QPushButton#noticeClose { border-radius: 8px; }
+QListWidget, QPlainTextEdit { border-radius: 6px; }
+QLabel#brandMark, QLabel#deviceIcon { border-radius: 6px; }
+QPushButton#deviceCard { border-radius: 13px; }
+QFrame#localDevice { border-radius: 13px; }
+QFrame#optionRow { border-radius: 7px; }
+QFrame#connectAction { border-radius: 5px; }
+QPushButton#navigationItem { border-radius: 7px; }
+QFrame#mainTitleBar QPushButton { min-height: 49px; max-height: 49px; border-radius: 7px; }
+QPushButton#noticeClose { border-radius: 5px; }
 QLabel#notice, QLabel#errorNotice, QFrame#notice, QFrame#errorNotice,
-QFrame#controlCenter, QFrame#mouseSubmenu, QMenu { border-radius: 12px; }
+QFrame#controlCenter, QFrame#mouseSubmenu, QMenu { border-radius: 7px; }
 QFrame#controlCenter QPushButton, QFrame#controlCenter QFrame#optionRow,
-QComboBox QAbstractItemView, QMenu::item { border-radius: 9px; }
-QComboBox QAbstractItemView::item { border-radius: 9px; }
-QCheckBox::indicator { border-radius: 5px; }
-QScrollBar::handle:vertical { border-radius: 2px; }
-QProgressBar, QProgressBar::chunk { border-radius: 2px; }
+QComboBox QAbstractItemView, QMenu::item { border-radius: 5px; }
+QComboBox QAbstractItemView::item { border-radius: 5px; }
+QCheckBox::indicator { border-radius: 3px; }
+QScrollBar::handle:vertical { border-radius: 1px; }
+QProgressBar, QProgressBar::chunk { border-radius: 1px; }
 QSlider::groove:horizontal, QSlider::sub-page:horizontal { border-radius: 1px; }
-QSlider::handle:horizontal { border-radius: 4px; }
-QFrame#streamToolbar QPushButton { border-radius: 10px; }
-QDialog { border-radius: 13px; }
+QSlider::handle:horizontal { border-radius: 2px; }
+QFrame#streamToolbar QPushButton { border-radius: 6px; }
+QDialog { border-radius: 7px; }
 """
 
 

@@ -25,8 +25,8 @@ def test_main_titlebar_and_sectioned_sidebar_preserve_window_actions(tmp_path, m
     from types import SimpleNamespace
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QLabel, QFrame
-    from elink.ui.chrome import MAIN_TITLE_HEIGHT
+    from PySide6.QtWidgets import QLabel, QFrame, QPushButton
+    from elink.ui.chrome import MAIN_TITLE_HEIGHT, MAIN_WINDOW_SIZE
     app = QApplication.instance() or QApplication([])
     apply_theme(app)
     window = MainWindow(tmp_path, auto_refresh=False, auto_host=False)
@@ -35,8 +35,15 @@ def test_main_titlebar_and_sectioned_sidebar_preserve_window_actions(tmp_path, m
     try:
         assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
         assert window.titlebar.height() == MAIN_TITLE_HEIGHT
+        assert window.size().toTuple() == MAIN_WINDOW_SIZE
+        assert window.minimumSize().toTuple() == MAIN_WINDOW_SIZE
+        assert window.maximumSize().toTuple() == MAIN_WINDOW_SIZE
         assert window.centralWidget().geometry().top() >= MAIN_TITLE_HEIGHT
+        assert hasattr(window.titlebar, 'minimize') and hasattr(window.titlebar, 'close_button')
+        assert not hasattr(window.titlebar, 'maximize')
+        assert len(window.titlebar.findChildren(QPushButton)) == 2
         assert not window.sidebar.findChildren(QLabel)
+        assert window.sidebar.width() == 204
         devices, settings, about = window.navigation_buttons
         divider = window.sidebar.findChild(QFrame, 'sidebarSeparator')
         assert devices.geometry().bottom() < about.geometry().top()
@@ -47,23 +54,12 @@ def test_main_titlebar_and_sectioned_sidebar_preserve_window_actions(tmp_path, m
             assert window.tabs.currentIndex() == index and control.isChecked()
         calls = []
         with monkeypatch.context() as patch:
-            patch.setattr(window, 'windowHandle', lambda: SimpleNamespace(
-                startSystemMove=lambda: calls.append('move'),
-                startSystemResize=lambda edges: calls.append(edges)))
+            patch.setattr(window, 'windowHandle', lambda: SimpleNamespace(startSystemMove=lambda: calls.append('move')))
             QTest.mouseClick(window.titlebar, Qt.MouseButton.LeftButton, pos=QPoint(280, 24))
-            QTest.mouseClick(window.resize_handles[3], Qt.MouseButton.LeftButton)
-        assert calls == ['move', Qt.Edge.RightEdge]
+        assert calls == ['move']
         QTest.mouseDClick(window.titlebar, Qt.MouseButton.LeftButton, pos=QPoint(280, 24))
         app.processEvents()
-        assert window.isMaximized()
-        if app.platformName() == 'windows':
-            assert window.screen().availableGeometry().contains(window.frameGeometry())
-        assert window.titlebar.maximize.accessibleName() == '还原'
-        assert not any(handle.isVisible() for handle in window.resize_handles)
-        window.titlebar.maximize.click()
-        app.processEvents()
         assert not window.isMaximized()
-        assert all(handle.isVisible() for handle in window.resize_handles)
         window.titlebar.minimize.click()
         app.processEvents()
         assert window.isMinimized()

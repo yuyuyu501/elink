@@ -6,6 +6,8 @@ from .icons import icon, icon_label
 
 TITLE_HEIGHT = 40
 MAIN_TITLE_HEIGHT = 50
+MAIN_WINDOW_SIZE = (920, 680)
+MAIN_CORNER_RADIUS = 9
 RESIZE_MARGIN = 5
 
 
@@ -30,33 +32,19 @@ class MainTitleBar(QFrame):
         row.addStretch()
         for name, kind, callback in (
                 ('最小化', 'minimize', window.showMinimized),
-                ('最大化', 'maximize', self.toggle_maximized),
                 ('关闭', 'close', window.close)):
             control = QPushButton()
             control.setObjectName('mainClose' if kind == 'close' else 'mainCaptionButton')
             control.setToolTip(name)
             control.setAccessibleName(name)
+            control.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             control.setIcon(window_icon(kind))
             control.setIconSize(QSize(16, 16))
             control.setFixedSize(48, MAIN_TITLE_HEIGHT)
             control.clicked.connect(callback)
             row.addWidget(control)
-            setattr(self, 'close_button' if kind == 'close' else kind, control)
+            setattr(self, 'close_button' if kind == 'close' else 'minimize', control)
         row.setSpacing(0)
-        self.update_state()
-
-    def update_state(self):
-        maximized = self.owner.isMaximized()
-        self.maximize.setIcon(window_icon('restore' if maximized else 'maximize'))
-        name = '还原' if maximized else '最大化'
-        self.maximize.setAccessibleName(name)
-        self.maximize.setToolTip(name)
-
-    def toggle_maximized(self):
-        if self.owner.isMaximized():
-            self.owner.showNormal()
-        else:
-            self.owner.showMaximized()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.owner.windowHandle():
@@ -64,8 +52,6 @@ class MainTitleBar(QFrame):
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.toggle_maximized()
         event.accept()
 
 

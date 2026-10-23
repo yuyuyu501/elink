@@ -28,9 +28,9 @@ class HomeTest {
         val activity = controller.get()
         fun labels() = texts(activity.window.decorView)
         try {
-            val localAction = labels().single { it.text == "仅控制端 · 不支持被控" }
-            assertFalse(localAction.isEnabled)
-            assertTrue(labels().any { it.text == "Android · 本机 · 仅控制端" })
+            assertFalse(labels().any { it is android.widget.Button && it.text == "连接" })
+            assertTrue(labels().any { it.text == "Android · 在线 · 仅控制端" })
+            assertFalse(labels().any { it.text == "暂未发现其它在线设备" })
             labels().single { it.text == "设置" }.performClick()
             assertTrue(labels().any { it.text == "直接触控" })
             assertTrue(labels().any { it.text == "自动发现同一局域网设备" })
@@ -41,7 +41,7 @@ class HomeTest {
             assertEquals(Intent.ACTION_CREATE_DOCUMENT, export.intent.action)
             assertEquals("text/plain", export.intent.type)
             activity.onBackPressed()
-            assertTrue(labels().any { it.text == "在线设备" })
+            assertTrue(labels().any { it.text == "设备列表" })
         } finally {
             controller.destroy()
         }
