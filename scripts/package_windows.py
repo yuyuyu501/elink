@@ -35,12 +35,18 @@ def run_self_test(executable: Path, timeout: float = 180.0) -> dict:
         report_path.unlink()
 
     print(f"自检: {executable}")
+    env = os.environ.copy()
+    if env.get("CI") or env.get("ELINK_SELFTEST_HEADLESS") == "1":
+        # GitHub Actions 的 Windows runner 没有交互式桌面；真实 windows 平台插件
+        # 在服务会话里无法初始化。CI 下强制 offscreen，只验证页面/媒体/后端。
+        env["ELINK_SELFTEST_HEADLESS"] = "1"
     try:
         process = subprocess.run(
             [str(executable), "--self-test", str(report_path)],
             timeout=timeout,
             capture_output=True,
             text=True,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"产物自检超时（{timeout}s）") from exc
