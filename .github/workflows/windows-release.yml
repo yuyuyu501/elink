@@ -42,10 +42,11 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          python -m scripts.package_windows --dist-dir dist *> out/package.log
-          $code = $LASTEXITCODE
-          Get-Content out/package.log -Tail 120
-          exit $code
+          $python = (Get-Command python).Source
+          $process = Start-Process -FilePath $python -ArgumentList '-m','scripts.package_windows','--dist-dir','dist' -NoNewWindow -Wait -PassThru -RedirectStandardOutput out/package.out -RedirectStandardError out/package.err
+          Get-Content out/package.out -Tail 120
+          Get-Content out/package.err -Tail 120
+          exit $process.ExitCode
       - name: Publish failure log to diagnostics branch
         if: failure()
         shell: pwsh
@@ -53,9 +54,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           "## Package failure log" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          if (Test-Path out/package.log) {
-            Get-Content out/package.log -Tail 200 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            Copy-Item out/package.log ci-package.log -Force
+          if (Test-Path out/package.out) {
+            Get-Content out/package.out -Tail 200 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Copy-Item out/package.out ci-package.log -Force
+          }
+          if (Test-Path out/package.err) {
+            Get-Content out/package.err -Tail 200 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Copy-Item out/package.err ci-package.err -Force
           }
           if (Test-Path dist/Elink/self-test.json) {
             Get-Content dist/Elink/self-test.json | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -71,7 +76,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git checkout -B ci-diagnostics
-          git add -f ci-package.log ci-self-test.json ci-job.log
+          Get-ChildItem ci-* -File -ErrorAction SilentlyContinue | ForEach-Object { git add -f $_.Name }
           git commit -m "ci diagnostics for $env:GITHUB_SHA" --allow-empty
           git push origin ci-diagnostics --force
       - name: Show package summary
