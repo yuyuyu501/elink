@@ -47,8 +47,13 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          if (Test-Path out/package.log) { Get-Content out/package.log -Tail 200 }
-          if (Test-Path dist/Elink/self-test.json) { Get-Content dist/Elink/self-test.json }
+          "## Package failure log" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          if (Test-Path out/package.log) {
+            Get-Content out/package.log -Tail 200 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          if (Test-Path dist/Elink/self-test.json) {
+            Get-Content dist/Elink/self-test.json | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
       - name: Show package summary
         run: Get-Content dist/package-summary.json
       - name: Upload build artifact
