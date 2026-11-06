@@ -1,20 +1,23 @@
+# 运行产物
+out/
+*.ts
+*.h264
+*.log
+
+# 文档与设计稿（本地保留；Release 正文放 releases/）
+docs/
+
+# 打包产物（不进源码仓库；发布资产由 GitHub Actions 生成）
+dist*/
+build*/
+.artifacts/
+*.spec
+*.zip
+*.exe
+*.msi
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 .pytest_cache/
-*.egg-info/
-build/
-dist/
-.artifacts/
-.runtime/
-*.spec
-android/.gradle/
-android/.kotlin/
-android/local.properties
-android/**/build/
-*.jks
-*.keystore
-*.p12
-*.pfx
-.env
-.env.*

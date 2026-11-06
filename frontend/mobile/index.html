@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+    />
+    <meta name="theme-color" content="#F4F7FA" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <title>elink · 移动控制台</title>
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="stylesheet" href="./assets/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">e</span>
+        <div class="brand-text">
+          <span class="brand-name">elink</span>
+          <span class="brand-sub">移动控制台</span>
+        </div>
+      </div>
+      <div class="status" id="statusWrap">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">未连接</span>
+      </div>
+      <button id="connectBtn" class="chip">连接</button>
+    </header>
+
+    <main class="content">
+      <section class="stage-card">
+        <div class="stage" id="stage" tabindex="0">
+          <canvas id="screenCanvas"></canvas>
+          <div class="placeholder" id="placeholder">
+            <strong>等待画面</strong>
+            <span>点击右上角「连接」开始接收远端画面</span>
+          </div>
+          <span class="stage-badge" aria-hidden="true">● 远端画面</span>
+          <span class="hud" id="hudSize" hidden>—</span>
+          <div class="toast" id="toast"></div>
+        </div>
+      </section>
+
+      <div class="tips">
+        <span><b>单指拖动</b> 移动鼠标</span>
+        <span class="sep">·</span>
+        <span><b>双指点按</b> 右键</span>
+        <span class="sep">·</span>
+        <span><b>双指上下</b> 滚动</span>
+      </div>
+
+      <nav class="actions">
+        <button id="injectBtn" class="action">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 2v10" /><path d="M18.4 6.6a9 9 0 1 1-12.77.04" /></svg>
+          </span>
+          <span>注入</span>
+        </button>
+        <button id="keyboardBtn" class="action">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <rect width="20" height="16" x="2" y="4" rx="2" />
+              <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10" />
+            </svg>
+          </span>
+          <span>键盘</span>
+        </button>
+        <button id="rightClickBtn" class="action">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="7" /><path d="M12 6v4" /></svg>
+          </span>
+          <span>右键</span>
+        </button>
+        <button id="scrollBtn" class="action">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="m7 9 5-5 5 5" /><path d="m7 15 5 5 5-5" /></svg>
+          </span>
+          <span>滚动</span>
+        </button>
+        <button id="devicesBtn" class="action">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <rect width="20" height="14" x="2" y="3" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
+          </span>
+          <span>设备</span>
+        </button>
+      </nav>
+    </main>
+
+    <script type="module" src="./js/main.js"></script>
+  </body>
+</html>

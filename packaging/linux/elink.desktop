@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=elink
+GenericName=Remote Control
+GenericName[zh_CN]=远程控制
+Comment=Low-latency screen streaming and remote input
+Comment[zh_CN]=低延迟屏幕串流与远程控制
+Exec=@EXEC@
+Icon=elink
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;stream;srt;
+StartupWMClass=Elink
+X-DesktopVersion=@VERSION@

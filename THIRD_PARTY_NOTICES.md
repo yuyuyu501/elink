@@ -1,82 +1,49 @@
-# Third-Party Components
+# 第三方声明
 
-Elink uses generic media, networking and UI libraries. Sunshine and Moonlight are architectural references only: neither application nor its source is bundled in this version. Elink is not affiliated with Sunshine, Moonlight, Tailscale or NetEase.
+## Lucide 图标
 
-| Component | Version | License / source |
-| --- | --- | --- |
-| PySide6 / Qt | 6.10.2 | LGPL-3.0 / GPL-3.0 / commercial, component dependent; https://code.qt.io/ |
-| Lucide icons | lucide-static 0.468.0 | ISC, with Feather MIT attribution; https://github.com/lucide-icons/lucide/tree/0.468.0 |
-| aiortc | 1.14.0 | BSD-3-Clause; https://github.com/aiortc/aiortc/tree/1.14.0 |
-| PyAV | 16.1.0 | BSD-3-Clause; https://github.com/PyAV-Org/PyAV/tree/v16.1.0 |
-| FFmpeg and codec dependencies | PyAV wheel build | LGPL/GPL depending on configured libraries; https://ffmpeg.org/ and https://github.com/PyAV-Org/pyav-ffmpeg |
-| DXcam | 0.0.5 | MIT; https://github.com/ra1nty/DXcam |
-| SoundCard | 0.4.5 | BSD-3-Clause; https://github.com/bastibe/SoundCard |
-| sounddevice / PortAudio | 0.5.3 / wheel build | MIT; https://github.com/spatialaudio/python-sounddevice |
-| aiohttp | 3.13.2 | Apache-2.0 AND MIT; https://github.com/aio-libs/aiohttp |
-| cryptography | 46.0.5 | Apache-2.0 OR BSD-3-Clause; https://github.com/pyca/cryptography |
-| NumPy | 2.2.6 | BSD-3-Clause with dependency notices; https://numpy.org/ |
-| OpenCV Python | 4.12.0.88 | Apache-2.0 and bundled dependency licenses; https://github.com/opencv/opencv-python |
-| AMD FidelityFX FSR 1 headers | a21ffb8f6c13233ba336352bdff293894c706575 | MIT, 2021 Advanced Micro Devices, Inc.; https://github.com/GPUOpen-Effects/FidelityFX-FSR |
-| Chromium NVIDIA video extension interface | swap_chain_presenter.cc | BSD-3-Clause, The Chromium Authors; https://chromium.googlesource.com/chromium/src/+/main/ui/gl/swap_chain_presenter.cc |
-| ViGEmClient | x64 DLL from vgamepad 0.1.0 source archive | MIT, Benjamin Höglinger-Stelzer; https://github.com/nefarius/ViGEmClient |
-| HIDMaestro XUSB layout reference | 00b7303f8533c3fe10687a765c84e929b34a5e9c | MIT, 2026 HIDMaestro Contributors; https://github.com/hifihedgehog/HIDMaestro |
-| Python / PyInstaller bootloader | Build-specific / 6.16.0 | PSF / GPL with distribution exception; https://python.org/ and https://pyinstaller.org/ |
+`frontend/desktop/resources/lucide/*.svg` 来自 [Lucide](https://lucide.dev)（v0.468.0），
+以 ISC License 授权。运行时会按主题色重写 `stroke` 属性，其余内容保持原样。
 
-Selected Lucide SVGs are bundled in `elink/resources/lucide/`, with the upstream
-notice in `licenses/Lucide-LICENSE.txt`. The checked indicator is recolored white;
-other icon colors are applied at render time. These assets require no runtime
-download or web service.
+## Inno Setup 简体中文语言包
 
-ViGEmClient.dll was extracted without running setup.py from the pinned vgamepad source archive:
-https://files.pythonhosted.org/packages/8a/54/0eaddc33f84247963af078f364b37153d09fcd6cdc398f243ec3e8842c56/vgamepad-0.1.0.tar.gz
+`packaging/windows/ChineseSimplified.isl` 为 Inno Setup 官方简体中文语言文件，
+仅在构建 Windows 安装包时使用。
 
-Archive SHA-256: `57f6bd01aec0c172947517fb782d150ef9b285f7f4d524c317374fa5c24a89de`.
-Only the client DLL is included, not vgamepad Python code, ViGEmBus installers or any driver. The ViGEmClient license is in `licenses/ViGEmClient-LICENSE.txt`.
+## ffmpeg
 
-Tailscale is separately installed and not bundled. Its service/account terms apply: https://tailscale.com/terms . No Tailscale account credentials are collected.
+本项目**不打包** ffmpeg，运行时需要系统中可用的 `ffmpeg`（建议含 `libx264` 与 `libsrt`）。
+分发时请遵守所选 ffmpeg 构建的许可证（通常为 GPLv3）。
 
-The optional offline Windows installer is built with Inno Setup (https://jrsoftware.org/), copyright Jordan Russell and Martijn Laan. Its license is preserved in `licenses/InnoSetup-LICENSE.txt` and at the installation root. The unmodified Simplified Chinese installer translation is from the official Inno Setup repository, maintained by Zhenghan Yang (Kira).
+## PySide6 / Qt
 
-FSR 1 EASU and RCAS use the unmodified upstream `ffx-fsr/ffx_a.h` and
-`ffx-fsr/ffx_fsr1.h`, pinned to the commit above and included under
-`elink/resources/fsr/`. Each header preserves its complete upstream MIT
-copyright and permission notice. SHA-256 of the unmodified upstream bytes:
+桌面端界面基于 PySide6（LGPLv3）。随包分发时 Qt 库以动态库形式提供，
+并保留其许可证文本。
 
-- `ffx_a.h`: `f60e2722fcd13989523b9164d776ab382b3692791767f3bf8bb19967f763f3fb`
-- `ffx_fsr1.h`: `93c3922362ea7fc99cbcc698ca30c98de4f8c246d1fbb0b09e015ddef38ce3a5`
+## AMD FidelityFX FSR 1
 
-The Elink GLSL wrapper applies EASU followed by RCAS, without FSR 3 frame
-generation or temporal reconstruction. The upstream headers are included in
-the portable application's resources alongside these notices.
+`frontend/desktop/resources/fsr/ffx_a.h` 与 `ffx_fsr1.h` 是 AMD FidelityFX
+Super Resolution 1 的未修改头文件（v1.20210629），MIT License，
+Copyright (c) 2021 Advanced Micro Devices, Inc.。许可证见
+`licenses/FSR-LICENSE.txt`。应用在 OpenGL 4.2 上运行 EASU + RCAS 两个 pass。
 
-The NVIDIA driver extension GUID and request layout in `native/windows/video/rtx_video.cpp`
-follow Chromium's `ToggleNvidiaVpSuperResolution` interface. Its copyright and
-BSD notice are retained in `licenses/Chromium-LICENSE.txt`. The D3D11/WGL bridge
-is built from this repository's source. NVIDIA SDK binaries and NGX model files
-are not bundled; RTX VSR uses the separately installed NVIDIA graphics driver
-and its video enhancement settings. Elink is not affiliated with NVIDIA.
+## elink_video.dll（RTX VSR 原生扩展）
 
-ElinkPad's experimental UMDF2 driver adapts XUSB wire layouts and capability arrays from HIDMaestro's `driver/companion.c`; the complete upstream notice is preserved in `licenses/HIDMaestro-LICENSE.txt`. No upstream driver binary or installer is included. The optional ElinkPad driver package is separate from the portable application and is unsigned. Microsoft WDK is a build-only dependency obtained from the pinned Microsoft NuGet package; its full toolchain is not redistributed. Windows' inbox WUDFRd is not redistributed. No LB-SAL-licensed libvirtualhid driver/broker source was used.
+`frontend/desktop/resources/elink_video.dll` 是本项目自己的 D3D11 辅助库，
+通过 NVIDIA VideoProcessor 扩展实现 RTX VSR；不包含 NVIDIA SDK、驱动安装器
+或第三方运行时。没有 NVIDIA RTX 显卡时不会加载/调用该库，自动回退 FSR 1。
 
-Dynamic Qt libraries remain replaceable in the folder build. The build script copies installed package license texts (including transitive dependencies such as OpenSSL, libsrtp, Opus, cffi and aioice) to `licenses/python-packages/` and records actual media-library versions. The PyAV FFmpeg binary includes libx264: review its actual GPL configuration, not only PyAV's BSD wrapper license.
+## ViGEmClient / ViGEmBus
 
-This is a local development artifact. Public binary redistribution requires preparing the corresponding sources and notices for the actual GPL/LGPL dependencies and fulfilling their distribution terms. A URL alone does not satisfy every source-delivery obligation. No new license for Elink's own source is assigned here.
+`frontend/desktop/resources/ViGEmClient.dll` 来自
+[ViGEmClient](https://github.com/nefarius/ViGEmClient)，MIT License
+（Copyright (c) 2018 Benjamin Höglinger-Stelzer），许可证全文见
+`licenses/ViGEmClient-LICENSE.txt`。
 
-## Android Preview
+应用只分发客户端 DLL，不打包 ViGEmBus 驱动安装器；手柄注入需要目标机器
+已安装 ViGEmBus（由用户自行安装并接受其许可证）。
 
-The arm64 APK uses WebRTC SDK `io.github.webrtc-sdk:android:125.6422.07`
-(tag v125.6422.07, repository commit 878c5b093f8bbbd4955d1037316484aabe962d18).
-The SDK wrapper is MIT; the native WebRTC binary and its dependencies have
-separate BSD and other notices. The complete upstream notice file is preserved
-as `licenses/android/WEBRTC.md` and bundled as an APK asset.
+## Inno Setup
 
-OkHttp 4.12.0, Okio 3.6.0, Kotlin 2.1.10, kotlinx-coroutines 1.10.1 and
-JetBrains annotations use Apache-2.0 notices retained in `licenses/android`.
-Android build tools, SDK images and JDK are build dependencies, not APK payloads.
-The local Preview signing key is stored outside the repository; its certificate
-is for update continuity, not a commercial publisher identity.
-
-Linux additionally uses MSS 10.1.0 (MIT), python-xlib 0.33 (LGPL-2.1),
-evdev 1.9.2 (BSD), dbus-next 0.2.3 (MIT) and psutil 7.1.0 (BSD).
-Installed Python dependency notices are copied into the Linux package;
-SDL2, X11, PulseAudio, xclip and GPU drivers remain system components.
+Windows 安装包由 [Inno Setup](https://jrsoftware.org/) 生成；安装器本身不随
+应用分发。构建时使用的简体中文语言文件来自 Inno Setup 官方仓库。

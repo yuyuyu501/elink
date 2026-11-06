@@ -1,0 +1,457 @@
+/* elink 移动控制台
+ * 与桌面端共用同一套设计令牌：冷白底、纯白卡片、1px 浅灰描边、
+ * 亮蓝主色 + 青色点缀、深色预览区、黑色在线胶囊。
+ */
+
+:root {
+  color-scheme: light;
+
+  --bg: #f4f7fa;
+  --surface: #ffffff;
+  --surface-soft: #f7fafd;
+  --border: #e4e9f0;
+  --border-strong: #d5dee9;
+
+  --text: #1d2129;
+  --text-secondary: #4e5969;
+  --muted: #86909c;
+  --subtle: #a9b4c4;
+
+  --accent: #2b6bff;
+  --accent-hover: #1e5af0;
+  --accent-soft: #eaf1ff;
+  --cyan: #22c3e8;
+  --ok: #00b42a;
+  --danger: #f53f3f;
+
+  --preview: #0b1220;
+  --radius-card: 16px;
+  --radius-control: 12px;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 "Microsoft YaHei UI", -apple-system, "Segoe UI", system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100vh;
+  height: 100dvh;
+  padding: calc(8px + env(safe-area-inset-top)) calc(10px + env(safe-area-inset-right))
+    calc(8px + env(safe-area-inset-bottom)) calc(10px + env(safe-area-inset-left));
+}
+
+/* ---------------------------------------------------------------- 顶栏 */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgb(29 33 41 / 3%);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--cyan) 100%);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 4px 10px rgb(43 107 255 / 22%);
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.brand-name {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.brand-sub {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 4px 9px;
+  border-radius: 11px;
+  background: #f0f3f7;
+  color: #6b7785;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.status.open {
+  background: #1d2129;
+  color: #fff;
+}
+
+.status.reconnecting {
+  background: #fff4e6;
+  color: #d96a00;
+}
+
+.status.closed {
+  background: #f0f3f7;
+  color: #6b7785;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: #c9d3df;
+}
+
+.dot.open {
+  background: var(--ok);
+}
+
+.dot.error {
+  background: var(--danger);
+}
+
+.chip {
+  flex: none;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+.chip:active {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.status.open + .chip {
+  border-color: #f3c9c9;
+  background: #fff;
+  color: #d92d2d;
+}
+
+.status.open + .chip:active {
+  background: #fff3f3;
+}
+
+/* ---------------------------------------------------------------- 内容 */
+.content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.stage-card {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 2px rgb(29 33 41 / 3%);
+}
+
+.stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--preview);
+  border-radius: var(--radius-control);
+  touch-action: none;
+  outline: none;
+}
+
+#screenCanvas {
+  display: none;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 10px;
+}
+
+#screenCanvas.visible {
+  display: block;
+}
+
+.stage-badge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: rgb(11 18 32 / 78%);
+  color: #5ee0b0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  pointer-events: none;
+}
+
+.hud {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: rgb(11 18 32 / 78%);
+  color: #c7d5e8;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 24px;
+  text-align: center;
+  background: radial-gradient(circle at 30% 18%, rgb(34 195 232 / 9%), transparent 55%);
+  pointer-events: none;
+}
+
+.placeholder::before {
+  content: "";
+  width: 76px;
+  height: 50px;
+  margin-bottom: 10px;
+  border: 1px solid #344763;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #101b31, #0b1220);
+  box-shadow: 0 0 42px rgb(34 195 232 / 12%);
+}
+
+.placeholder strong {
+  color: #e6edf7;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.placeholder span {
+  max-width: 260px;
+  color: #7c8da8;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.placeholder.hidden {
+  display: none;
+}
+
+.toast {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  max-width: 88%;
+  padding: 6px 13px;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 10px;
+  background: rgb(29 33 41 / 92%);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(8px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ---------------------------------------------------------------- 提示 */
+.tips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 6px;
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.tips b {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.tips .sep {
+  color: #c9d3df;
+}
+
+/* ---------------------------------------------------------------- 操作栏 */
+.actions {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 1px 2px rgb(29 33 41 / 3%);
+}
+
+.action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 54px;
+  padding: 7px 4px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.action .icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  line-height: 1;
+  transition: color 0.15s ease;
+}
+
+.action .icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.action.active {
+  border-color: #c9dbff;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.action.active .icon {
+  color: var(--accent);
+}
+
+.action:active {
+  background: #e7eef8;
+}
+
+@media (max-width: 340px) {
+  .brand-sub {
+    display: none;
+  }
+
+  .brand-name {
+    font-size: 14px;
+  }
+
+  .tips {
+    display: none;
+  }
+
+  .actions {
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .action {
+    min-height: 50px;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .tips {
+    display: none;
+  }
+
+  .topbar {
+    padding: 6px 10px;
+  }
+
+  .action {
+    min-height: 46px;
+    flex-direction: row;
+    gap: 6px;
+  }
+}

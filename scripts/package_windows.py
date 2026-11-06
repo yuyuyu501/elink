@@ -1,170 +1,204 @@
-"""Windows packaging: tests -> build -> EXE and updater checks -> portable ZIP."""
+"""Windows 打包：构建 → 产物自检 → 便携 ZIP →（可选）Inno Setup 安装包。
+
+自检用**打包后的 exe**跑 ``--self-test``：只有产物自己能证明 Qt 插件、
+图标资源、ffmpeg 通路都在位。自检不通过就直接失败，绝不产出「看起来能装、
+装完打不开」的安装包。
+"""
+
+from __future__ import annotations
+
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
-import tomllib
-
-from elink import __version__
-from elink.processes import native_environment
-from scripts.test_portable_update import verify_portable_update
-from scripts.check_decoder_colors import CASES as DECODER_COLOR_CASES
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+APP_NAME = "Elink"
+
+ISCC_CANDIDATES = [
+    Path(os.environ["ELINK_ISCC"]) if os.environ.get("ELINK_ISCC") else None,
+    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Inno Setup 6" / "ISCC.exe",
+    Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Inno Setup 6" / "ISCC.exe",
+]
+ISCC_CANDIDATES = [path for path in ISCC_CANDIDATES if path is not None]
 
 
-def source_snapshot():
-    names = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], cwd=ROOT)
-    return {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
-            for name in sorted(set(names.decode('utf-8').split('\0'))) if name and (ROOT / name).is_file()}
+def run_self_test(executable: Path, timeout: float = 180.0) -> dict:
+    report_path = executable.parent / "self-test.json"
+    if report_path.exists():
+        report_path.unlink()
 
-
-def validate_self_test(report):
-    if not isinstance(report, dict) or report.get('ok') is not True or report.get('runtime_stopped') is not True:
-        raise RuntimeError('Packaged EXE self-test or shutdown failed; no release archive created.')
-    if report.get('video_frames', 0) <= 0 or report.get('audio_frames', 0) <= 0:
-        raise RuntimeError('Packaged EXE did not receive both video and audio.')
-
-
-def validate_gpu_test(report):
-    def colors_ok(colors):
-        return len(colors) == 5 and all(isinstance(c.get('native_rgb_error'), (int, float))
-                                       and 0 <= c['native_rgb_error'] <= 5 for c in colors)
-    colors = report.get('colors', [])
-    streams = report.get('streams', [])
-    scaled_streams = report.get('super_resolution_streams', [])
-    capture = report.get('native_capture', [])
-    rtx = report.get('rtx_stream', {})
-    decoded_colors = report.get('decoder_colors', [])
-    live = report.get('live_settings', [])
-    live_capture = report.get('live_capture', [])
-    diagnostics = report.get('capture_diagnostics', {})
-    notices = report.get('session_notices', [])
-    if ({n.get('renderer') for n in notices} != {'cpu', 'gpu'}
-            or any(n.get(key) is not True for n in notices for key in ('native_banner', 'dismiss', 'auto_hide'))):
-        raise RuntimeError('Packaged dismissible session notice checks have not passed.')
-    if any(report.get('rtx_options', {}).get(key) is not True for key in
-           ('default_fsr', 'active_driver_exposed', 'unavailable_removed')):
-        raise RuntimeError('Packaged RTX capability option checks have not passed.')
-    if any(diagnostics.get(key) is not True for key in
-           ('ok', 'gray_start_recovered', 'continued_after_real_failure')):
-        raise RuntimeError('Packaged D3D11 recovery/file diagnostic checks have not passed.')
-    if (len(live) != 6 or {c.get('renderer') for c in live} != {'cpu', 'gpu'}
-            or {c.get('decoder') for c in live} != {'software', 'hardware'}
-            or any(c.get('same_session') is not True or not isinstance(c.get('native_rgb_error'), (int, float))
-                   or not 0 <= c['native_rgb_error'] <= 5 for c in live)
-            or len(live_capture) != 4
-            or any(c.get('monotonic_pts') is not True or c.get('capture_backend') != 'gpu'
-                   or not isinstance(c.get('max_rgb_error'), (int, float))
-                   or not 0 <= c['max_rgb_error'] <= 6 for c in live_capture)):
-        raise RuntimeError('Packaged live settings/capture checks have not passed.')
-    if ({(c.get('width'), c.get('height'), c.get('colorspace'), c.get('color_range'), c.get('input_format'))
-         for c in decoded_colors} != DECODER_COLOR_CASES
-            or any(c.get('hardware_format') != 'nv12'
-                   or c.get('software_colorspace') != c.get('colorspace')
-                   or c.get('hardware_colorspace') != c.get('colorspace')
-                   or c.get('software_color_range') != c.get('color_range')
-                   or c.get('hardware_color_range') != c.get('color_range')
-                   or any(not isinstance(c.get(key), (int, float)) or not 0 <= c[key] <= limit
-                          for key, limit in (('software_rgb_error', 6), ('hardware_rgb_error', 6),
-                                             ('decoder_rgb_difference', 3), ('native_rgb_error', 5),
-                                             ('composed_rgb_error', 5)))
-                   for c in decoded_colors)):
-        raise RuntimeError('Packaged software/D3D11VA color parity checks have not passed.')
-    if (not colors_ok(colors)
-            or {s.get('decoder') for s in streams} != {'software-h264', 'D3D11VA'}
-            or any(s.get('native_video') is not True or s.get('cpu_fallback') is not True for s in streams)
-            or any(not colors_ok(report.get('super_resolution', {}).get(str(scale), [])) for scale in (75, 67, 50))
-            or {s.get('render_scale') for s in scaled_streams} != {75, 67, 50}
-            or any(s.get('upscaler') != 'FSR1-EASU-RCAS' or s.get('native_video') is not True
-                   or s.get('cpu_fallback') is not True or not isinstance(s.get('fsr_gpu'), dict)
-                   or s['fsr_gpu'].get('samples', 0) <= 0
-                   for s in scaled_streams)
-            or not colors_ok(report.get('rtx_colors', []))
-            or rtx.get('render_scale') != 50 or rtx.get('upscaler') != 'RTX-VSR'
-            or rtx.get('native_video') is not True or rtx.get('cpu_fallback') is not True
-            or not isinstance(rtx.get('rtx_probe_mae'), (int, float)) or not rtx['rtx_probe_mae'] >= .01
-            or not isinstance(rtx.get('rtx_gpu'), dict) or rtx['rtx_gpu'].get('samples', 0) <= 0
-            or any(report.get('rtx_fallback', {}).get(key) is not True
-                   for key in ('fsr_fallback', 'native_video', 'silent', 'preference_fsr'))
-            or {(s.get('width'), s.get('height')) for s in capture} != {(1920, 1080), (1440, 810), (1280, 720)}
-            or any(s.get('format') != 'nv12' or not isinstance(s.get('max_rgb_error'), (int, float))
-                   or not 0 <= s['max_rgb_error'] <= 6
-                   or s.get('colorspace') != s.get('decoded_colorspace')
-                   or s.get('color_range') != s.get('decoded_color_range') for s in capture)):
-        raise RuntimeError('Packaged GPU native display checks have not passed.')
-
-
-def package(dist_dir=None):
-    if os.name != 'nt' or sys.maxsize <= 2**32:
-        raise RuntimeError('Build this package using 64-bit Python on Windows.')
-    dist_dir = (ROOT / (dist_dir or 'dist')).resolve()
-    application = dist_dir / 'Elink'
-    metadata = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))
-    if metadata['project']['version'] != __version__:
-        raise RuntimeError('pyproject.toml and elink.__version__ must match.')
-    snapshot = source_snapshot()
-    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT))
-    subprocess.run([sys.executable, '-m', 'pytest', '-q'], cwd=ROOT, check=True)
-    subprocess.run([sys.executable, '-m', 'scripts.build', '--dist-dir', str(dist_dir)], cwd=ROOT, check=True)
-    artifacts = ROOT / '.artifacts'
-    artifacts.mkdir(exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    with tempfile.TemporaryDirectory(prefix='package-check-', dir=artifacts) as temp:
-        temporary = Path(temp)
-        diagnostics = temporary / 'self-test'
-        subprocess.run([str(application / 'Elink.exe'), '--self-test', str(diagnostics)],
-                       cwd=ROOT, env=native_environment(), check=True, timeout=120)
-        report = json.loads((diagnostics / 'result.json').read_text(encoding='utf-8'))
-        validate_self_test(report)
-        gpu_result = artifacts / f'gpu-package-{stamp}.json'
-        try:
-            subprocess.run([str(application / 'Elink.exe'), '--self-test-gpu', str(gpu_result)],
-                           cwd=ROOT, env=native_environment(), check=True, timeout=120)
-        except subprocess.SubprocessError as exc:
-            raise RuntimeError(f'Packaged GPU check failed; diagnostic report: {gpu_result}') from exc
-        gpu_report = json.loads(gpu_result.read_text(encoding='utf-8'))
-        validate_gpu_test(gpu_report)
-        upgrade = verify_portable_update(application, temporary / 'update-check')
-        if source_snapshot() != snapshot:
-            raise RuntimeError('Source changed during packaging; rerun before distributing this build.')
-        filename = f'Elink-{__version__}-windows-x64'
-        archive = Path(shutil.make_archive(str(temporary / filename), 'zip', dist_dir, 'Elink'))
-        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-        receipt = dict(version=__version__, built_at=stamp, commit=revision, source_dirty=dirty,
-                       source_sha256=snapshot, package_sha256=digest, self_test=report,
-                       gpu_test=gpu_report, updater_test=upgrade, manual_acceptance='pending',
-                       signed=False, channel='preview', format='portable-folder')
-        (temporary / 'verification.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
-        (temporary / 'SHA256SUMS.txt').write_text(f'{digest}  {archive.name}\n', encoding='ascii')
-        destination = dist_dir / 'releases' / f'v{__version__}' / stamp
-        destination.mkdir(parents=True, exist_ok=False)
-        for path in (archive, temporary / 'verification.json', temporary / 'SHA256SUMS.txt'):
-            shutil.copy2(path, destination / path.name)
-    print(f'Verified preview package: {destination}')
-    print(f'Run: {application / "Elink.exe"}')
-    print('Unzip the whole portable folder; keep its DLLs. No Git push, tag, release upload or driver install performed.')
-    return destination
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--dist-dir', type=Path, help='Output directory; defaults to dist.')
-    args = parser.parse_args()
+    print(f"自检: {executable}")
     try:
-        package(args.dist_dir)
-    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
-        print(f'Packaging stopped: {exc}', file=sys.stderr)
-        return 1
-    return 0
+        process = subprocess.run(
+            [str(executable), "--self-test", str(report_path)],
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"产物自检超时（{timeout}s）") from exc
+
+    if not report_path.is_file():
+        raise RuntimeError(
+            "产物没有生成自检报告\n"
+            f"stdout={process.stdout[-2000:]}\nstderr={process.stderr[-2000:]}"
+        )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not report.get("ok"):
+        raise RuntimeError(f"产物自检未通过: {report.get('error', report)}")
+    media = report.get("media", {})
+    if media.get("decoded_frames", 0) <= 0:
+        raise RuntimeError("产物媒体链路自检失败：没有解出任何帧")
+    print(
+        "自检通过: ui=%d 页 媒体帧=%d 字体=%d"
+        % (
+            report.get("ui", {}).get("pages", 0),
+            media.get("decoded_frames", 0),
+            report.get("ui", {}).get("fonts", 0),
+        )
+    )
+    return report
 
 
-if __name__ == '__main__':
-    raise SystemExit(main())
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def make_zip(folder: Path, version: str, out_dir: Path) -> Path:
+    stamp = "windows-x64"
+    target = out_dir / f"Elink-{version}-{stamp}.zip"
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(folder.rglob("*")):
+            if path.is_file():
+                archive.write(path, Path(folder.name) / path.relative_to(folder))
+    print(f"便携包: {target} ({target.stat().st_size / 1024 / 1024:.1f} MB)")
+    return target
+
+
+def make_installer(folder: Path, version: str, out_dir: Path) -> Path | None:
+    iscc = next((path for path in ISCC_CANDIDATES if path.is_file()), None)
+    if iscc is None:
+        found = shutil.which("iscc") or shutil.which("ISCC")
+        iscc = Path(found) if found else None
+    if iscc is None:
+        print("未找到 Inno Setup（ISCC.exe），跳过安装包。安装后重跑即可生成。")
+        return None
+
+    script = ROOT / "packaging" / "windows" / "elink.iss"
+    args = [
+        str(iscc),
+        f"/DMyAppVersion={version}",
+        f"/DSourceDir={folder}",
+        f"/DOutputDir={out_dir}",
+        str(script),
+    ]
+    print("ISCC:", " ".join(args))
+    subprocess.run(args, cwd=ROOT, check=True)
+    candidates = sorted(out_dir.glob("Elink-*-setup.exe"), key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        print("ISCC 执行成功但没有找到 setup 产物，请检查 .iss 的 OutputBaseFilename。")
+        return None
+    print(f"安装包: {candidates[-1]}")
+    return candidates[-1]
+
+
+def package(dist_dir: Path | None = None, *, installer: bool = True, run_tests: bool = True) -> dict:
+    if os.name != "nt":
+        raise RuntimeError("该脚本只在 Windows 上使用；Linux 见 scripts/package_linux.py")
+
+    from frontend.desktop import __version__
+
+    dist = (ROOT / (dist_dir or "dist")).resolve()
+
+    if run_tests:
+        print("运行回归测试…")
+        subprocess.run([sys.executable, "-m", "scripts.check"], cwd=ROOT, check=True)
+
+    executable = __import__("scripts.build", fromlist=["build"]).build(dist)
+    report = run_self_test(executable)
+
+    out_dir = dist / __version__
+    out_dir.mkdir(parents=True, exist_ok=True)
+    built_at = datetime.now(timezone.utc)
+    archive = make_zip(executable.parent, __version__, out_dir)
+    setup = make_installer(executable.parent, __version__, out_dir) if installer else None
+
+    assets = [archive]
+    if setup is not None:
+        assets.append(setup)
+    checksums = out_dir / "SHA256SUMS.txt"
+    checksums.write_text(
+        "".join(f"{sha256(path)}  {path.name}\n" for path in assets), encoding="ascii"
+    )
+    verification = {
+        "app": APP_NAME,
+        "version": __version__,
+        "built_at": built_at.isoformat(),
+        "format": "portable-folder" if setup is None else "portable-folder+inno-setup",
+        "channel": "preview",
+        "signed": False,
+        "zip": {"name": archive.name, "sha256": sha256(archive), "size": archive.stat().st_size},
+        "installer": (
+            {"name": setup.name, "sha256": sha256(setup), "size": setup.stat().st_size}
+            if setup is not None
+            else None
+        ),
+        "self_test": {
+            "ok": report.get("ok"),
+            "ui_pages": report.get("ui", {}).get("pages"),
+            "decoded_frames": report.get("media", {}).get("decoded_frames"),
+            "ffmpeg": report.get("ffmpeg", {}).get("version"),
+            "frozen": report.get("frozen"),
+            "backend_import": report.get("registry", {}).get("module_import"),
+        },
+        "limitations": [
+            "installer is not code-signed; SmartScreen may warn",
+            "ffmpeg must be available on PATH at runtime",
+        ],
+    }
+    verification_path = out_dir / "verification.json"
+    verification_path.write_text(
+        json.dumps(verification, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    summary = {
+        "version": __version__,
+        "built_at": built_at.isoformat(),
+        "exe": str(executable),
+        "zip": str(archive),
+        "installer": str(setup) if setup else "",
+        "package_dir": str(out_dir),
+        "hashes": {
+            archive.name: sha256(archive),
+            **({setup.name: sha256(setup)} if setup is not None else {}),
+        },
+        "self_test": verification["self_test"],
+    }
+    (out_dir / "package-summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (dist / "package-summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return summary
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dist-dir", type=Path, default=None)
+    parser.add_argument("--no-installer", action="store_true")
+    parser.add_argument("--skip-tests", action="store_true")
+    options = parser.parse_args()
+    package(options.dist_dir, installer=not options.no_installer, run_tests=not options.skip_tests)

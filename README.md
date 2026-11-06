@@ -1,111 +1,247 @@
-# Elink 0.5.0 Preview
+# elink
 
-Windows 独立远程桌面与游戏串流原型。Elink 自己负责采集、发现、会话、播放器和输入；不需要 Sunshine 或 Moonlight，不下载或启动它们。
+远程控制与低延迟串流。分层契约与验证记录在本地 `docs/`（默认不进 Git，安装包内仍会附带）。
+
+Windows 免安装 Python 的版本见 [GitHub Releases](https://github.com/yuyuyu501/elink/releases)：
+`Elink-<版本>-windows-x64-setup.exe` 或解压后双击的便携 ZIP。发布流程见
+[RELEASING.md](RELEASING.md)。
+
+## 当前进度
+
+`backend/` 下 **158 个模块已全部实现，没有空文件**；`frontend/desktop/` 是
+PySide6 桌面端，`scripts/` + `packaging/` 提供可验证的打包链路。
+
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| A | 采集 -> `Frame` -> `libx264` -> `Packet` -> MPEG-TS 写 `.ts` | 已实测 |
+| A | 读 `.ts` -> demux -> `Packet` -> `h264` 解码 -> `Frame` -> 写 PNG | 已实测 |
+| B | 同上，把文件换成 `transport/srt.py` 收发 | 已实测 |
+| C | 音频链路、协议层、协商、控制通道 | 已单测/自测 |
+| D | Qt 桌面端（总览/主机/观看/设备与发现/日志/设置）+ 托盘/自启 + 安装包 | 已实测（含冻结产物） |
+
+## 各层实现状态
+
+| 层 | 实现程度 | 说明 |
+| --- | --- | --- |
+| `media/{frame,packet,stream,timebase}` | 完整 | 数据契约与时间基 |
+| `media/container/mpegts` | 完整 | PAT/PMT/PES/PCR/CRC32，单路视频 |
+| `media/container/{rtp,rtcp}` | 完整 | RTP 打包（单 NAL / FU-A / STAP-A）、RR 报告 |
+| `media/video/codec/*` | 完整 | 18 个编码 / 18 个解码后端，全部基于 ffmpeg 子进程；硬件后端带运行时探测与软件回退 |
+| `media/audio/codec/*` | 完整 | AAC(ADTS) / FLAC / Opus，含按码流规则切包与 PTS 推算 |
+| `media/audio/filter/*`、`processing/*` | 完整 | 重采样、增益、音量、混音、声道布局、采样格式；NLMS 回声消除、AGC、时域噪声抑制 |
+| `media/video/filter/*` | 完整 | 缩放、裁剪、旋转、色彩空间（BT.601/709）、帧率、hwupload/hwdownload |
+| `media/sync/*` | 完整 | 系统时钟/流时钟、抖动缓冲、音视频同步 |
+| `media/device/*` | 完整 | 多显示器枚举、设备枚举、热插拔轮询、权限检查 |
+| `media/video/capture/*` | Windows 完整；Linux X11 完整；Android 需 pyjnius | WGC 无 WinRT 绑定时自动降级为 GDI |
+| `media/video/render/*` | 可用 | Windows 走 GDI 窗口上屏，Linux 走 ffmpeg SDL，Android 走 Surface+Canvas；**D3D11/D3D12 交换链未接入** |
+| `media/video/hwaccel/*` | 加速层 | D3D11VA/D3D12VA 解码可用；纹理为描述符；零拷贝通路做域/状态校验 |
+| `media/video/cursor/*` | Windows 完整 | 指针位图捕获 + alpha 合成 |
+| `pipeline/*` | 完整 | 视频（有界队列丢旧帧）、音频（背压不丢帧）、接收 |
+| `transport/srt` | 完整 | 借 ffmpeg libsrt 搬字节（`-c copy`） |
+| `transport/webrtc/*` | 协商层完整 | ICE 适配、轨道、DataChannel、PeerConnection（SRTP 加解密依赖底层栈） |
+| `signaling/*` | 完整 | SDP 构造/解析（唯一允许拼 SDP 处）、消息编解码、TCP 客户端/服务端 |
+| `control_channel/*` | 完整 | TCP / WebSocket（RFC 6455 子集）/ DataChannel，统一协议帧 |
+| `input_capture/*`、`input_injection/*` | Windows 完整；Linux 完整；Android 需 pyjnius | 低级钩子 / SendInput；evdev / uinput / XTest；getevent / InputManager |
+| `nat/*` | 完整 | STUN（Binding + XOR-MAPPED + MESSAGE-INTEGRITY）、TURN（Allocate/Refresh/Permission）、ICE 候选与连通性检查 |
+| `qos/*` | 完整 | 码率分配、AIMD 拥塞控制、分组 XOR FEC、质量分级 |
+| `security/*` | 完整 | HMAC 令牌、TLS 上下文与指纹、DTLS-SRTP 密钥派生（RFC 5764）、E2EE（需 `cryptography`） |
+| `session/*` | 完整 | 状态机、指数退避重连、能力协商与编码器回退 |
+| `metrics/*`、`event/*`、`logging/*`、`errors/*`、`config/*`、`registry/*` | 完整 | 基础设施 |
+
+## 依赖
+
+- Python 3.11+（后端只用标准库，`main.py` 的命令行链路**不需要** `pip install`）
+- **桌面端界面**：`PySide6 >= 6.7`（`pip install -e .` 会一并装上）
+- **打包**：`pyinstaller >= 6.10`（`pip install -e ".[dev]"`），Windows 安装包另需 Inno Setup 6
+- **ffmpeg 在 PATH 中**，需要 `libx264` 编码器与 `libsrt`（SRT 阶段用）
+  - `ffmpeg -hide_banner -encoders | findstr libx264`
+  - `ffmpeg -hide_banner -protocols | findstr srt`
+- 可选：`cryptography`（E2EE）、`pyjnius`（Android 采集/注入/渲染）
+
+ffmpeg 只承担「算法」与「SRT 收发」：编码/解码走 rawvideo 管道，封解封装与
+时间戳全部由本项目实现，因此 `Frame`/`Packet`/`Timebase` 契约是真的在被验证。
 
 ## 运行
 
-Windows 10/11 x64，当前测试环境为 Windows + Python 3.13。
-
-直接使用请前往 [Releases](https://github.com/yuyuyu501/elink/releases)：下载 `Setup.exe` 可离线安装完整应用，无需安装 Python。默认安装到 `%LOCALAPPDATA%\Programs\Elink`，提供开始菜单入口和卸载功能；也可以继续使用 ZIP 便携包。安装版和便携版使用相同的 `%LOCALAPPDATA%\Elink` 配置，卸载安装版会保留配置。Preview 安装包尚未签名。
+桌面端（图形界面）：
 
 ```powershell
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install -e ".[dev]"
-.venv/Scripts/python.exe main.py
+python main.py --ui
 ```
 
-本地便携构建入口：`dist/Elink/Elink.exe`，需保留整个文件夹。构建：`.venv/Scripts/python.exe -m scripts.build`。
+命令行链路见下（不需要 Qt）。
 
-日常开发按“本地修改 → 自动测试 → Git 同步”执行，审阅暂存修改后运行 `.venv/Scripts/python.exe -m scripts.check_and_sync --message "修改说明"`。按用户授权，明确修复并验证具体问题后继续打包、自测并发布 Windows Preview；调查和未完成的实验不自动发布，剩余限制写入发布说明。详见 [开发与打包流程](docs/development-workflow.md)。
+本地闭环（采集 -> 编码 -> `.ts` -> 解码 -> PNG）：
 
-自动化测试：`.venv/Scripts/python.exe -m pytest -q`。便携包自测可运行 `Elink.exe --self-test <独立测试目录>`，结果写入该目录；实际桌面采集自测为 `--self-test-desktop`，两者均不向系统注入键鼠。
+```powershell
+py -3.13 main.py --mode loopback --duration 3 --width 640 --height 360 `
+    --out out/demo.ts --frames-dir out/frames
+```
 
-双机测试入口：`Elink.exe --peer-test <config.json>`，使用独立身份和输入记录器。2026-09-18 已通过 Tailscale 在两台 Windows 电脑上测试；实际桌面仍存在卡顿，结果与复现步骤见 [双机测试报告](docs/two-machine-test-20260918.md)。
+发送端（SRT caller）：
 
-## 连接两台 Windows 电脑
+```powershell
+py -3.13 main.py --mode send --srt-url srt://127.0.0.1:9000 `
+    --duration 8 --width 640 --height 360
+```
 
-1. 两端启动 Elink。启动后默认可被控，同一时间只允许一台控制端接入，默认 HTTPS TCP 49200。Windows 防火墙需允许 Elink 入站；媒体使用 ICE 动态 UDP 端口。
-2. 如果两端没有可达地址，先自行安装、登录外部 Tailscale，并让两端在允许互访的同一 tailnet 内。Elink 不修改 Tailscale 账户或系统网络设置。
-3. 控制端“设备”页会自动发现同局域网和同 Tailscale 下正在运行 Elink 的机器。相同机器的多个地址会合并为一项，优先使用局域网地址；点击设备即可开始连接，也可使用“通过地址连接”。本机状态和断开当前控制端按钮也位于设备页。
-4. 串流窗口上方的“控制中心”可调整串流分辨率、目标帧率、码率、鼠标、手柄、本机静音、统计和全屏。两端更新至 0.4.29 后，画质通过“应用”在当前连接中生效；切换编解码时可能短暂停顿等待关键帧，输入、剪贴板和会话保持连接。鼠标、手柄和静音立即生效。分辨率和帧率仅控制串流，不改变被控电脑的系统分辨率、刷新率或 DPI 缩放。点击画面捕获输入；F8 打开控制中心并释放输入，Ctrl+Alt+Shift+Z 释放输入，F10 显示 / 隐藏统计，F11 切换全屏，Ctrl+Alt+Shift+Q 断开。Esc 正常发送给游戏。
-5. 在主机点击“断开当前控制端”可结束会话，随后自动恢复等待连接。退出程序会释放输入并停止接入。没有开机启动或后台系统服务。
+接收端（SRT listener，先启动）：
 
-旧 0.2 版本的 GameStream 配对不可复用；0.3 使用独立 `desktop-v3.json` 设置，旧配置与用户数据保留。
+```powershell
+py -3.13 main.py --mode receive --srt-url srt://127.0.0.1:9000 --frames-dir out/frames
+```
 
-首页不再显示常驻日志或串流参数表单，连接失败以可选择复制的提示显示，右侧关闭按钮可收起提示，诊断记录仍保留。详细记录在“网络诊断 → 查看诊断记录”中，默认收起。“设置”页保留常规选项、本机监听端口与手柄后端；画质表单仅在远控窗口显示。
+只解本地文件：
 
-画质提供 720p、900p、1080p、1440p 和 4K 输出分辨率。默认“原生 100%”按所选尺寸传输；可选 75% / 66.7% / 50% 采样，降低宽、高后编码，再由控制端 GPU 重建到输出尺寸，需两端升级。算法可选 RTX Video Super Resolution 或 FSR 1；RTX 需要控制端的 NVIDIA 驱动视频超分开关已开启，未实际生效时提示并回退 FSR。1080p + 50% 传输 960×540，不能恢复全部小字和细节，固定目标码率不会随像素数自动降低。不改变系统 DPI 缩放。详见 [RTX 超分与 50% 对比](docs/rtx-video.md)、[突发与超分优化](docs/burst-and-upscaling.md) 和 [串流分辨率](docs/remote-display.md)。
+```powershell
+py -3.13 main.py --mode receive --out out/demo.ts --frames-dir out/frames
+```
 
-0.4.22 新增“控制中心 → 导出性能报告”，可保存两端各阶段 P50/P95/P99 与队列丢帧计数；画质中可选择实验性 GPU 纹理显示，默认保持兼容显示。GPU 模式将 YUV 颜色转换和缩放移到显卡，但仍有 CPU 平面上传，并非 D3D11 零拷贝；本地验证减少了绘制提交开销，仍需双机游戏验收。使用方法与测量边界见 [性能测量与 GPU 原型](docs/streaming-performance.md)。
+回归测试（不需要 pytest）：
 
-错误文件默认保存到 `%LOCALAPPDATA%\Elink\logs\elink.log`，可在“关于 → 打开日志目录”中直接定位。使用 `ELINK_DATA_DIR` 时位于对应数据目录的 `logs` 下。每个文件上限约 2 MiB，另保留 3 份轮转备份。采集失败记录异常消息、调用堆栈、失败阶段和串流参数；性能报告的两端 `failures` 同时携带有界异常详情与版本信息。排查被控端采集回退时，两端均应更新后，在连接期间导出报告；控制端更新不能给旧被控端补回已丢弃的异常。日志不主动保存桌面像素、按键或剪贴板内容，但包含错误上下文和本机路径，分享前应检查。
+```powershell
+py -3.13 tests/test_mpegts_roundtrip.py    # 编码/封装/解封装/解码契约
+py -3.13 tests/test_protocols.py           # RTP / FEC / 抖动缓冲 / SDP / 控制帧
+py -3.13 tests/test_audio_and_session.py   # 音频链路 / 控制通道 / 会话协商
+```
 
-0.5.1 起，会话异常还会在同一目录自动保存 `session-host-*.json`（被控端）和 `session-controller-*.json`（控制端），各保留最近 20 份。两端文件使用相同的匿名会话标记，记录心跳与视频间隔、通道积压、事件循环延迟和异常堆栈。剪贴板原生写入在后台线程执行；短暂心跳延迟最多等待 20 秒恢复，但连续 2 秒没有输入心跳仍释放已按住的按键。普通任务管理器等高权限窗口需在被控端“设置 → 管理员窗口控制”中重新启动管理员实例；UAC 必须在被控电脑本地确认，管理员实例也不支持控制安全桌面。D3D11 遇到桌面拒绝访问或读取阶段的外部错误会重建采集，等待期间显示上一帧或黑帧，不能操作安全桌面。
+## 桌面端（Qt）
 
-远控窗口使用单层自定义标题栏，控制中心和最小化 / 最大化 / 关闭按钮位于同一行。拖动标题栏移动窗口，双击切换最大化；释放输入后可拖动边缘调整大小。全屏控制时标题栏隐藏，F8 释放输入并显示控制中心；F11 退出全屏并恢复此前窗口状态。
+`frontend/desktop/` 是 PySide6 界面：无边框标题栏 + 分组侧栏（总览 / 主机 / 观看 /
+设备 / 日志 / 设置）+ 卡片式实时预览与会话统计。视觉参考网易 UU 远程 4.x 桌面端的
+界面语言（冷白底、白色圆角卡片、亮蓝主色、状态胶囊、预览上方操作条），默认窗口
+1120×740、字号整体 +1px；同时吸收了 `E:\elink` 的自动发现、托盘/自启动、
+错误提示条与 F8/F10 交互。完整设计说明随安装包的 `docs/` 目录提供；下面给出主要页面截图。
 
-### 实时状态、鼠标显示与应用更新
+| 总览 | 主机模式 |
+| --- | --- |
+| ![总览](assets/screenshots/overview.png) | ![主机模式](assets/screenshots/host.png) |
 
-串流画面左上角显示六行紧凑统计：实际路径、FPS、接收 Mbps、网络往返 RTT、主控端解码耗时和视频丢包率。F10 可隐藏。未知数据显示 `--`；Tailscale 直连或中继通过实际探测区分。Mbps 是实时接收速率，不是设定的码率上限；解码耗时是最近一次解码调用的耗时，不包含后续 RGB 转换、绘制和屏幕显示，不能与 RTT 相加视作端到端延迟。详细测量口径见 [串流统计说明](docs/stream-statistics.md)。
+| 观看模式 · F10 统计（示例画面） | 设备与发现（示例数据） |
+| --- | --- |
+| ![观看模式](assets/screenshots/viewer-stats.png) | ![设备与发现](assets/screenshots/devices.png) |
 
-远控窗口“控制中心 → 鼠标设置”提供三个模式（两端需更新至 0.4.7 或更高版本）：
+| 独立全屏播放器 | 设置（示例数据） |
+| --- | --- |
+| ![全屏播放器](assets/screenshots/stream-fullscreen.png) | ![设置](assets/screenshots/settings.png) |
 
-- **智能鼠标（默认）**：显示被控端系统光标；桌面使用绝对定位，被控端隐藏系统光标时自动改用游戏相对移动。按 Windows 光标状态判断，不是按游戏名适配，检测存在心跳与网络延迟。
-- **使用被控端鼠标**：显示被控端系统光标，保留形状和热点；桌面按主控端位置定位，隐藏光标时使用游戏相对移动。光标位置随视频返回，有网络延迟；旧被控端无法报告光标状态时保留相对移动回退。
-- **使用主控端鼠标**：显示本机箭头，使用绝对定位，同时关闭视频内的远端系统光标叠加。指针移动无需等待网络，但点击反馈仍取决于远端；不复制远端文本／拖拽光标形状，部分游戏不兼容，游戏自己绘制在画面里的光标无法移除。
+```powershell
+pip install -e .            # 安装 PySide6 依赖（或 pip install PySide6）
+python main.py --ui         # 启动桌面端
+```
 
-切换模式先释放按键，点击画面重新控制；F8 释放输入并打开控制中心。设置会保存，旧版“游戏相对鼠标”开关迁移为智能鼠标。旧被控端无法报告光标状态或停止叠加，因此禁用智能／主控端模式选择，保留被控端模式；已有智能设置在旧主机上按桌面绝对定位回退。释放输入后恢复本机指针。
+- **主机**：采集 → 编码（libx264 / NVENC / QSV / AMF）→ MPEG-TS → SRT/文件，
+  并监听 TCP 控制通道接受远端键鼠、文本剪贴板和手柄。
+- **观看**：SRT/文件 → 解封装 → 解码 → 预览；可转发本机键鼠、剪贴板和 XInput 手柄；
+  F8 释放输入、F10 叠加连接统计、F11 打开独立全屏播放器、Ctrl+Alt+Shift+Q 断开。
+- **全屏播放器**：独立全屏窗口，顶部悬浮控制栏（统计 / 释放输入 / 断开 / 退出），
+  鼠标静止后自动隐藏；Esc/F11 退出。
+- **超分辨率**：观看页「超分」开关 + FSR 1 / RTX VSR 引擎 + 1080p/1440p/4K 输出。
+  FSR 1 用 AMD FidelityFX EASU + RCAS（OpenGL 4.2 离屏渲染）；RTX VSR 走
+  `elink_video.dll` 的 D3D11 视频处理器，仅 NVIDIA RTX + 新驱动可用，失败时自动回退 FSR 1。
+- **性能报告**：主机/观看页可导出 JSON，含编码、解码、渲染的 P50/P95/P99 耗时。
+- **设备与发现**：UDP 49320 广播同网设备，显示主机是否开启、SRT/控制端口，
+  点击「连接」自动填入观看地址并开始。设备发现只交换身份与端口，需防火墙放行 UDP。
+- **设置**：开机自启、关闭到托盘、启动后自动开启主机、设备发现与同步开关、
+  数据/日志目录与诊断信息复制。
+- 界面不直接碰 ffmpeg/socket/Win32：全部经 `frontend/desktop/service.py` 在后台
+  线程执行，用 Qt 信号回传帧与统计；设备枚举也改为后台线程，不再阻塞启动。
+- 数据目录 `%LOCALAPPDATA%\Elink`（可用 `ELINK_DATA_DIR` 覆盖）；
+  与旧版合并安装时沿用同一用户目录，但设置文件名是 `config/desktop.json`，
+  不会覆盖旧版的 `desktop-v3.json`。
 
-三种鼠标模式均按桌面／游戏输入状态处理边界：桌面绝对定位可以从实际视频边界移出，越界先定位远端边缘再释放输入，返回画面无需再次点击；游戏隐藏系统光标后使用相对移动，在窗口化、最大化和全屏下均将本机指针约束到实际视频区域，避免进入标题栏和黑边。Raw Input 持续转发硬件位移，读取不可用时回中；光标状态短暂过期不会自行切回桌面模式。F8、显式释放、失焦和关闭窗口均解除约束，远端确认恢复可见光标后也解除游戏约束。退出控制同时发送可靠通道通知和 HTTPS 删除请求；被控端监测控制通道关闭及心跳中断，资源释放失败或超时会记录提示并结束会话占用。
+界面截图可以在不弹出窗口的情况下重新生成：
 
-2026-10-20 鼠标回归：测试复现旧逻辑快速越界时丢失最后位置的问题。`python -m scripts.check_input_capture --output .artifacts/cursor-speed/result.json` 在 Windows Qt 平台的 100% 和 150% 缩放下通过 CPU/GPU 原生检查，覆盖 640×400、1000×650 窗口、16:9 与 4:3 画面、三种鼠标模式的可见/隐藏状态及原始输入回退，共 52 组组合、208 次边界移出，验证默认桌面位置与控制端一致，另检查全屏约束、F8、失焦和窗口部分移出屏幕。测试仅操作合成窗口并记录输入，不向远端注入；双机实际游戏仍需人工验收。
+```powershell
+python -m scripts.ui_preview --platform windows --out out/ui-preview
+python -m scripts.ui_preview --platform windows --demo-peers --pages devices --out out/ui-preview
+```
 
-鼠标设置增加灵敏度，范围 -5.0 至 +5.0、步长 0.1，默认 0.0 使用控制端的 Windows 光标速度与加速，按实际视频区域映射位置，不再叠加被控端的桌面鼠标速度。进入画面、点击前及快速越界时通过可靠通道同步位置，越界先定位到对应边缘再释放输入，避免最后一次移动丢失或被跨通道的释放消息抢先。倍率为 `2^(灵敏度/5)`，两端分别为默认速率的 0.5 倍和 2 倍。游戏隐藏光标时转发控制端原始鼠标计数，再应用灵敏度倍率，游戏内还可能叠加游戏自己的灵敏度；不修改任一电脑的系统鼠标设置。控制中心在选择项目后保持展开，再次点击控制中心或按 F8 收起，收起后点击画面重新控制。
+## 移动端（PWA）
 
-主界面“设置 → 常规”提供“开机时自启动”和“关闭时最小化到托盘”，默认均不勾选。自启动写入当前用户 Windows 启动项并从托盘启动；便携目录移动后需打开新位置的应用以刷新启动路径。托盘模式下关闭主窗口会保留连接服务与现有会话，点击托盘图标恢复窗口，通过托盘菜单“退出 Elink”完全退出；系统托盘不可用时会正常显示或退出窗口。应用更新会真正退出，不受托盘选项阻挡。
+```powershell
+py -3.13 frontend/dev_server.py --port 8099     # 只预览
+py -3.13 frontend/dev_server.py --port 8099 --allow-inject
+# 手机浏览器打开 http://<本机IP>:8099/mobile/
+```
 
-“关于”页显示版本并提供“检测更新”，可选择包含预览版本。发现新版后先询问；同意后下载完整 Windows x64 便携 ZIP、校验 SHA-256、解压检查，随后断开串流、退出并自动替换和重启。下载可以取消，启动失败会尝试恢复旧版；旧目录保留在应用旁的 `.Elink-update-*` 内，确认新版正常后可删除。不会静默更新或安装驱动。
+移动端与桌面端共用同一套设计令牌（冷白底、白色圆角卡片、亮蓝主色、深色预览、
+黑底在线胶囊），保留了原手势：单指拖动控制鼠标、双指点按右键、双指上下滚动、
+「键盘」按钮按文本注入。画面是低频快照（默认 2fps / 480 宽），不是视频流。
 
-自动替换仅支持解压后的便携版，目录及上级目录需可写，需预留 3 GiB 加下载包大小的空间。用户配置和配对数据仍在 `%LOCALAPPDATA%\Elink`，或外置的 `ELINK_DATA_DIR`；不支持将数据放在应用文件夹内进行自动更新。源码运行时可检测版本并前往 Releases 手动下载。下载依赖能访问 GitHub；网络失败或 API 限流时可重试或手动更新。
+<img src="assets/screenshots/mobile.png" width="320" alt="移动端控制台" />
 
-**0.4.0 EXE 没有更新入口，需要先手动安装一次 0.4.1 或更高版本。** 后续可通过“关于 → 检测更新”升级。更新说明、校验与回退边界见 [应用更新说明](docs/application-updates.md)。
+## 打包
 
-## 当前能力
+```powershell
+# 构建 + 产物自检 + 便携 ZIP（+ 若已安装 Inno Setup，则再出安装包）
+py -3.13 -m scripts.package_windows
 
-- DXGI 桌面采集，H.264 硬件编码优先 NVENC / AMF / QSV，失败时使用 libx264。
-- Elink 窗口播放，D3D11VA 解码优先、软件回退，最新画面队列有界。
-- aiortc WebRTC：ICE、DTLS/SRTP、RTP/RTCP、NACK/PLI、拥塞反馈；只协商 H.264 视频和 Opus 音频。
-- WASAPI 系统声音采集、立体声播放；键盘按住/释放、相对或绝对鼠标、滚轮。
-- 控制端 XInput 最多四个手柄；主机可选择 ViGEmBus 兼容模式、ElinkPad 实验驱动或禁用手柄。兼容模式保留现有四手柄及震动；ElinkPad 当前限单手柄，选择后不会暗中回退至 ViGEm。
-- 同网自动发现与直接连接、单控制端占用检查、会话内证书固定；失焦/断线/超时释放输入。主机证书私钥使用 DPAPI 保存。
-- 外部 Tailscale 状态、设备列表、直连或中继路径探测。
+# 只构建
+py -3.13 -m scripts.build
+```
 
-## Linux 与 Android 0.5.0 预览
+产物：
 
-仓库按 `elink/core`、`elink/ui`、`elink/platforms/windows`、`elink/platforms/linux`、`native/windows`、`android` 和 `protocol` 分层。桌面仍使用共享 Python/Qt 应用和平台后端；Android 是独立 Kotlin 工程，使用原生 WebRTC `SurfaceViewRenderer` 解码显示。
+- `dist/Elink/Elink.exe` —— 当前 onedir 目录版（启动快、升级只换变化文件）；
+  双击（无参数）默认打开图形界面
+- `dist/<版本>/Elink-<版本>-windows-x64.zip` —— 便携包
+- `dist/<版本>/Elink-<版本>-windows-x64-setup.exe` —— 离线安装包（Inno Setup 6；
+  安装到 `%LOCALAPPDATA%\Programs\Elink`，开始菜单/可卸载，沿用旧版 AppId）
+- `dist/<版本>/SHA256SUMS.txt`、`dist/<版本>/verification.json` —— 发布校验
+- `dist/<版本>/package-summary.json` —— 该版本构建摘要
 
-Linux x64 同时提供控制端和被控端。当前实测环境为 Deepin 25、X11、glibc 2.38。X11 采集、键鼠输入、系统声音、控制发现和两台实机之间的 H.264/WebRTC 双向视频已测试。Linux 上没有用于测试的 NVIDIA 编解码运行库，因此该环境使用 libx264 和软件 H.264；游戏手柄还依赖用户有权访问 `/dev/uinput`。Wayland Portal/PipeWire 后端是实验实现，尚未实机验收；系统权限对话框、剪贴板、手柄反馈与打包依赖存在限制。Linux 安装包基于 glibc 2.38 构建，不能据此宣称兼容更旧发行版。
+多个版本会并存于 `dist/<版本>/`，根目录只保留一个 `dist/`。
 
-Android arm64 是控制端预览，支持连接 Windows/Linux 主机、H.264/Opus 接收、触控、键鼠及基础手柄输入。实际设备使用 MediaCodec 与 WebRTC 原生渲染，但本轮没有可用 Android 调试授权，因此未做手机/平板实机、游戏手柄、持续帧率、电池与热稳定性验收；提供签名 APK 供手动测试。没有 Android 被控端、应用内自动更新或 iOS/macOS 版本。
+安装包需要 Inno Setup 6 的 `ISCC.exe`：可设 `ELINK_ISCC` 指向已有工具链，
+或安装到默认 `Program Files`。完整发布流程见 [RELEASING.md](RELEASING.md)
+（`docs/` 默认不进 Git），Release 正文在 [releases/v0.6.0.md](releases/v0.6.0.md)。
 
-Android 第三方许可和协议范围见 `licenses/android`、[协议说明](protocol/README.md) 与[跨平台实现记录](docs/cross-platform-design.md)。
+> **onedir 不能只拷 exe**：`Elink.exe` 依赖同目录的 `_internal/`、`docs/`、
+> `web/` 等文件。便携 ZIP 解压后请保留整个 `Elink/` 目录，或者用安装包；
+> 单独把 `Elink.exe` 拖到桌面会因为找不到依赖而无法启动。
 
-## 尚未完成
+> **后端在哪里**：PyInstaller 把 Python 模块压进 `Elink.exe` 内部的 `PYZ.pyz`，
+> 所以磁盘上不会出现独立的 `backend/` 目录，但 backend 确实在 exe 里（本次包内有
+> 222 个 backend 模块）；`_internal/` 放的是 Python 运行时、Qt DLL 与图标等资源。
+> 后端不是独立服务，它和界面在同一个进程里，用后台线程跑采集/编码/SRT/控制通道。
+> 唯一没有打包进 exe 的运行时依赖是 **ffmpeg**，需要目标机器 PATH 中可用。
 
-这是可验证的独立核心预览版，尚未达到成熟游戏串流产品的性能与兼容性。可选串流尺寸最高 3840 × 2160；当前 H.264 Level 5.2 预算允许 4K60、1440p144，1080p 可选至 240 FPS。这是参数范围，不是实际帧率承诺；高分辨率会增加转换、编解码、带宽和显示开销。Qt 图像绘制和 CPU/GPU 拷贝尚未改成零拷贝渲染。通道 RTT 不代表操作到显示的总延迟。
+**打包必须验证产物本身**：`scripts/package_windows.py` 会用打好的 exe 跑
+`--self-test`，检查 Qt 平台插件、图标资源、字体、ffmpeg 通路
+（编码 → 封装 → 解封装 → 解码），任一项失败就中止，不会产出「装完打不开」的包。
 
-没有自有信令服务器、公网 STUN/TURN 或内置 Tailscale。没有可达路径且 Tailscale 不可用时，无法连接。跨 NAT 不作成功保证；中继可能增加延迟。
+Linux：
 
-目前只串流主显示器当前桌面；没有 HDR、HEVC/AV1、多显示器选择、专用游戏启动列表、文件传输、UAC/锁屏控制、服务模式、独立窗口级采集。Android 设备搜索暂只覆盖可广播的局域网，不覆盖 Tailscale MagicDNS；请使用可达 IP。F8 / F10 / F11 被播放器保留。不计划 macOS/iOS。
+```bash
+python -m scripts.package_linux      # PyInstaller 目录 + tar.gz + elink.desktop
+```
 
-NVENC/D3D11VA 可在本机验证；AMF/QSV、实际物理手柄游戏和跨网表现需要对应设备与第二台电脑验收。
+> 打 exe 时的关键点：注册表按「模块路径字符串」动态导入后端，PyInstaller 的静态
+> 分析看不到，必须 `--collect-submodules backend`；而该选项依赖常规包，所以
+> `backend/`、`frontend/` 下每个目录都有 `__init__.py`（早期用命名空间包时打包
+> 出来的程序「注册表为空」，就是踩了这个坑）。
 
-## 自主手柄驱动进度
+## 已知限制
 
-`native/windows/elinkpad` 新增 Elink 自己维护的 UMDF2/XUSB 实验驱动，不需要 Sunshine、Moonlight 或 ViGEm 才能编译。当前实现单手柄、版本化 IOCTL、句柄控制权、震动反馈和 500 ms 失联归零。应用用独立工作线程提交状态，避免设备访问阻塞串流。
-
-驱动已编译，并完成原生协议测试、INF 校验和未签名目录文件生成；尚未安装到工作机，也未完成 Windows XInput 或真实游戏验证。**当前默认仍是已验证过的 ViGEm 兼容模式，不应理解为已彻底替代 ViGEm。** 实验选项需要在独立测试系统签名、加载驱动，并运行临时设备助手；未就绪会明确报错，键鼠和串流仍可使用。
-
-构建：`.venv/Scripts/python.exe scripts/build_elinkpad.py --fetch-wdk`。工具只在项目目录取得 WDK 和编译，不安装驱动、不导入证书、不修改系统启动设置。详见 [驱动开发说明](native/windows/elinkpad/README.md) 和 [更新验收记录](docs/elinkpad-upgrade.md)。
-
-实现与验证记录见 [docs/implementation.md](docs/implementation.md)。第三方库和再分发要求见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- **采集**：Windows 为 GDI `BitBlt`（DXGI 桌面复制零拷贝通道未接入）；Wayland 需要
+  PipeWire portal，当前会给出明确错误而不是静默失败。
+- **渲染**：D3D11/D3D12 的交换链未接入，目前是 CPU 上屏；接口与之保持一致。
+- **时间戳**：解码器按「第 N 个输出帧对应第 N 个输入包」映射 PTS，要求码流无 B 帧
+  重排序（编码端固定 `-bf 0`）。
+- **SRT**：借 ffmpeg 的 libsrt 搬字节（`-c copy`），本项目不做 SRT 协议实现；
+  连接建立时前 1~3 帧会因探测窗口被丢弃（实测 5 秒 150 帧收到 149 帧）。
+- **SRTP/E2EE**：密钥派生已实现，实际加解密需要 `cryptography` 或底层 WebRTC 栈。
+- **MPEG-TS**：当前只封装单路视频；音频进 TS 需要扩展 muxer 的 stream_type 表。
+- **Android**：采集/注入/渲染通过 pyjnius，需要真实 Android 运行环境与系统权限。
+- **手柄**：只实现 ViGEmBus 兼容模式，需要目标机器自行安装 ViGEmBus 驱动；
+  `E:\elink` 的 ElinkPad 自研驱动没有搬入，安装包也不会替用户安装驱动。
+- **剪贴板**：只同步 Unicode 文本（最多 64000 字符），不同步图片/文件；
+  当前实现是 Windows 原生 API，非 Windows 平台不可用。
+- **超分**：FSR 1 与 RTX VSR 都会回读 CPU 再交给 QImage 预览，不是零拷贝上屏；
+  RTX VSR 需要 NVIDIA RTX 显卡和较新驱动，其它 GPU 自动回退 FSR 1。
+  每帧增加一次 GPU 处理 + 回读，4K 输出下帧率可能低于 30fps。
+- **性能报告**：统计本机编码/解码/渲染阶段耗时，不包含网络 RTT 或端到端延迟。
+- **发现服务**：无鉴权 UDP 广播，仅适合个人局域网；需防火墙放行 UDP 49320。
+- **安装包签名**：当前未代码签名，SmartScreen 可能提示；GitHub Releases 工作流已准备，
+  实际替换仓库/推送 Tag 还需要仓库凭据。

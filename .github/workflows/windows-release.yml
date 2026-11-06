@@ -1,0 +1,67 @@
+name: Windows Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install ffmpeg and Inno Setup
+        shell: pwsh
+        run: |
+          choco install ffmpeg --no-progress -y
+          choco install innosetup --no-progress -y
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\ProgramData\chocolatey\bin"
+          $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+          ffmpeg -version
+      - name: Verify tag matches application version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python -c "import os; from frontend.desktop import __version__; tag=os.environ['GITHUB_REF_NAME']; assert tag == f'v{__version__}', f'tag {tag} != v{__version__}'"
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Build portable ZIP and verified installer
+        run: python -m scripts.package_windows --dist-dir dist
+      - name: Show package summary
+        run: Get-Content dist/package-summary.json
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elink-windows-x64
+          path: |
+            dist/*/Elink-*-windows-x64.zip
+            dist/*/Elink-*-windows-x64-setup.exe
+            dist/*/SHA256SUMS.txt
+            dist/*/verification.json
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Elink ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/*/Elink-*-windows-x64.zip
+            dist/*/Elink-*-windows-x64-setup.exe
+            dist/*/SHA256SUMS.txt
+            dist/*/verification.json
+          body_path: releases/${{ github.ref_name }}.md
