@@ -27,8 +27,8 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "C:\ProgramData\chocolatey\bin"
           $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
           ffmpeg -version
-      - name: Install package
-        run: python -m pip install -e .
+      - name: Install package and build dependencies
+        run: python -m pip install -e ".[dev]"
       - name: Run backend regression suites
         run: python -m scripts.check
       - name: Run frozen-style UI self-test
@@ -37,6 +37,11 @@ jobs:
           $env:ELINK_SELFTEST_HEADLESS = '1'
           $env:ELINK_DATA_DIR = Join-Path $env:TEMP 'elink-ci-data'
           python main.py --self-test out/self-test.json
+      - name: Print self-test report on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path out/self-test.json) { Get-Content out/self-test.json }
       - name: Upload self-test report
         uses: actions/upload-artifact@v4
         if: always()

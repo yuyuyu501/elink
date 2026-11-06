@@ -35,10 +35,20 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           python -c "import os; from frontend.desktop import __version__; tag=os.environ['GITHUB_REF_NAME']; assert tag == f'v{__version__}', f'tag {tag} != v{__version__}'"
-      - name: Install package
-        run: python -m pip install -e .
+      - name: Install package and build dependencies
+        run: python -m pip install -e ".[dev]"
       - name: Build portable ZIP and verified installer
-        run: python -m scripts.package_windows --dist-dir dist
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          python -m scripts.package_windows --dist-dir dist 2>&1 | Tee-Object -FilePath out/package.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Print package log on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path out/package.log) { Get-Content out/package.log -Tail 200 }
+          if (Test-Path dist/Elink/self-test.json) { Get-Content dist/Elink/self-test.json }
       - name: Show package summary
         run: Get-Content dist/package-summary.json
       - name: Upload build artifact
