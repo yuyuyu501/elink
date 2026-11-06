@@ -43,17 +43,25 @@ jobs:
           New-Item -ItemType Directory -Force -Path out | Out-Null
           python -m scripts.package_windows --dist-dir dist 2>&1 | Tee-Object -FilePath out/package.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Print package log on failure
+      - name: Publish failure log to diagnostics branch
         if: failure()
         shell: pwsh
         run: |
           "## Package failure log" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           if (Test-Path out/package.log) {
             Get-Content out/package.log -Tail 200 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Copy-Item out/package.log ci-package.log -Force
           }
           if (Test-Path dist/Elink/self-test.json) {
             Get-Content dist/Elink/self-test.json | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Copy-Item dist/Elink/self-test.json ci-self-test.json -Force
           }
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout -B ci-diagnostics
+          git add -f ci-package.log ci-self-test.json
+          git commit -m "ci diagnostics for $env:GITHUB_SHA" --allow-empty
+          git push origin ci-diagnostics --force
       - name: Show package summary
         run: Get-Content dist/package-summary.json
       - name: Upload build artifact
