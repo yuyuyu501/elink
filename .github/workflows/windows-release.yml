@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: windows-release-${{ github.ref }}
@@ -48,6 +49,8 @@ jobs:
       - name: Publish failure log to diagnostics branch
         if: failure()
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           "## Package failure log" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           if (Test-Path out/package.log) {
@@ -58,10 +61,17 @@ jobs:
             Get-Content dist/Elink/self-test.json | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             Copy-Item dist/Elink/self-test.json ci-self-test.json -Force
           }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'elink-ci' }
+          $jobs = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/jobs"
+          $job = $jobs.jobs | Where-Object { $_.name -eq $env:GITHUB_JOB } | Select-Object -First 1
+          if ($job) {
+            $log = Invoke-WebRequest -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/jobs/$($job.id)/logs"
+            $log.Content | Set-Content ci-job.log -Encoding utf8
+          }
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git checkout -B ci-diagnostics
-          git add -f ci-package.log ci-self-test.json
+          git add -f ci-package.log ci-self-test.json ci-job.log
           git commit -m "ci diagnostics for $env:GITHUB_SHA" --allow-empty
           git push origin ci-diagnostics --force
       - name: Show package summary
