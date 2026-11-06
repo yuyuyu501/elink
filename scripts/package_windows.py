@@ -18,6 +18,13 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+# GitHub Actions 的 Windows runner 默认 stdout 是 cp1252；中文 print 会直接
+# UnicodeEncodeError 让打包在第一步就退出。统一用 UTF-8，保留终端可读性。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "Elink"
 
