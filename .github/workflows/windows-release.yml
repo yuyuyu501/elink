@@ -41,8 +41,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          python -m scripts.package_windows --dist-dir dist 2>&1 | Tee-Object -FilePath out/package.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m scripts.package_windows --dist-dir dist *> out/package.log
+          $code = $LASTEXITCODE
+          Get-Content out/package.log -Tail 120
+          exit $code
       - name: Publish failure log to diagnostics branch
         if: failure()
         shell: pwsh
