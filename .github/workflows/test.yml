@@ -37,6 +37,12 @@ jobs:
           $env:ELINK_SELFTEST_HEADLESS = '1'
           $env:ELINK_DATA_DIR = Join-Path $env:TEMP 'elink-ci-data'
           python main.py --self-test out/self-test.json
+          $code = $LASTEXITCODE
+          if (Test-Path out/self-test.json) {
+            $report = Get-Content out/self-test.json -Raw | ConvertFrom-Json
+            if ($report.ok) { exit 0 }
+          }
+          exit $code
       - name: Print self-test report on failure
         if: failure()
         shell: pwsh
