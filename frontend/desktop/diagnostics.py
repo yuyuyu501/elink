@@ -213,7 +213,13 @@ def run_self_test(output: Path) -> int:
 
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"ok": report["ok"], "report": str(output)}, ensure_ascii=False))
-    return 0 if report["ok"] else 1
+    if report["ok"]:
+        # PySide6 6.12 的 offscreen 插件在进程退出阶段可能把退出码改成 1；
+        # 自检已经写完报告并打印 ok，直接结束进程，避免 CI 误判。
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+    return 1
 
 
 def _version() -> str:
