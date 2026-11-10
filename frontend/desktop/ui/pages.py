@@ -1,4 +1,4 @@
-"""五个页面：总览、主机、观看、设备、日志。
+"""总览、主机配置和观看会话页面。
 
 页面只做「收集参数 / 展示数据」；真正的 I/O 都通过信号交给
 ``MainWindow`` → ``SessionService``。这样界面可以随时重排，而不碰后端。
@@ -6,10 +6,8 @@
 
 from __future__ import annotations
 
-import html
 import platform
 import socket
-import time
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
@@ -25,7 +23,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -38,7 +35,6 @@ from .widgets import (
     Card,
     ElidedLabel,
     FormField,
-    IconTile,
     MetricStrip,
     MetricsGrid,
     QuickTile,
@@ -216,9 +212,6 @@ class OverviewPage(QWidget):
         text_box.addWidget(self.subtitle)
         head_row.addLayout(text_box, 1)
 
-        logs_button = _plain("运行日志", "terminal", object_name="ghost")
-        logs_button.clicked.connect(lambda: self.navigate.emit("logs"))
-        head_row.addWidget(logs_button)
         root.addWidget(header)
 
         self.update_environment(platform_text=_platform_text(), display_count=display_count,
@@ -287,7 +280,6 @@ class OverviewPage(QWidget):
             ("mouse", "键鼠接管", lambda: self.navigate.emit("viewer")),
             ("camera", "保存截图", self.snapshot_requested.emit),
             ("cpu", "设备检测", lambda: self.navigate.emit("devices")),
-            ("terminal", "运行日志", lambda: self.navigate.emit("logs")),
         ]
         for index, (icon_name, text, callback) in enumerate(actions):
             if index:
@@ -447,11 +439,11 @@ class HostPage(QWidget):
         self.fps.setSingleStep(5)
         self.fps.setValue(30)
         self.fps.setSuffix(" fps")
-        self.bitrate = QSpinBox()
-        self.bitrate.setRange(300, 20000)
-        self.bitrate.setSingleStep(500)
-        self.bitrate.setValue(4000)
-        self.bitrate.setSuffix(" kbps")
+        self.bitrate = QDoubleSpinBox()
+        self.bitrate.setDecimals(3)
+        self.bitrate.setRange(0.3, 20)
+        self.bitrate.setSingleStep(0.5)
+        self.bitrate.setValue(4)
         self.encoder = QComboBox()
         self.encoder.addItems(ENCODERS)
         self.preset = QComboBox()
@@ -473,7 +465,7 @@ class HostPage(QWidget):
         grid.addWidget(self.display_field, 0, 0, 1, 2)
         grid.addWidget(FormField("输出分辨率", self.resolution), 1, 0)
         grid.addWidget(FormField("帧率", self.fps), 1, 1)
-        grid.addWidget(FormField("码率", self.bitrate), 2, 0)
+        grid.addWidget(FormField("码率（Mbps）", self.bitrate), 2, 0)
         grid.addWidget(FormField("编码器", self.encoder), 2, 1)
         grid.addWidget(FormField("编码预设", self.preset), 3, 0)
         grid.addWidget(FormField("传输方式", self.transport), 3, 1)
@@ -565,7 +557,7 @@ class HostPage(QWidget):
         _name, _detail, _icon, _tone, resolution, fps, bitrate = meta
         self.resolution.setCurrentText(resolution)
         self.fps.setValue(fps)
-        self.bitrate.setValue(bitrate)
+        self.bitrate.setValue(bitrate / 1000)
         for profile_key, button in self._profile_buttons.items():
             button.setChecked(profile_key == key)
 
@@ -576,7 +568,7 @@ class HostPage(QWidget):
             width=width,
             height=height,
             fps=float(self.fps.value()),
-            bitrate_kbps=int(self.bitrate.value()),
+            bitrate_kbps=round(self.bitrate.value() * 1000),
             encoder=ENCODERS[self.encoder.currentIndex()],
             preset=PRESETS[self.preset.currentIndex()],
             transport="srt" if self.transport.currentIndex() == 0 else "file",
@@ -833,387 +825,6 @@ class ViewerPage(QWidget):
         self.metrics.set("frames", f"{stats.frames_in} / {stats.frames_out}")
         self.metrics.set("keyframes", str(stats.key_frames))
         self.metrics.set("elapsed", f"{stats.elapsed_s:.0f} s")
-
-
-# --------------------------------------------------------------------------
-# 设备
-# --------------------------------------------------------------------------
-DEVICE_GROUPS = {
-    "display": ("显示器", "monitor", "blue"),
-    "camera": ("摄像头", "camera", "green"),
-    "microphone": ("麦克风", "volume-2", "orange"),
-    "speaker": ("扬声器", "volume-2", "purple"),
-}
-
-
-class DevicesPage(QWidget):
-    """设备与发现：同网设备、本机硬件两张卡片。"""
-
-    refresh_requested = Signal()
-    connect_peer = Signal(dict)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._peers: list[dict] = []
-        self._discovery_enabled = True
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(14)
-
-        header, actions, self.pill = _header(
-            "设备与发现", "自动发现同网段的主机；下方是本机可采集的硬件。", pill_text="发现中"
-        )
-        self.pill.set("发现中", "accent")
-        self.refresh_button = _plain("刷新", "refresh-cw")
-        self.refresh_button.clicked.connect(self.refresh_requested.emit)
-        actions.addWidget(self.refresh_button)
-        root.addWidget(header)
-
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        holder = QWidget()
-        self._list_layout = QVBoxLayout(holder)
-        self._list_layout.setContentsMargins(0, 0, 6, 0)
-        self._list_layout.setSpacing(14)
-        self.scroll.setWidget(holder)
-        root.addWidget(self.scroll, 1)
-
-        discovery = Card("同局域网设备", "运行 elink 并开启主机模式的机器会自动出现在这里")
-        self.local_row = LocalDeviceRow(self)
-        discovery.body().addWidget(self.local_row)
-        self.discovery_hint = hint("正在搜索同网设备…")
-        discovery.body().addWidget(self.discovery_hint)
-        self._peer_layout = QVBoxLayout()
-        self._peer_layout.setSpacing(8)
-        discovery.body().addLayout(self._peer_layout)
-        self._list_layout.addWidget(discovery)
-        self._peer_card = discovery
-
-        hardware = Card("本机硬件", "显示器、摄像头、麦克风与扬声器")
-        self._hardware_layout = QVBoxLayout()
-        self._hardware_layout.setSpacing(12)
-        hardware.body().addLayout(self._hardware_layout)
-        self._list_layout.addWidget(hardware)
-        self._list_layout.addStretch(1)
-
-        self.set_peers([])
-        self.set_devices([])
-
-    # ---- 发现 ----
-    def set_discovery_state(self, enabled: bool, message: str = "") -> None:
-        self._discovery_enabled = enabled
-        self.pill.set("发现中" if enabled else "发现已关闭", "accent" if enabled else "idle")
-        self.discovery_hint.setText(message or (
-            "正在搜索同网设备…" if enabled else "设备发现已关闭；可在设置页重新开启。"
-        ))
-
-    def set_local_state(self, hosting: bool, srt_text: str = "", control_port: int = 7000, *, srt_ready: bool = True) -> None:
-        self.local_row.update(hosting, srt_text, control_port, srt_ready=srt_ready)
-
-    def set_peers(self, peers: list[dict]) -> None:
-        self._peers = list(peers)
-        _clear_layout(self._peer_layout)
-        if not peers:
-            empty = EmptyDevice(
-                "link",
-                "还没有发现设备",
-                "让对方打开「主机模式」并开启设备发现；两台机器需在同一局域网。" if self._discovery_enabled
-                else "设备发现已关闭。",
-            )
-            self._peer_layout.addWidget(empty)
-            return
-        for peer in peers:
-            row = PeerRow(peer, self.connect_peer.emit)
-            self._peer_layout.addWidget(row)
-        if self.discovery_hint.text().startswith("正在搜索"):
-            self.discovery_hint.setText(f"发现 {len(peers)} 台同网设备")
-
-    # ---- 本机硬件 ----
-    def set_devices(self, items: list[dict]) -> None:
-        _clear_layout(self._hardware_layout)
-        if not items:
-            self._hardware_layout.addWidget(
-                EmptyDevice("cpu", "未发现可用设备", "点击右上角刷新重试；摄像头/麦克风需要系统权限。")
-            )
-            return
-
-        groups: dict[str, list[dict]] = {}
-        for item in items:
-            groups.setdefault(str(item.get("kind", "other")), []).append(item)
-
-        for kind in ("display", "camera", "microphone", "speaker"):
-            devices = groups.get(kind, [])
-            if not devices:
-                continue
-            name, icon_name, tone = DEVICE_GROUPS.get(kind, ("其他设备", "cpu", "slate"))
-            heading = QHBoxLayout()
-            heading.addWidget(card_title(name))
-            heading.addStretch(1)
-            heading.addWidget(hint(f"{len(devices)} 个"))
-            self._hardware_layout.addLayout(heading)
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(10)
-            grid.setVerticalSpacing(10)
-            for index, device in enumerate(devices):
-                grid.addWidget(DeviceRow(device, icon_name, tone), index // 2, index % 2)
-            grid.setColumnStretch(0, 1)
-            grid.setColumnStretch(1, 1)
-            self._hardware_layout.addLayout(grid)
-
-
-class LocalDeviceRow(QFrame):
-    """设备页顶部的「本机」卡片。"""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("deviceRow")
-        self.setProperty("default", True)
-        self.setFixedHeight(66)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(10)
-        layout.addWidget(IconTile("monitor", "blue", 34))
-        text_box = QVBoxLayout()
-        text_box.setSpacing(2)
-        self.name = label(f"{socket.gethostname() or '本机'} · 本机", "cardTitle")
-        text_box.addWidget(self.name)
-        self.detail = hint("主机模式未开启")
-        text_box.addWidget(self.detail)
-        layout.addLayout(text_box, 1)
-        self.pill = StatusPill("未开启主机", "idle")
-        layout.addWidget(self.pill, 0, Qt.AlignmentFlag.AlignVCenter)
-
-    def update(self, hosting: bool, srt_text: str, control_port: int, *, srt_ready: bool = True) -> None:
-        if hosting and srt_ready:
-            self.detail.setText(f"{srt_text} · 控制端口 {control_port}")
-            self.pill.set("可连接", "ok")
-        elif hosting:
-            self.detail.setText(f"仅写入文件 · 控制端口 {control_port}")
-            self.pill.set("未开放 SRT", "busy")
-        else:
-            self.detail.setText("主机模式未开启 · 同网设备可发现本机")
-            self.pill.set("未开启主机", "idle")
-
-
-class PeerRow(QFrame):
-    def __init__(self, peer: dict, on_connect, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.peer = peer
-        self.setObjectName("deviceRow")
-        self.setFixedHeight(66)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(10)
-        layout.addWidget(IconTile("monitor", "cyan", 34))
-        text_box = QVBoxLayout()
-        text_box.setSpacing(2)
-        name = label(str(peer.get("name", "未命名设备")), "cardTitle")
-        text_box.addWidget(name)
-        platform = str(peer.get("platform", ""))
-        version = str(peer.get("version", ""))
-        detail = f"{peer.get('ip', '')}"
-        if platform:
-            detail += f" · {platform}"
-        if version:
-            detail += f" · v{version}"
-        text_box.addWidget(hint(detail))
-        layout.addLayout(text_box, 1)
-
-        hosting = bool(peer.get("hosting"))
-        port = int(peer.get("srt_port") or 0)
-        connectable = hosting and port > 0
-        pill = StatusPill(
-            "可连接" if connectable else ("仅文件主机" if hosting else "未开启主机"),
-            "ok" if connectable else ("busy" if hosting else "idle"),
-        )
-        layout.addWidget(pill, 0, Qt.AlignmentFlag.AlignVCenter)
-
-        button = QPushButton("连接" if connectable else "不可用")
-        button.setObjectName("primary" if connectable else "")
-        button.setMinimumWidth(76)
-        button.setEnabled(connectable)
-        button.clicked.connect(lambda: on_connect(peer))
-        layout.addWidget(button)
-
-
-class DeviceRow(QFrame):
-    def __init__(self, device: dict, icon_name: str, tone: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("deviceRow")
-        self.setProperty("default", bool(device.get("default")))
-        self.setFixedHeight(62)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(10)
-        layout.addWidget(IconTile(icon_name, tone, 34))
-        text_box = QVBoxLayout()
-        text_box.setSpacing(2)
-        name_label = label(str(device.get("name", "未命名设备")), "cardTitle")
-        name_label.setMaximumWidth(240)
-        text_box.addWidget(name_label)
-        identifier = str(device.get("id", ""))
-        id_label = hint(identifier)
-        id_label.setToolTip(identifier)
-        id_label.setMaximumWidth(240)
-        text_box.addWidget(id_label)
-        layout.addLayout(text_box, 1)
-        if device.get("default"):
-            badge = QLabel("默认")
-            badge.setObjectName("pill")
-            badge.setProperty("tone", "accent")
-            layout.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
-
-
-class EmptyDevice(QWidget):
-    def __init__(
-        self,
-        icon_name: str = "cpu",
-        title_text: str = "未发现设备",
-        subtitle: str = "",
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 26, 0, 26)
-        layout.setSpacing(8)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(IconTile(icon_name, "slate", 46), 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(label(title_text, "cardTitle"), 0, Qt.AlignmentFlag.AlignHCenter)
-        if subtitle:
-            subtitle_label = label(subtitle, "muted")
-            subtitle_label.setWordWrap(True)
-            subtitle_label.setMaximumWidth(520)
-            subtitle_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            layout.addWidget(subtitle_label, 0, Qt.AlignmentFlag.AlignHCenter)
-
-
-def _clear_layout(layout) -> None:
-    while layout.count():
-        item = layout.takeAt(0)
-        widget = item.widget()
-        child_layout = item.layout()
-        if widget is not None:
-            widget.setParent(None)
-            widget.deleteLater()
-        elif child_layout is not None:
-            _clear_layout(child_layout)
-
-
-# --------------------------------------------------------------------------
-# 日志
-# --------------------------------------------------------------------------
-LEVEL_META = {
-    "info": ("信息", "#2B6BFF"),
-    "warn": ("警告", "#D96A00"),
-    "error": ("错误", "#D92D2D"),
-}
-
-
-class LogsPage(QWidget):
-    """运行日志（按级别筛选）。"""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._entries: list[tuple[str, str, str]] = []
-        self._filter = "all"
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(14)
-
-        header, actions, _pill = _header(
-            "日志", "会话过程中的关键事件；排查问题时先看这里。", pill_text="诊断"
-        )
-        self.copy_button = _plain("复制全部", "copy", object_name="ghost")
-        self.clear_button = _plain("清空", "", object_name="ghost")
-        actions.addWidget(self.copy_button)
-        actions.addWidget(self.clear_button)
-        root.addWidget(header)
-
-        card = Card("事件流", "按级别筛选，最多保留 4000 条")
-        card.body().setSpacing(10)
-
-        filters = QHBoxLayout()
-        filters.setSpacing(6)
-        self._filter_group = QButtonGroup(self)
-        self._filter_group.setExclusive(True)
-        for index, (key, text) in enumerate(
-            [("all", "全部"), ("info", "信息"), ("warn", "警告"), ("error", "错误")]
-        ):
-            chip = QPushButton(text)
-            chip.setObjectName("chip")
-            chip.setCheckable(True)
-            chip.setCursor(Qt.CursorShape.PointingHandCursor)
-            if index == 0:
-                chip.setChecked(True)
-            self._filter_group.addButton(chip, index)
-            chip.clicked.connect(lambda _=False, k=key: self._set_filter(k))
-            filters.addWidget(chip)
-        filters.addStretch(1)
-        card.body().addLayout(filters)
-
-        self.view = QTextEdit()
-        self.view.setObjectName("logView")
-        self.view.setReadOnly(True)
-        self.view.setAcceptRichText(True)
-        self.view.setPlaceholderText("等待会话事件…")
-        card.body().addWidget(self.view, 1)
-        root.addWidget(card, 1)
-
-        self.clear_button.clicked.connect(self.clear)
-        self.copy_button.clicked.connect(self._copy_all)
-
-    def _set_filter(self, key: str) -> None:
-        self._filter = key
-        self._render()
-
-    def append(self, message: str, level: str = "info") -> None:
-        stamp = time.strftime("%H:%M:%S")
-        self._entries.append((stamp, level, message))
-        if len(self._entries) > 4000:
-            self._entries = self._entries[-4000:]
-        if self._filter == "all" or self._filter == level:
-            self._render()
-
-    def clear(self) -> None:
-        self._entries.clear()
-        self.view.clear()
-
-    def _render(self) -> None:
-        rows: list[str] = []
-        for stamp, level, message in self._entries:
-            if self._filter != "all" and self._filter != level:
-                continue
-            name, color = LEVEL_META.get(level, ("信息", "#2B6BFF"))
-            rows.append(
-                f'<div style="margin:2px 0;">'
-                f'<span style="color:#A9B4C4;">[{stamp}]</span> '
-                f'<span style="color:{color};font-weight:600;">{name}</span> '
-                f'<span style="color:#2E3A4B;">{html.escape(message)}</span>'
-                f"</div>"
-            )
-        self.view.setHtml("".join(rows))
-        from PySide6.QtGui import QTextCursor
-
-        cursor = self.view.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.view.setTextCursor(cursor)
-        self.view.ensureCursorVisible()
-
-    def _copy_all(self) -> None:
-        from PySide6.QtWidgets import QApplication
-
-        clipboard = QApplication.clipboard()
-        if clipboard is None:
-            return
-        lines = [
-            f"[{stamp}] {LEVEL_META.get(level, ('信息', ''))[0]:<4} {message}"
-            for stamp, level, message in self._entries
-        ]
-        clipboard.setText("\n".join(lines) if lines else self.view.toPlainText())
 
 
 def _platform_text() -> str:

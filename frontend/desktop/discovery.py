@@ -1,21 +1,9 @@
-"""同局域网设备发现（UDP 广播）。
-
-从 ``E:\\elink`` 的「设备页自动发现」借来的交互逻辑：不需要账号或中心服务器，
-同一网段里运行 elink 的机器每隔几秒广播一次身份；设备页把在线设备列出来，
-点击即可把 SRT / 控制端口填进观看模式。
-
-实现边界（刻意保持简单）：
-
-- 只在同一广播域生效，不做 Tailscale/公网穿透，不扫描网段；
-- 协议是纯 JSON、无鉴权、无加密；发现只用于「找到地址」，
-  真正连接仍走自己的 SRT + TCP 控制通道；
-- 端口 49320（避开 ``E:\\elink`` 的 49201），可多实例共享监听；
-- 广播失败或防火墙拦截时只影响发现，不影响手动输入地址。
-"""
+"""Device discovery over network interface broadcasts."""
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import platform
 import socket
@@ -27,6 +15,7 @@ from PySide6.QtCore import QByteArray, QObject, QTimer, Signal
 from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QUdpSocket
 
 from . import __version__
+from .network_interfaces import network_interfaces
 
 DISCOVERY_PORT = 49320
 PROTOCOL = "elink-discovery-v1"
@@ -37,7 +26,7 @@ MAX_DATAGRAM = 2048
 
 
 class DiscoveryService(QObject):
-    """UDP 发现服务：广播自己的身份，收集同网段的其它 elink。"""
+    """Discover Elink peers and merge their live network paths."""
 
     peers_changed = Signal(list)
     status_changed = Signal(str)
@@ -61,7 +50,10 @@ class DiscoveryService(QObject):
         self._peers: dict[str, dict[str, Any]] = {}
         self._last_query = 0.0
         self._last_announce = 0.0
-        self._last_fingerprint: tuple[tuple[str, str, bool], ...] = ()
+        self._last_fingerprint = ()
+        self._interfaces: list[dict] = []
+        self._bindings: dict[str, tuple[QUdpSocket, dict]] = {}
+        self._status = ""
 
         self._socket = QUdpSocket(self)
         self._socket.readyRead.connect(self._read_datagrams)
@@ -86,7 +78,6 @@ class DiscoveryService(QObject):
         self._last_query = 0.0
         self._last_announce = 0.0
         self._timer.start()
-        self.status_changed.emit(f"设备发现已开启 · UDP {self._port}")
         self.refresh()
         return True
 
@@ -94,6 +85,12 @@ class DiscoveryService(QObject):
         if not self._running:
             return
         self._timer.stop()
+        for bound, _interface in self._bindings.values():
+            bound.close()
+            bound.deleteLater()
+        self._bindings.clear()
+        self._interfaces.clear()
+        self._status = ""
         self._socket.close()
         self._running = False
         self._peers.clear()
@@ -111,9 +108,10 @@ class DiscoveryService(QObject):
             self._announce()
 
     def refresh(self) -> None:
-        """立即发一次查询 + 自己的广播（设备页刷新按钮）。"""
+        """立即发一次查询与广播；定时器持续维护设备列表。"""
         if not self._running:
             return
+        self._update_interfaces()
         self._send_query()
         self._announce()
         self._publish(force=True)
@@ -124,6 +122,7 @@ class DiscoveryService(QObject):
     # ---- 定时器 ----
     def _tick(self) -> None:
         now = time.monotonic()
+        self._update_interfaces()
         self._prune(now)
         if now - self._last_query >= QUERY_INTERVAL_S:
             self._send_query()
@@ -132,18 +131,58 @@ class DiscoveryService(QObject):
         self._publish()
 
     def _prune(self, now: float) -> None:
-        expired = [key for key, peer in self._peers.items() if now - peer["_seen"] > PEER_TTL_S]
-        for key in expired:
-            self._peers.pop(key, None)
+        for identifier, paths in list(self._peers.items()):
+            for ip, peer in list(paths.items()):
+                if now - peer["_seen"] > PEER_TTL_S:
+                    del paths[ip]
+            if not paths:
+                del self._peers[identifier]
+
+    def _update_interfaces(self) -> None:
+        self._interfaces = network_interfaces()
+        active = {}
+        for interface in self._interfaces:
+            if not interface["up"] or interface["loopback"]:
+                continue
+            for entry in interface["addresses"]:
+                address = ipaddress.ip_address(entry["ip"])
+                if address.version == 4 and not address.is_unspecified:
+                    active[str(address)] = {**interface, **entry}
+        for ip in self._bindings.keys() - active.keys():
+            bound, _interface = self._bindings.pop(ip)
+            bound.close()
+            bound.deleteLater()
+        for ip, interface in active.items():
+            if ip in self._bindings:
+                self._bindings[ip] = (self._bindings[ip][0], interface)
+                continue
+            bound = QUdpSocket(self)
+            flags = QAbstractSocket.BindFlag.ShareAddress | QAbstractSocket.BindFlag.ReuseAddressHint
+            if bound.bind(QHostAddress(ip), self._port, flags):
+                bound.readyRead.connect(lambda bound=bound: self._read_datagrams(bound))
+                self._bindings[ip] = (bound, interface)
+            else:
+                self.status_changed.emit(f"网卡 {interface['name']} 发现不可用：{bound.errorString()}")
+                bound.deleteLater()
+        self._publish_status()
+
+    def _publish_status(self) -> None:
+        message = f"自动发现 · {len(self._bindings)} 个网络地址"
+        if not self._bindings:
+            message += " · 等待网络连接"
+        if message != self._status:
+            self._status = message
+            self.status_changed.emit(message)
 
     # ---- 收发 ----
-    def _read_datagrams(self) -> None:
-        while self._socket.hasPendingDatagrams():
-            size = self._socket.pendingDatagramSize()
+    def _read_datagrams(self, receiver: QUdpSocket | None = None) -> None:
+        receiver = receiver or self._socket
+        while receiver.hasPendingDatagrams():
+            size = receiver.pendingDatagramSize()
             if size <= 0 or size > MAX_DATAGRAM:
-                self._socket.readDatagram(size)
+                receiver.readDatagram(size)
                 continue
-            data, sender, _port = self._socket.readDatagram(size)
+            data, sender, _port = receiver.readDatagram(size)
             try:
                 message = json.loads(bytes(data).decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
@@ -154,9 +193,11 @@ class DiscoveryService(QObject):
             identifier = message["id"]
             if identifier == self._id:
                 continue
-            self._remember(message, ip)
+            interface = self._bindings.get(receiver.localAddress().toString())
+            source = interface[1]["name"] if interface else self._source_for(ip)
+            self._remember(message, ip, source)
             if message.get("kind") == "query":
-                self._announce(sender)
+                self._announce(sender, receiver)
             self._publish()
 
     def _send_query(self) -> None:
@@ -164,18 +205,21 @@ class DiscoveryService(QObject):
         payload = self._payload("query", nonce=uuid.uuid4().hex[:12])
         self._broadcast(payload)
 
-    def _announce(self, target: QHostAddress | None = None) -> None:
+    def _announce(self, target: QHostAddress | None = None, sender: QUdpSocket | None = None) -> None:
         self._last_announce = time.monotonic()
         payload = self._payload("announce")
         if target is None:
             self._broadcast(payload)
             return
         data = QByteArray(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-        self._socket.writeDatagram(data, target, self._port)
+        (sender or self._socket).writeDatagram(data, target, self._port)
 
     def _broadcast(self, payload: dict[str, Any]) -> None:
         data = QByteArray(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-        self._socket.writeDatagram(data, QHostAddress(QHostAddress.SpecialAddress.Broadcast), self._port)
+        for bound, interface in self._bindings.values():
+            # /31 and /32 tunnels have no usable subnet broadcast.
+            if interface["can_broadcast"] and interface["broadcast"] and 0 <= interface["prefix"] < 31:
+                bound.writeDatagram(data, QHostAddress(interface["broadcast"]), self._port)
 
     def _payload(self, kind: str, **extra: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -193,9 +237,16 @@ class DiscoveryService(QObject):
         return payload
 
     # ---- 状态 ----
-    def _remember(self, message: dict[str, Any], ip: str) -> None:
+    def _source_for(self, ip: str) -> str:
+        address = ipaddress.ip_address(ip)
+        for local_ip, (_bound, interface) in self._bindings.items():
+            if address in ipaddress.ip_network(f"{local_ip}/{interface['prefix']}", strict=False):
+                return interface["name"]
+        return ""
+
+    def _remember(self, message: dict[str, Any], ip: str, interface: str = "") -> None:
         identifier = message["id"]
-        self._peers[identifier] = {
+        self._peers.setdefault(identifier, {})[ip] = {
             "id": identifier,
             "name": message["name"],
             "platform": message.get("platform", ""),
@@ -204,23 +255,31 @@ class DiscoveryService(QObject):
             "srt_port": int(message.get("srt_port") or 0),
             "control_port": int(message.get("control_port") or 7000),
             "ip": ip,
+            "interface": interface,
             "_seen": time.monotonic(),
         }
 
     def _snapshot(self) -> list[dict[str, Any]]:
         now = time.monotonic()
         peers = []
-        for peer in self._peers.values():
-            if now - peer["_seen"] > PEER_TTL_S:
+        for paths in self._peers.values():
+            live = sorted(
+                (peer for peer in paths.values() if now - peer["_seen"] <= PEER_TTL_S),
+                key=lambda peer: peer["ip"],
+            )
+            if not live:
                 continue
-            item = {key: value for key, value in peer.items() if not key.startswith("_")}
+            item = {key: value for key, value in live[0].items() if not key.startswith("_")}
+            item["addresses"] = [
+                {"ip": peer["ip"], "interface": peer["interface"]} for peer in live
+            ]
             peers.append(item)
         peers.sort(key=lambda item: (item.get("name", "").casefold(), item.get("ip", "")))
         return peers
 
     def _publish(self, *, force: bool = False) -> None:
         peers = self._snapshot()
-        fingerprint = tuple((peer["id"], peer["ip"], bool(peer["hosting"])) for peer in peers)
+        fingerprint = tuple(tuple(sorted(peer.items())) for peer in peers)
         if force or fingerprint != self._last_fingerprint:
             self._last_fingerprint = fingerprint
             self.peers_changed.emit(peers)
@@ -232,7 +291,14 @@ def _machine_id() -> str:
 
 
 def _valid_ip(value: str) -> bool:
-    return bool(value) and value not in {"0.0.0.0", "255.255.255.255"}
+    try:
+        address = ipaddress.ip_address(value)
+        return address.version == 4 and not (
+            address.is_unspecified or address.is_loopback or address.is_multicast
+            or value == "255.255.255.255"
+        )
+    except ValueError:
+        return False
 
 
 def _valid_message(message: Any) -> bool:

@@ -141,13 +141,18 @@ def _ui_report(window, app, pixmap_path: Path) -> dict:
 
     pixmap = window.grab()
     saved = pixmap.save(str(pixmap_path), "PNG")
-    logo = icons.icon("monitor", "#ffffff")
+    required_icons = (
+        "monitor", "log-out", "ellipsis-vertical", "info", "search",
+        "arrow-right", "eye", "folder-up", "terminal", "cable", "layout-grid",
+    )
     families = QFontDatabase.families()
     return {
         "title": window.windowTitle(),
         "pages": window.stack.count(),
         "stylesheet": bool(app.styleSheet()),
-        "icons_loaded": not logo.isNull(),
+        "icons_loaded": all(not icons.icon(name).isNull() for name in required_icons),
+        "device_views": window.devices_page.stack.count(),
+        "device_cover_loaded": not window.devices_page.enter_button._wallpaper.isNull(),
         "fonts": len(families),
         "font_warning": "" if families else "系统字体库为空（offscreen 平台的已知限制）",
         "grab": [pixmap.width(), pixmap.height()],
@@ -193,6 +198,7 @@ def run_self_test(output: Path) -> int:
         window.show()
         app.processEvents()
         report["ui"] = _ui_report(window, app, output.with_name(output.stem + "-ui.png"))
+        window._exit_requested = True
         window.close()
         app.processEvents()
 
@@ -201,7 +207,11 @@ def run_self_test(output: Path) -> int:
         report["media"] = _media_roundtrip()
         report["packages"] = _package_versions()
 
-        ui_ok = report["ui"]["pages"] >= 4 and report["ui"]["grab"][0] > 0
+        ui_ok = (
+            report["ui"]["pages"] >= 4 and report["ui"]["grab"][0] > 0
+            and report["ui"]["icons_loaded"] and report["ui"]["device_views"] == 2
+            and report["ui"]["device_cover_loaded"]
+        )
         media_ok = report["media"]["decoded_frames"] > 0
         report["ok"] = bool(ui_ok and media_ok)
         if not ui_ok:
@@ -216,8 +226,10 @@ def run_self_test(output: Path) -> int:
     if report["ok"]:
         # PySide6 6.12 的 offscreen 插件在进程退出阶段可能把退出码改成 1；
         # 自检已经写完报告并打印 ok，直接结束进程，避免 CI 误判。
-        sys.stdout.flush()
-        sys.stderr.flush()
+        if sys.stdout is not None:
+            sys.stdout.flush()
+        if sys.stderr is not None:
+            sys.stderr.flush()
         os._exit(0)
     return 1
 

@@ -102,9 +102,9 @@ class SettingsPage(QWidget):
         general.body().addWidget(self.auto_host_row)
         content.addWidget(general)
 
-        discovery = Card("设备发现", "同局域网中自动找到运行 elink 的机器")
+        discovery = Card("设备发现", "通过各网络接口自动寻找运行 Elink 的机器")
         self.discovery_row = SettingRow(
-            "link", "允许局域网发现", "通过 UDP 广播身份；不经过账号或云端", "cyan"
+            "link", "允许设备发现", "自动通过已连接的网络寻找设备", "cyan"
         )
         discovery.body().addWidget(self.discovery_row)
         self.discovery_hint = hint("发现服务已开启。")

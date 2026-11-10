@@ -7,7 +7,7 @@
 - 关闭窗口时先停会话再保存设置，避免 ffmpeg 子进程残留。
 
 视觉上参考网易 UU 远程 4.x：无系统标题栏、冷白底、窄侧栏、
-白色圆角卡片与亮蓝主色；功能上仍是 elink 自己的主机 / 观看 / 设备 / 日志。
+白色圆角卡片与亮蓝主色；功能上仍是 elink 自己的主机 / 观看 / 设备。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import socket
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
@@ -39,7 +40,8 @@ from .. import __version__, icons, settings as user_settings, startup
 from ..discovery import DiscoveryService
 from ..service import HostSettings, SessionService, SessionStats, ViewerSettings
 from ..theme import ACCENT, MUTED
-from .pages import ENCODERS, PRESETS, RESOLUTIONS, DevicesPage, HostPage, LogsPage, OverviewPage, ViewerPage
+from .devices_page import DevicesPage
+from .pages import ENCODERS, PRESETS, RESOLUTIONS, HostPage, OverviewPage, ViewerPage
 from .preview import PreviewFrame
 from .settings_page import SettingsPage
 from .stream_window import StreamWindow
@@ -49,8 +51,7 @@ NAV_ITEMS = [
     ("overview", "总览", "activity"),
     ("host", "主机模式", "monitor"),
     ("viewer", "观看模式", "eye"),
-    ("devices", "设备", "cpu"),
-    ("logs", "日志", "terminal"),
+    ("devices", "我的设备", "monitor"),
 ]
 NAV_INDEX = {key: index for index, (key, _caption, _icon) in enumerate(NAV_ITEMS)}
 SETTINGS_INDEX = len(NAV_ITEMS)
@@ -69,6 +70,8 @@ class MainWindow(QMainWindow):
         self._auto_refresh = auto_refresh
         self._native_frame_patched = False
         self._active_mode = ""  # 最近一次启动的模式：帧/统计可能晚于 mode 清零到达
+        self._viewer_from_devices = False
+        self._watch_interaction_preferences: tuple[bool, bool] | None = None
         self._exit_requested = False
         self._tray = None
         self._tray_notified = False
@@ -77,6 +80,7 @@ class MainWindow(QMainWindow):
         self._last_stats = None
         self._shortcuts = []
         self._loading_settings = False
+        self._recent_logs: deque[tuple[str, str, str]] = deque(maxlen=20)
         self._stream_window: StreamWindow | None = None
         self.ui_settings = user_settings.load_ui()
         self.discovery = DiscoveryService(self)
@@ -107,6 +111,7 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
 
         self.title_bar = TitleBar(self)
+        self.title_bar.refresh_button.hide()
         outer.addWidget(self.title_bar)
 
         body = QHBoxLayout()
@@ -121,6 +126,7 @@ class MainWindow(QMainWindow):
         self._wire()
         self._apply_settings(host_settings, viewer_settings)
         self._apply_ui_settings()
+        self._show_page("devices")
 
         self.log("界面已就绪", "info")
         if auto_refresh:
@@ -132,7 +138,7 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(232)
+        sidebar.setFixedWidth(210)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(12, 14, 12, 12)
         layout.setSpacing(6)
@@ -140,7 +146,7 @@ class MainWindow(QMainWindow):
         device = ClickableCard("deviceCard")
         device.setFixedHeight(64)
         hostname = socket.gethostname() or "this device"
-        device.setToolTip(f"本机 · {hostname}（返回总览）")
+        device.setToolTip(f"本机 · {hostname}（返回设备列表）")
         device_row = QHBoxLayout(device)
         device_row.setContentsMargins(12, 10, 10, 10)
         device_row.setSpacing(10)
@@ -157,25 +163,28 @@ class MainWindow(QMainWindow):
         self.sidebar_dot = StatusDot("ok")
         device_row.addWidget(self.sidebar_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         device_row.addWidget(icons.icon_label("chevron-right", 13, "#A9B4C4"))
-        device.clicked.connect(lambda: self._show_page("overview"))
-        layout.addWidget(device)
-        layout.addSpacing(10)
+        device.clicked.connect(self._show_device_list)
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self._nav_buttons: dict[str, QPushButton] = {}
         self._nav_icons: dict[str, str] = {}
 
-        layout.addWidget(label("控制", "navSection"))
-        for key in ("overview", "host", "viewer"):
-            self._add_nav(sidebar, layout, key)
-        layout.addSpacing(6)
-        layout.addWidget(label("工具", "navSection"))
-        for key in ("devices", "logs"):
-            self._add_nav(sidebar, layout, key)
+        layout.addWidget(label("工作空间", "navSection"))
+        self._add_nav(sidebar, layout, "devices")
 
         layout.addStretch(1)
+        layout.addWidget(device)
         layout.addWidget(divider())
+        advanced_button = QPushButton("高级连接")
+        advanced_button.setObjectName("navItem")
+        advanced_button.setIcon(icons.icon("sliders-horizontal", MUTED))
+        advanced_button.setIconSize(QSize(17, 17))
+        advanced_menu = QMenu(advanced_button)
+        for key, caption in (("host", "主机配置"), ("viewer", "手动连接"), ("overview", "运行总览")):
+            advanced_menu.addAction(caption, lambda checked=False, key=key: self._show_page(key))
+        advanced_button.setMenu(advanced_menu)
+        layout.addWidget(advanced_button)
 
         settings_button = QPushButton("设置")
         settings_button.setObjectName("navItem")
@@ -195,9 +204,9 @@ class MainWindow(QMainWindow):
         button.setObjectName("navItem")
         button.setCheckable(True)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setIcon(icons.icon(icon_name, ACCENT if key == "overview" else MUTED))
+        button.setIcon(icons.icon(icon_name, ACCENT if key == "devices" else MUTED))
         button.setIconSize(QSize(17, 17))
-        if key == "overview":
+        if key == "devices":
             button.setChecked(True)
         self.nav_group.addButton(button, NAV_INDEX[key])
         self._nav_buttons[key] = button
@@ -221,7 +230,6 @@ class MainWindow(QMainWindow):
         self.host_page = HostPage(displays)
         self.viewer_page = ViewerPage()
         self.devices_page = DevicesPage()
-        self.logs_page = LogsPage()
         self.settings_page = SettingsPage(self.root)
 
         self.notice_bar = NoticeBar()
@@ -233,7 +241,6 @@ class MainWindow(QMainWindow):
             self.host_page,
             self.viewer_page,
             self.devices_page,
-            self.logs_page,
             self.settings_page,
         ):
             self.stack.addWidget(page)
@@ -267,7 +274,10 @@ class MainWindow(QMainWindow):
 
     # ---- 连接 ----
     def _wire(self) -> None:
-        self.nav_group.idClicked.connect(self._on_nav)
+        self.nav_group.idClicked.connect(
+            lambda index: self._show_device_list()
+            if index == PAGE_INDEX["devices"] else self._on_nav(index)
+        )
         self.title_bar.minimize_clicked.connect(self.showMinimized)
         self.title_bar.maximize_clicked.connect(self._toggle_maximize)
         self.title_bar.close_clicked.connect(self.close)
@@ -285,9 +295,9 @@ class MainWindow(QMainWindow):
         self.host_page.back_requested.connect(lambda: self._show_page("overview"))
         self.host_page.clipboard_toggled.connect(lambda enabled: self._toggle_clipboard("host", enabled))
         self.host_page.report_requested.connect(lambda: self._export_report("host"))
-        self.viewer_page.start_requested.connect(lambda settings: self._start_viewer(settings, navigate=True))
+        self.viewer_page.start_requested.connect(self._start_manual_viewer)
         self.viewer_page.stop_requested.connect(self.service.stop)
-        self.viewer_page.back_requested.connect(lambda: self._show_page("overview"))
+        self.viewer_page.back_requested.connect(self._back_from_viewer)
         self.viewer_page.control_toggled.connect(self._toggle_control)
         self.viewer_page.clipboard_toggled.connect(lambda enabled: self._toggle_clipboard("viewer", enabled))
         self.viewer_page.gamepad_toggled.connect(self._toggle_gamepad)
@@ -295,7 +305,6 @@ class MainWindow(QMainWindow):
         self.viewer_page.fullscreen_requested.connect(self._toggle_stream_fullscreen)
         self.viewer_page.stats_toggled.connect(self._toggle_stats_overlay)
         self.viewer_page.release_requested.connect(self._release_viewer_input)
-        self.devices_page.refresh_requested.connect(self._refresh_devices)
         self.devices_page.connect_peer.connect(self._connect_peer)
 
         for keys, callback in (
@@ -333,6 +342,18 @@ class MainWindow(QMainWindow):
         self.service.control_changed.connect(self._on_control)
 
     # ---- 服务回调 ----
+    def _start_manual_viewer(self, settings: ViewerSettings) -> None:
+        self._viewer_from_devices = False
+        self._watch_interaction_preferences = None
+        self._start_viewer(settings, navigate=True)
+
+    def _back_from_viewer(self) -> None:
+        self._show_page("devices" if self._viewer_from_devices else "overview")
+
+    def _show_device_list(self) -> None:
+        self.devices_page.show_list()
+        self._show_page("devices")
+
     def _start_host(self, settings: HostSettings, *, navigate: bool = False) -> None:
         if self.service.running:
             self._show_page("host")
@@ -587,9 +608,13 @@ class MainWindow(QMainWindow):
             hosting, settings.srt_url, settings.control_port, srt_ready=srt_ready
         )
 
-    def _connect_peer(self, peer: dict) -> None:
+    def _connect_peer(self, peer: dict, control_enabled: bool = True) -> None:
         if self.service.running:
             self.notice_bar.show_message("已有一条会话在运行，请先停止后再连接。", "warn")
+            return
+        peer = next((item for item in self.discovery.peers() if item["id"] == peer.get("id")), None)
+        if peer is None:
+            self.notice_bar.show_message("设备已离线，请等待重新发现。", "warn")
             return
         if not peer.get("hosting") or int(peer.get("srt_port") or 0) <= 0:
             self.notice_bar.show_message("对方没有开放 SRT 主机，暂时无法连接。", "warn")
@@ -604,6 +629,21 @@ class MainWindow(QMainWindow):
         self.viewer_page.srt_url.setText(f"srt://{host}:{port}")
         self.viewer_page.control_host.setText(host)
         self.viewer_page.control_port.setValue(control)
+        if not control_enabled:
+            if self._watch_interaction_preferences is None:
+                self._watch_interaction_preferences = (
+                    self.viewer_page.clipboard_switch.isChecked(),
+                    self.viewer_page.gamepad_switch.isChecked(),
+                )
+            self.viewer_page.clipboard_switch.setChecked(False)
+            self.viewer_page.gamepad_switch.setChecked(False)
+        elif self._watch_interaction_preferences is not None:
+            clipboard, gamepad = self._watch_interaction_preferences
+            self._watch_interaction_preferences = None
+            self.viewer_page.clipboard_switch.setChecked(clipboard)
+            self.viewer_page.gamepad_switch.setChecked(gamepad)
+        self.viewer_page.control_toggle.setChecked(control_enabled)
+        self._viewer_from_devices = True
         self.log(f"连接发现设备：{peer.get('name', host)} · {host}:{port}", "info")
         self._start_viewer(self.viewer_page.settings(), navigate=True)
 
@@ -629,7 +669,7 @@ class MainWindow(QMainWindow):
                 self.settings_page.set_ui(self.ui_settings)
         else:
             self.discovery.stop()
-        self.devices_page.set_discovery_state(self.discovery.running)
+        self.devices_page.set_discovery_state(self.discovery.running, self._discovery_message)
         self.settings_page.set_discovery_state(self.discovery.running)
         self._on_peers(self.discovery.peers())
         self._sync_discovery_hosting("idle")
@@ -679,7 +719,7 @@ class MainWindow(QMainWindow):
             self.discovery.stop()
         self.ui_settings.allow_discovery = enabled
         self._persist_ui()
-        self.devices_page.set_discovery_state(self.discovery.running)
+        self.devices_page.set_discovery_state(self.discovery.running, self._discovery_message)
         self._on_peers(self.discovery.peers())
         self.log("设备发现已" + ("开启" if enabled else "关闭"), "info")
 
@@ -764,7 +804,7 @@ class MainWindow(QMainWindow):
             "",
             "recent logs:",
         ]
-        lines.extend(f"[{stamp}] {level} {message}" for stamp, level, message in self.logs_page._entries[-20:])
+        lines.extend(f"[{stamp}] {level} {message}" for stamp, level, message in self._recent_logs)
         app.clipboard().setText("\n".join(lines))
         self.log("诊断信息已复制到剪贴板", "info")
 
@@ -772,7 +812,7 @@ class MainWindow(QMainWindow):
     def _on_nav(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
         for key, button in self._nav_buttons.items():
-            checked = PAGE_INDEX[key] == index
+            checked = PAGE_INDEX[key] == index or (key == "devices" and index != SETTINGS_INDEX)
             button.setIcon(icons.icon(self._nav_icons[key], ACCENT if checked else MUTED))
 
     def _show_page(self, key: str) -> None:
@@ -780,10 +820,9 @@ class MainWindow(QMainWindow):
         if index is None:
             return
         self.stack.setCurrentIndex(index)
-        self._nav_buttons[key].setChecked(True)
+        nav_key = key if key in self._nav_buttons else "devices"
+        self._nav_buttons[nav_key].setChecked(True)
         self._on_nav(index)
-        if key == "devices" and self.discovery.running:
-            self.discovery.refresh()
 
     def _apply_overview_preset(self, key: str) -> None:
         if key == "file":
@@ -802,7 +841,7 @@ class MainWindow(QMainWindow):
 
     # ---- 工具 ----
     def log(self, message: str, level: str = "info") -> None:
-        self.logs_page.append(message, level)
+        self._recent_logs.append((time.strftime("%H:%M:%S"), level, message))
         if level in {"warn", "error"}:
             self.notice_bar.show_message(message, level)
 
@@ -838,7 +877,7 @@ class MainWindow(QMainWindow):
         if target in RESOLUTIONS:
             page.resolution.setCurrentText(target)
         page.fps.setValue(host.fps)
-        page.bitrate.setValue(host.bitrate_kbps)
+        page.bitrate.setValue(host.bitrate_kbps / 1000)
         if host.encoder in ENCODERS:
             page.encoder.setCurrentIndex(ENCODERS.index(host.encoder))
         if host.preset in PRESETS:

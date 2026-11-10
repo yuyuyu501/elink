@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elink"
-version = "0.6.0"
+version = "0.6.1"
 description = "低延迟远程控制与串流：屏幕采集、H.264 编码、MPEG-TS/SRT 传输、PySide6 桌面端"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -30,6 +30,7 @@ frontend = [
     "desktop/resources/*.dll",
     "desktop/resources/*.ico",
     "desktop/resources/*.png",
+    "desktop/resources/*.jpg",
     "desktop/resources/fsr/*.h",
     "desktop/resources/lucide/*.svg",
     "mobile/*.html",

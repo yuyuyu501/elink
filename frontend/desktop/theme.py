@@ -89,8 +89,6 @@ QFrame#quickTile { background: #F7FAFD; border: 1px solid #EDF2F7; border-radius
 QFrame#quickTile[hover="true"] { background: #FFFFFF; border-color: #C9DBFF; }
 QFrame#deviceCard { background: #FFFFFF; border: 1px solid #E4E9F0; border-radius: 12px; }
 QFrame#deviceCard[hover="true"] { border-color: #C9DBFF; background: #FBFDFF; }
-QFrame#deviceRow { background: #F7FAFD; border: 1px solid #EDF2F7; border-radius: 10px; }
-QFrame#deviceRow[default="true"] { border-color: #D6E4FF; background: #F5F9FF; }
 
 /* ---- 顶部提示条 ---- */
 QFrame#noticeBar { background: #FFF7E8; border: 1px solid #F3D6A5; border-radius: 10px; }
@@ -213,12 +211,6 @@ QCheckBox::indicator:checked {
 }
 QCheckBox::indicator:hover { border-color: #2B6BFF; }
 
-/* ---- 文本区域 / 日志 ---- */
-QTextEdit#logView, QPlainTextEdit#logView {
-    background: #FBFCFE; color: #2E3A4B; border: 1px solid #E7ECF3; border-radius: 10px;
-    padding: 10px 12px; font-family: 'Cascadia Mono'; font-size: 13px;
-}
-
 /* ---- 滚动条 ---- */
 QScrollArea { background: transparent; border: 0; }
 QScrollArea > QWidget > QWidget { background: transparent; }
@@ -239,6 +231,47 @@ QMenu::item:selected { background: #EAF1FF; color: #2B6BFF; }
 QToolTip {
     background: #1D2129; color: #FFFFFF; border: 0; padding: 5px 8px; border-radius: 4px;
 }
+
+/* ---- 设备列表与详情 ---- */
+QFrame#computerRow {
+    background: #FFFFFF; border: 1px solid #DEE5ED; border-radius: 4px;
+}
+QFrame#computerRow:hover { background: #F2F7FF; border-color: #B1C9EF; }
+QPushButton#openComputer {
+    background: transparent; border: 1px solid transparent; border-radius: 3px; padding: 0;
+}
+QPushButton#openComputer:focus { border-color: #2468E8; }
+QLabel#computerName { color: #202C3C; font-size: 14px; }
+QLabel#computerSymbol { background: #2C76F5; border-radius: 5px; }
+QLabel#computerLocal {
+    background: #E4EDFF; color: #1A5ED7; font-size: 11px; padding: 2px 5px; border-radius: 3px;
+}
+QLabel#computerOnline { color: #16845B; font-size: 11px; padding: 0 12px; }
+QPushButton#deviceIconButton {
+    background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 0;
+}
+QPushButton#deviceIconButton:hover { background: #EAF1FF; }
+QPushButton#deviceIconButton:focus { border-color: #2468E8; }
+QPushButton#computerGroup {
+    background: transparent; border: 0; padding: 2px 0; color: #455569; font-size: 13px;
+}
+QPushButton#computerGroup:focus { color: #2468E8; }
+QLineEdit#deviceSearch {
+    background: #FFFFFF; border: 1px solid #DEE5ED; border-radius: 5px; padding: 7px 10px;
+    font-size: 12px; color: #202C3C;
+}
+QLineEdit#deviceSearch:focus { border-color: #2468E8; }
+QLabel#deviceDetailName { color: #202C3C; font-size: 24px; font-weight: 600; }
+QFrame#deviceSurface { background: #FFFFFF; border: 1px solid #D7E1EC; border-radius: 5px; }
+QWidget#deviceTools { background: #FFFFFF; }
+QPushButton#deviceDesktopButton { padding: 0; border: 0; }
+QPushButton#deviceTool {
+    background: transparent; border: 0; border-radius: 0; padding: 0 8px;
+    color: #202C3C; font-size: 13px;
+}
+QPushButton#deviceTool:hover { background: #F0F6FF; }
+QPushButton#deviceTool:disabled { background: transparent; color: #86909C; }
+QPushButton#deviceTool:focus { background: #EAF1FF; }
 
 /* ---- 全屏串流窗口 ---- */
 QWidget#streamWindow { background: #05070B; }

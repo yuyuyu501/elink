@@ -1,13 +1,13 @@
 ; Elink Windows 安装包（Inno Setup 6）
 ;
 ; 由 scripts/package_windows.py 调用：
-;   ISCC.exe /DMyAppVersion=0.6.0 /DSourceDir=dist\Elink /DOutputDir=dist packaging\windows\elink.iss
+;   ISCC.exe /DMyAppVersion=0.6.1 /DSourceDir=dist\Elink /DOutputDir=dist packaging\windows\elink.iss
 ;
 ; 使用与旧版 E:\elink 相同的 AppId 和默认目录，安装新版会覆盖旧版程序文件，
 ; 用户配置仍在 %LOCALAPPDATA%\Elink（不随卸载删除）。
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.6.0"
+  #define MyAppVersion "0.6.1"
 #endif
 #ifndef MyAppId
   #define MyAppId "A4735807-684B-4757-9EE5-88AFA2E6E791"

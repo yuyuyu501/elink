@@ -16,7 +16,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-PAGES = ("overview", "host", "viewer", "devices", "logs")
+PAGES = ("devices", "device-detail", "host", "viewer", "settings")
 SIZE = (1120, 740)
 
 
@@ -37,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
+    from frontend.desktop import __version__
     from frontend.desktop.theme import apply_theme
     from frontend.desktop.ui.window import MainWindow
 
@@ -57,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
                     "name": "STUDIO-PC",
                     "ip": "192.168.1.23",
                     "platform": "Windows 11",
-                    "version": "0.6.0",
+                    "version": __version__,
                     "hosting": True,
                     "srt_port": 9000,
                     "control_port": 7000,
@@ -67,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
                     "name": "LIVINGROOM",
                     "ip": "192.168.1.41",
                     "platform": "Windows 10",
-                    "version": "0.6.0",
+                    "version": __version__,
                     "hosting": False,
                     "srt_port": 0,
                     "control_port": 7000,
@@ -84,13 +85,20 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
     for key in [item.strip() for item in args.pages.split(",") if item.strip()]:
-        window._show_page(key)
+        if key == "device-detail":
+            if not window.devices_page._peers:
+                continue
+            window._show_page("devices")
+            window.devices_page.open_peer(str(window.devices_page._peers[0]["id"]))
+        else:
+            window._show_page(key)
         app.processEvents()
         pixmap = window.grab()
         target = out / f"{key}.png"
         if pixmap.save(str(target), "PNG"):
             saved.append(target)
 
+    window._exit_requested = True
     window.close()
     app.processEvents()
     for path in saved:
