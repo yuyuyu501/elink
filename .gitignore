@@ -7,9 +7,6 @@ out/
 # 文档与设计稿（本地保留；Release 正文放 releases/）
 docs/
 
-# 测试文件
-tests/
-
 # 打包产物（不进源码仓库；发布资产由 GitHub Actions 生成）
 dist*/
 build*/
