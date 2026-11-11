@@ -36,9 +36,9 @@ jobs:
           python -m scripts.check 2>&1 | Tee-Object -FilePath out/regression.log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```text'
-            Get-Content out/regression.log -Tail 150 | Add-Content -Path $env:GITHUB_STEP_SUMMARY
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+            $details = (Get-Content out/regression.log -Tail 150) -join "`n"
+            $details = $details.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+            Write-Output "::error title=Regression failure::$details"
           }
           exit $code
       - name: Run frozen-style UI self-test
