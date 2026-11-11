@@ -24,14 +24,14 @@ from backend.transport.srt import SrtTransport
 APP = QCoreApplication.instance() or QCoreApplication([])
 
 
-def wait_until(predicate, timeout=3):
+def wait_until(predicate, timeout=3, detail=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         APP.processEvents()
         if predicate():
             return
         time.sleep(0.005)
-    raise AssertionError("Timed out waiting for session state")
+    raise AssertionError(f"Timed out waiting for session state: {detail() if detail else ''}")
 
 
 class Media(QObject):
@@ -241,6 +241,18 @@ class SettingsAndTransportTests(unittest.TestCase):
             self.assertIn("pipe:1", process.call_args.args[0])
             self.assertIs(receiver.reader, process.return_value.stdout)
 
+    @unittest.skipUnless(os.name == "nt", "Windows process tree")
+    def test_srt_abort_stops_launcher_children(self):
+        with patch("backend.transport.srt.subprocess.Popen") as process, patch(
+            "backend.transport.srt.subprocess.run"
+        ) as terminate:
+            transport = SrtTransport("srt://127.0.0.1:9000")
+            transport._proc = process.return_value
+            transport._proc.poll.side_effect = [None, 0]
+            transport.abort()
+            self.assertEqual(terminate.call_args.args[0],
+                             ["taskkill", "/PID", str(transport._proc.pid), "/T", "/F"])
+
 
 class MediaIntegrationTests(unittest.TestCase):
     def test_srt_picture_update_and_reconnect_with_real_encoder_decoder(self):
@@ -276,6 +288,14 @@ class MediaIntegrationTests(unittest.TestCase):
                 "session_port": host.server.serverPort()}
         settings = ViewerSettings(stream_width=320, stream_height=240,
                                   stream_bitrate_kbps=800)
+        def state():
+            return {
+                "host": (host.phase, host_media.running),
+                "viewer": (viewer.phase, viewer_media.running),
+                "stderr": [service._transport.stderr_text() if service._transport else ""
+                           for service in (host_media, viewer_media)],
+                "errors": errors,
+            }
         with patch("backend.bootstrap.build_capture", side_effect=lambda _: Capture()), patch(
             "frontend.desktop.service._display_region", return_value=(0, 0, 320, 240)
         ):
@@ -285,7 +305,7 @@ class MediaIntegrationTests(unittest.TestCase):
                 self.assertFalse(errors)
                 self.assertEqual(len(applied), 1)
                 viewer.configure({"width": 320, "height": 240, "fps": 20, "bitrate_kbps": 1000})
-                wait_until(lambda: len(applied) == 2 or bool(errors), timeout=25)
+                wait_until(lambda: len(applied) == 2 or bool(errors), timeout=25, detail=state)
                 self.assertFalse(errors)
                 self.assertEqual(applied[-1]["fps"], 20)
                 viewer.disconnect()

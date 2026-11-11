@@ -12,6 +12,7 @@ Python 侧不做 SRT 协议实现，而是借 ffmpeg 的 libsrt 收发字节流�
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 from collections import deque
@@ -122,9 +123,21 @@ class SrtTransport:
         proc = self._proc
         if proc is not None and proc.poll() is None:
             try:
+                if os.name == "nt":
+                    # Package-manager launchers may keep ffmpeg in a child process.
+                    subprocess.run(
+                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW, timeout=5,
+                    )
+                    if proc.poll() is not None:
+                        return
                 proc.terminate()
-            except OSError:
-                pass
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
 
     def close(self) -> None:
         proc = self._proc
