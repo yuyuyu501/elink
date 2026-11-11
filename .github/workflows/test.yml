@@ -30,7 +30,17 @@ jobs:
       - name: Install package and build dependencies
         run: python -m pip install -e ".[dev]"
       - name: Run backend regression suites
-        run: python -m scripts.check
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          python -m scripts.check 2>&1 | Tee-Object -FilePath out/regression.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```text'
+            Get-Content out/regression.log -Tail 150 | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+          }
+          exit $code
       - name: Run frozen-style UI self-test
         shell: pwsh
         run: |

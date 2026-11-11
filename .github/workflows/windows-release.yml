@@ -48,6 +48,11 @@ jobs:
           $process = Start-Process -FilePath $python -ArgumentList '-m','scripts.package_windows','--dist-dir','dist' -NoNewWindow -Wait -PassThru -RedirectStandardOutput out/package.out -RedirectStandardError out/package.err
           Get-Content out/package.out -Tail 120
           Get-Content out/package.err -Tail 120
+          if ($process.ExitCode -ne 0) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```text'
+            Get-Content out/package.out,out/package.err -Tail 120 | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+          }
           exit $process.ExitCode
       - name: Print package log on failure
         if: failure()
