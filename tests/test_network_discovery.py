@@ -94,6 +94,20 @@ class NetworkCandidateTests(unittest.TestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_listener_readiness_and_busy_state_are_announced(self):
+        service = DiscoveryService(instance_id="c" * 16)
+        service.set_connection(49321, False)
+        payload = service._payload("announce")
+        self.assertFalse(payload["hosting"])
+        self.assertEqual(payload["session_port"], 49321)
+        self.assertFalse(payload["busy"])
+        service.set_connection(49321, True)
+        payload = service._payload("announce")
+        service._remember(payload, "192.168.1.15")
+        self.assertTrue(service.peers()[0]["busy"])
+        self.assertEqual(service.peers()[0]["session_port"], 49321)
+        service.deleteLater()
+
     def setUp(self):
         self.service = DiscoveryService(port=0, instance_id="b" * 16)
 

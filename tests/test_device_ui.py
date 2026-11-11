@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication
 
 from frontend.desktop import icons
 from frontend.desktop.discovery import DiscoveryService
+from frontend.desktop.connection import DesktopConnection
 from frontend.desktop.service import HostSettings, SessionService, ViewerSettings
 from frontend.desktop.settings import UiSettings
 from frontend.desktop.theme import apply_theme
@@ -36,6 +37,8 @@ PEER = {
     "hosting": True,
     "srt_port": 9000,
     "control_port": 7000,
+    "session_port": 49321,
+    "busy": False,
 }
 
 
@@ -74,12 +77,18 @@ class DevicePageTests(unittest.TestCase):
         self.page.set_peers([PEER])
         self.assertTrue(self.page.enter_button.isEnabled())
 
-    def test_idle_peer_opens_detail_but_has_no_connection_action(self):
+    def test_idle_peer_connects_without_preexisting_stream(self):
         self.page.set_peers([{**PEER, "hosting": False, "srt_port": 0}])
         self.page.rows[1].arrow_button.click()
         self.assertEqual(self.page.stack.currentIndex(), 1)
-        self.assertFalse(self.page.enter_button.isEnabled())
-        self.assertFalse(self.page.watch_button.isEnabled())
+        self.assertTrue(self.page.enter_button.isEnabled())
+        self.assertTrue(self.page.watch_button.isEnabled())
+
+    def test_busy_or_unready_peer_has_no_connection_action(self):
+        self.page.open_peer(PEER["id"])
+        for update in ({"busy": True}, {"session_port": 0}):
+            self.page.set_peers([{**PEER, **update}])
+            self.assertFalse(self.page.enter_button.isEnabled())
 
     def test_connection_uses_latest_discovered_address_and_port(self):
         self.page.open_peer(PEER["id"])
@@ -186,6 +195,7 @@ class WindowConnectionTests(unittest.TestCase):
         self.mocks.enter_context(patch.object(SessionService, "displays", return_value=[]))
         self.peers = self.mocks.enter_context(patch.object(DiscoveryService, "peers", return_value=[PEER]))
         self.start_viewer = self.mocks.enter_context(patch.object(SessionService, "start_viewer"))
+        self.request = self.mocks.enter_context(patch.object(DesktopConnection, "connect_peer"))
         self.window = MainWindow(auto_refresh=False)
         self.window.devices_page.set_peers([PEER])
         self.window.devices_page.open_peer(PEER["id"])
@@ -200,33 +210,22 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertEqual(self.window.stack.currentIndex(), PAGE_INDEX["devices"])
         self.assertEqual(set(self.window._nav_buttons), {"devices", "settings"})
         self.window.devices_page.enter_button.click()
-        settings = self.start_viewer.call_args.args[0]
-        self.assertTrue(settings.control_enabled)
-        self.assertEqual(settings.srt_url, "srt://192.168.1.108:9000")
-        self.assertEqual(settings.control_host, PEER["ip"])
-        self.assertEqual(self.window.stack.currentIndex(), PAGE_INDEX["viewer"])
-        self.window._back_from_viewer()
-        self.assertEqual(self.window.devices_page.stack.currentIndex(), 1)
+        self.assertTrue(self.request.call_args.args[2])
+        self.start_viewer.assert_not_called()
         self.window.devices_page.watch_button.click()
-        watch_settings = self.start_viewer.call_args.args[0]
-        self.assertFalse(watch_settings.control_enabled)
-        self.assertFalse(watch_settings.clipboard_enabled)
-        self.assertFalse(watch_settings.gamepad_enabled)
-        self.window.devices_page.enter_button.click()
-        control_settings = self.start_viewer.call_args.args[0]
-        self.assertTrue(control_settings.control_enabled)
-        self.assertTrue(control_settings.clipboard_enabled)
-        self.assertTrue(control_settings.gamepad_enabled)
+        self.assertFalse(self.request.call_args.args[2])
+        self.window._session_connected(ViewerSettings(control_enabled=False))
+        self.assertEqual(self.window.stack.currentIndex(), PAGE_INDEX["viewer"])
+        self.assertTrue(self.window.viewer_page.watch_button.isChecked())
         self.window._show_device_list()
         self.assertEqual(self.window.devices_page.stack.currentIndex(), 0)
 
     def test_control_connection_preserves_disabled_optional_input_preferences(self):
-        self.window.viewer_page.clipboard_switch.setChecked(False)
-        self.window.viewer_page.gamepad_switch.setChecked(False)
+        self.window._viewer_settings.clipboard_enabled = False
+        self.window._viewer_settings.gamepad_enabled = False
         self.window.devices_page.watch_button.click()
         self.window.devices_page.enter_button.click()
-        settings = self.start_viewer.call_args.args[0]
-        self.assertTrue(settings.control_enabled)
+        settings = self.request.call_args.args[1]
         self.assertFalse(settings.clipboard_enabled)
         self.assertFalse(settings.gamepad_enabled)
 
@@ -234,17 +233,47 @@ class WindowConnectionTests(unittest.TestCase):
         with patch.object(SessionService, "running", new_callable=lambda: property(lambda _: True)):
             self.window.devices_page.enter_button.click()
         self.start_viewer.assert_not_called()
+        self.request.assert_not_called()
 
     def test_connection_rereads_current_address(self):
         self.peers.return_value = [{**PEER, "ip": "100.100.100.100", "srt_port": 9100}]
         self.window.devices_page.enter_button.click()
-        settings = self.start_viewer.call_args.args[0]
-        self.assertEqual(settings.srt_url, "srt://100.100.100.100:9100")
+        peer = self.request.call_args.args[0]
+        self.assertEqual(peer["ip"], "100.100.100.100")
 
     def test_expired_peer_is_not_connected(self):
         self.peers.return_value = []
         self.window.devices_page.enter_button.click()
         self.start_viewer.assert_not_called()
+        self.request.assert_not_called()
+
+    def test_session_state_preserves_offline_and_busy_device_buttons(self):
+        self.peers.return_value = []
+        self.window._connection_changed()
+        self.assertFalse(self.window.devices_page.enter_button.isEnabled())
+        self.assertFalse(self.window.devices_page.watch_button.isEnabled())
+        self.window.connection.phase = "connecting"
+        self.window._on_peers([PEER])
+        self.assertFalse(self.window.devices_page.enter_button.isEnabled())
+        self.window.connection.phase = "idle"
+        self.peers.return_value = [PEER]
+        self.window._connection_changed()
+        self.assertTrue(self.window.devices_page.enter_button.isEnabled())
+
+    def test_picture_is_saved_after_applied_signal(self):
+        self.window._picture_applied({
+            "width": 1280, "height": 720, "fps": 60, "bitrate_kbps": 6500,
+        })
+        from frontend.desktop import settings
+        saved = settings.save.call_args.args[1]
+        self.assertEqual(saved.stream_width, 1280)
+        self.assertEqual(saved.stream_bitrate_kbps, 6500)
+
+    def test_removed_switches_and_manual_host_entry_are_absent(self):
+        self.assertFalse(hasattr(self.window.settings_page, "discovery_row"))
+        self.assertFalse(hasattr(self.window.settings_page, "auto_host_row"))
+        self.assertNotIn("allow_discovery", UiSettings.__dataclass_fields__)
+        self.assertNotIn("auto_host", UiSettings.__dataclass_fields__)
 
 
 class DiscoveryUpdateTests(unittest.TestCase):

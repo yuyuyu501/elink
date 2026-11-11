@@ -58,8 +58,6 @@ class SettingRow(QWidget):
 class SettingsPage(QWidget):
     startup_changed = Signal(bool)
     tray_changed = Signal(bool)
-    discovery_changed = Signal(bool)
-    auto_host_changed = Signal(bool)
     open_data_requested = Signal()
     open_logs_requested = Signal()
     copy_diagnostics_requested = Signal()
@@ -92,21 +90,12 @@ class SettingsPage(QWidget):
         self.tray_row = SettingRow(
             "minus", "关闭时最小化到托盘", "关闭主窗口时保留会话，从托盘菜单退出", "slate"
         )
-        self.auto_host_row = SettingRow(
-            "play", "启动后自动开启主机模式", "使用上次保存的推流参数开始等待连接", "green"
-        )
         general.body().addWidget(self.startup_row)
         general.add(divider())
         general.body().addWidget(self.tray_row)
-        general.add(divider())
-        general.body().addWidget(self.auto_host_row)
         content.addWidget(general)
 
         discovery = Card("设备发现", "通过各网络接口自动寻找运行 Elink 的机器")
-        self.discovery_row = SettingRow(
-            "link", "允许设备发现", "自动通过已连接的网络寻找设备", "cyan"
-        )
-        discovery.body().addWidget(self.discovery_row)
         self.discovery_hint = hint("发现服务已开启。")
         discovery.add(self.discovery_hint)
         content.addWidget(discovery)
@@ -161,16 +150,12 @@ class SettingsPage(QWidget):
 
         self.startup_row.toggle.toggled.connect(self.startup_changed.emit)
         self.tray_row.toggle.toggled.connect(self.tray_changed.emit)
-        self.discovery_row.toggle.toggled.connect(self.discovery_changed.emit)
-        self.auto_host_row.toggle.toggled.connect(self.auto_host_changed.emit)
 
     # ---- 状态 ----
     def set_ui(self, ui: UiSettings) -> None:
         widgets = (
             (self.startup_row.toggle, ui.start_on_login),
             (self.tray_row.toggle, ui.close_to_tray),
-            (self.discovery_row.toggle, ui.allow_discovery),
-            (self.auto_host_row.toggle, ui.auto_host),
         )
         for widget, checked in widgets:
             widget.blockSignals(True)

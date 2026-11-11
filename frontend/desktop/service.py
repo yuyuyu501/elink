@@ -74,10 +74,15 @@ class ViewerSettings:
 
     srt_url: str = "srt://127.0.0.1:9000"
     transport: str = "srt"  # srt / file
+    srt_mode: str = "caller"
     file_path: str = "out/host.ts"
     control_host: str = "127.0.0.1"
     control_port: int = 7000
     control_enabled: bool = False
+    stream_width: int = 1920
+    stream_height: int = 1080
+    stream_fps: float = 30.0
+    stream_bitrate_kbps: int = 4000
     clipboard_enabled: bool = True
     gamepad_enabled: bool = True
     scale_percent: int = 100
@@ -223,6 +228,7 @@ class SessionService(QObject):
     stats_changed = Signal(object)        # SessionStats
     control_changed = Signal(str)         # 控制通道状态描述
     devices_changed = Signal(list)        # list[dict]
+    host_prepared = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -240,6 +246,10 @@ class SessionService(QObject):
         self._mode = ""
         self._started_at = 0.0
         self._devices_loading = False
+        self._transport = None
+        self._host_live: HostSettings | None = None
+        self._stats_worker: threading.Thread | None = None
+        self._control_worker: threading.Thread | None = None
 
     # ---- 查询 ----
     @property
@@ -302,6 +312,7 @@ class SessionService(QObject):
             self.log.emit("已有会话在运行，请先停止", "warn")
             return
         self._settings_snapshot = {"mode": "host", **asdict(settings)}
+        self._host_live = settings
         self._begin("host")
         config, filters = _host_config(settings)
         self._worker = threading.Thread(
@@ -331,6 +342,8 @@ class SessionService(QObject):
         if not self.running:
             return
         self._stop.set()
+        if self._transport is not None:
+            self._transport.abort()
         self.state_changed.emit("stopping", "正在停止…")
         pipeline = self._pipeline
         if pipeline is not None and hasattr(pipeline, "stop"):
@@ -356,10 +369,19 @@ class SessionService(QObject):
         self.stats_changed.emit(self._stats)
 
     def _finish(self, reason: str = "") -> None:
+        self._stop.set()
+        if self._stats_worker is not None:
+            self._stats_worker.join(timeout=2)
+            self._stats_worker = None
         self._stop_clipboard()
         self._stop_gamepad()
         self._stop_control()
+        if self._control_worker is not None:
+            self._control_worker.join(timeout=2)
+            self._control_worker = None
         self._pipeline = None
+        self._transport = None
+        self._host_live = None
         self._mode = ""
         self.state_changed.emit("idle", reason)
         if self._started_at:
@@ -399,6 +421,9 @@ class SessionService(QObject):
             runtime = build_send_resources(config, registry)
             pipeline = runtime.get("pipeline")
             self._pipeline = pipeline
+            self._transport = runtime.get("srt")
+            if self._stop.is_set():
+                return
 
             tap = _PreviewTap(self.frame_ready.emit)
             pipeline.filters.extend([*filters, tap])
@@ -413,18 +438,24 @@ class SessionService(QObject):
                 f"@{settings.fps:g} · {settings.bitrate_kbps}kbps · 编码器 {config.encode.encoder}",
                 "info",
             )
-            threading.Thread(
+            self._stats_worker = threading.Thread(
                 target=self._stats_loop, args=(pipeline,), kwargs={"is_host": True}, daemon=True
-            ).start()
+            )
+            self._stats_worker.start()
+            self.host_prepared.emit()
 
             stats = pipeline.run()
             self.log.emit(f"发送结束：{stats.summary()}", "info")
             self._stats.bytes_out = getattr(stats, "bytes_written", self._stats.bytes_out)
         except Exception as exc:
-            self.log.emit(f"主机模式失败：{exc}", "error")
-            self.state_changed.emit("error", str(exc))
+            if not self._stop.is_set():
+                self.log.emit(f"主机模式失败：{exc}", "error")
+                self.state_changed.emit("error", str(exc))
         finally:
             if runtime is not None:
+                transport = runtime.get("srt")
+                if transport is not None:
+                    transport.abort()
                 runtime.close()
             self._finish("发送已停止")
 
@@ -435,6 +466,9 @@ class SessionService(QObject):
             runtime = build_receive_resources(config, registry)
             pipeline = runtime.get("pipeline")
             self._pipeline = pipeline
+            self._transport = runtime.get("srt")
+            if self._stop.is_set():
+                return
 
             # 换成把帧交给界面的渲染器（原来的写图渲染器不再使用）
             upscaler = None
@@ -464,22 +498,27 @@ class SessionService(QObject):
             pipeline.renderer = _QtRenderer(self.frame_ready.emit, upscaler)
 
             self._start_control_client(settings)
-            if settings.clipboard_enabled:
+            if settings.control_enabled and settings.clipboard_enabled:
                 self._start_clipboard()
-            if settings.gamepad_enabled:
+            if settings.control_enabled and settings.gamepad_enabled:
                 self._start_gamepad_viewer()
             self.log.emit(f"观看模式已启动：{settings.srt_url if settings.transport == 'srt' else settings.file_path}", "info")
-            threading.Thread(
+            self._stats_worker = threading.Thread(
                 target=self._stats_loop, args=(pipeline,), kwargs={"is_host": False}, daemon=True
-            ).start()
+            )
+            self._stats_worker.start()
 
             stats = pipeline.run()
             self.log.emit(f"接收结束：{stats.summary()}", "info")
         except Exception as exc:
-            self.log.emit(f"观看模式失败：{exc}", "error")
-            self.state_changed.emit("error", str(exc))
+            if not self._stop.is_set():
+                self.log.emit(f"观看模式失败：{exc}", "error")
+                self.state_changed.emit("error", str(exc))
         finally:
             if runtime is not None:
+                transport = runtime.get("srt")
+                if transport is not None:
+                    transport.abort()
                 runtime.close()
             self._finish("接收已停止")
 
@@ -502,17 +541,29 @@ class SessionService(QObject):
                     self.log.emit(f"控制通道异常：{exc}", "warn")
                     self.control_changed.emit("控制通道未连接")
 
-        threading.Thread(target=run, name="control-server", daemon=True).start()
+        self._control_worker = threading.Thread(target=run, name="control-server", daemon=True)
+        self._control_worker.start()
 
     def _start_control_client(self, settings: ViewerSettings) -> None:
         def run() -> None:
             try:
-                channel = TcpControlChannel(
-                    settings.control_host, settings.control_port, timeout_s=5.0
-                )
-                self._control = channel
-                channel.on_message(lambda message: self._on_remote_event(message, settings))
-                channel.open()
+                deadline = time.monotonic() + 10.0
+                while not self._stop.is_set():
+                    channel = TcpControlChannel(
+                        settings.control_host, settings.control_port, timeout_s=2.0
+                    )
+                    self._control = channel
+                    channel.on_message(lambda message: self._on_remote_event(message, settings))
+                    try:
+                        channel.open()
+                        break
+                    except Exception:
+                        channel.close()
+                        if time.monotonic() >= deadline:
+                            raise
+                        self._stop.wait(0.2)
+                if self._stop.is_set():
+                    return
                 self.control_changed.emit(f"已连接控制通道 {settings.control_host}:{settings.control_port}")
                 if settings.control_enabled:
                     self._start_local_capture(settings)
@@ -522,7 +573,8 @@ class SessionService(QObject):
                 self.log.emit(f"控制通道连接失败：{exc}", "warn")
                 self.control_changed.emit("控制通道未连接")
 
-        threading.Thread(target=run, name="control-client", daemon=True).start()
+        self._control_worker = threading.Thread(target=run, name="control-client", daemon=True)
+        self._control_worker.start()
 
     def set_control_enabled(self, enabled: bool, settings: ViewerSettings) -> None:
         """观看模式下切换「本机输入转发」。"""
@@ -530,6 +582,18 @@ class SessionService(QObject):
             self._start_local_capture(settings)
         else:
             self._stop_local_capture()
+
+    def set_host_control(self, enabled: bool) -> None:
+        if self._host_live is not None:
+            self._host_live.allow_inject = enabled
+            self._host_live.gamepad_enabled = enabled
+            self._host_live.clipboard_enabled = enabled
+            if enabled:
+                self._start_clipboard()
+                self._start_gamepad_host()
+            else:
+                self._stop_clipboard()
+                self._stop_gamepad()
 
     def _start_local_capture(self, settings: ViewerSettings) -> None:
         if self._hook is not None:
@@ -551,8 +615,13 @@ class SessionService(QObject):
 
     def _forward_loop(self) -> None:
         hook = self._hook
-        while hook is not None and not self._stop.is_set():
-            event = hook.read(timeout_s=0.2)
+        while hook is not None and hook is self._hook and not self._stop.is_set():
+            try:
+                event = hook.read(timeout_s=0.2)
+            except Exception:
+                break
+            if hook is not self._hook:
+                break
             channel = self._control
             if event is None or channel is None:
                 continue
@@ -572,7 +641,7 @@ class SessionService(QObject):
             self.control_changed.emit("本机输入转发已关闭")
 
     def _on_remote_input(self, message, settings: HostSettings) -> None:
-        if not isinstance(message, InputEvent):
+        if not isinstance(message, InputEvent) or not settings.allow_inject:
             return
         if message.event_type is EventType.CLIPBOARD:
             if settings.clipboard_enabled and self._clipboard is not None:
@@ -587,8 +656,6 @@ class SessionService(QObject):
                     self._pads.update(int(extra.get("index", 0)), list(extra["values"]))
                 except Exception as exc:
                     self.log.emit(f"手柄注入失败：{exc}", "warn")
-            return
-        if not settings.allow_inject:
             return
         try:
             if self._injector is None:
@@ -835,6 +902,7 @@ def _viewer_config(settings: ViewerSettings) -> AppConfig:
     config = AppConfig(mode="receive")
     config.transport.kind = settings.transport
     config.transport.srt_url = settings.srt_url
+    config.transport.srt_mode = settings.srt_mode
     config.transport.path = settings.file_path
     config.encode.ffmpeg_path = settings.ffmpeg_path
     config.validate()

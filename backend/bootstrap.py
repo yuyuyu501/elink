@@ -115,6 +115,7 @@ def build_send_resources(
         srt = SrtTransport(
             transport.srt_url,
             mode=transport.srt_mode,
+            direction="send",
             latency_ms=transport.srt_latency_ms,
             ffmpeg_path=config.encode.ffmpeg_path,
         )
@@ -172,7 +173,8 @@ def build_receive_resources(
     elif config.transport.kind == "srt":
         srt = SrtTransport(
             config.transport.srt_url,
-            mode="listener",
+            mode=config.transport.srt_mode,
+            direction="receive",
             latency_ms=config.transport.srt_latency_ms,
             ffmpeg_path=config.encode.ffmpeg_path,
         )

@@ -19,6 +19,7 @@ SUITES = (
     "tests/test_audio_and_session.py",
     "tests/test_device_ui.py",
     "tests/test_network_discovery.py",
+    "tests/test_desktop_connection.py",
 )
 
 

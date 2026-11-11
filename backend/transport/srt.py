@@ -44,11 +44,15 @@ class SrtTransport:
         latency_ms: int = 120,
         ffmpeg_path: str = "ffmpeg",
         loglevel: str = "error",
+        direction: str | None = None,
     ) -> None:
         if mode not in {"caller", "listener"}:
             raise TransportError(f"非法 SRT 模式: {mode}", detail=mode)
         self.url = build_srt_url(url, mode=mode, latency_ms=latency_ms)
         self.mode = mode
+        self.direction = direction or ("send" if mode == "caller" else "receive")
+        if self.direction not in {"send", "receive"}:
+            raise TransportError(f"非法 SRT 方向: {self.direction}")
         self.ffmpeg_path = ffmpeg_path
         self.loglevel = loglevel
         self._proc: subprocess.Popen[bytes] | None = None
@@ -67,7 +71,7 @@ class SrtTransport:
         # 解析拿不到完整数据（直接 0 输出）。
         probe_flags = ["-probesize", "32768", "-analyzeduration", "100000"]
 
-        if self.mode == "caller":
+        if self.direction == "send":
             cmd = [
                 self.ffmpeg_path,
                 "-hide_banner",
@@ -113,6 +117,15 @@ class SrtTransport:
         )
         self._stderr_thread.start()
 
+    def abort(self) -> None:
+        """Terminate ffmpeg first so blocked pipe reads and writes can finish."""
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
     def close(self) -> None:
         proc = self._proc
         if proc is None:
@@ -128,14 +141,18 @@ class SrtTransport:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2)
+        if proc.stderr is not None:
+            proc.stderr.close()
         self._proc = None
 
     # ---- 管道视图 ----
     @property
     def writer(self) -> BinaryIO:
         """封装器写入端（发送模式）。"""
-        if self.mode != "caller":
-            raise TransportError("只有 caller 模式有写入端")
+        if self.direction != "send":
+            raise TransportError("只有发送通道有写入端")
         if self._proc is None or self._proc.stdin is None:
             raise TransportError("SRT 通道尚未打开")
         return self._proc.stdin
@@ -143,8 +160,8 @@ class SrtTransport:
     @property
     def reader(self) -> BinaryIO:
         """解封装读取端（接收模式）。"""
-        if self.mode != "listener":
-            raise TransportError("只有 listener 模式有读取端")
+        if self.direction != "receive":
+            raise TransportError("只有接收通道有读取端")
         if self._proc is None or self._proc.stdout is None:
             raise TransportError("SRT 通道尚未打开")
         return self._proc.stdout

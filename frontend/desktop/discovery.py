@@ -47,6 +47,8 @@ class DiscoveryService(QObject):
         self._hosting = False
         self._srt_port = 0
         self._control_port = 7000
+        self._session_port = 0
+        self._busy = False
         self._running = False
         self._peers: dict[str, dict[str, Any]] = {}
         self._last_query = 0.0
@@ -68,6 +70,17 @@ class DiscoveryService(QObject):
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def identity(self) -> str:
+        return self._id
+
+    def set_connection(self, port: int, busy: bool) -> None:
+        state = (int(port), bool(busy))
+        if state != (self._session_port, self._busy):
+            self._session_port, self._busy = state
+            if self._running:
+                self._announce()
 
     def start(self) -> bool:
         if self._running:
@@ -256,6 +269,8 @@ class DiscoveryService(QObject):
             "hosting": self._hosting,
             "srt_port": self._srt_port if self._hosting else 0,
             "control_port": self._control_port,
+            "session_port": self._session_port,
+            "busy": self._busy,
         }
         payload.update(extra)
         return payload
@@ -278,6 +293,8 @@ class DiscoveryService(QObject):
             "hosting": bool(message.get("hosting")),
             "srt_port": int(message.get("srt_port") or 0),
             "control_port": int(message.get("control_port") or 7000),
+            "session_port": int(message.get("session_port") or 0),
+            "busy": bool(message.get("busy")),
             "ip": ip,
             "interface": interface,
             "_seen": time.monotonic(),

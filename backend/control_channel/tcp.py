@@ -72,10 +72,12 @@ class TcpControlChannel(ControlChannel):
                 f"TCP 控制通道连接失败 {self.host}:{self.port}", detail=str(exc)
             ) from exc
 
+        if self._stopping.is_set():
+            self.close()
+            raise TransportClosedError("控制通道已停止")
         self._socket.settimeout(None)
         self.state = ChannelState.OPEN
         self._connected.set()
-        self._stopping.clear()
         self._reader = threading.Thread(target=self._read_loop, name="tcp-control-rx", daemon=True)
         self._writer = threading.Thread(target=self._write_loop, name="tcp-control-tx", daemon=True)
         self._reader.start()
@@ -84,16 +86,22 @@ class TcpControlChannel(ControlChannel):
 
     def _open_server(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind((self.host, self.port))
-        listener.listen(1)
-        listener.settimeout(self.timeout_s)
         self._listener = listener
         try:
-            client, address = listener.accept()
-        except socket.timeout as exc:
-            listener.close()
-            raise TransportClosedError("等待控制通道连接超时") from exc
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind((self.host, self.port))
+            listener.listen(1)
+            listener.settimeout(0.2)
+            deadline = time.monotonic() + self.timeout_s
+            while not self._stopping.is_set():
+                try:
+                    client, address = listener.accept()
+                    break
+                except socket.timeout:
+                    if time.monotonic() >= deadline:
+                        raise TransportClosedError("等待控制通道连接超时")
+            else:
+                raise TransportClosedError("控制通道已停止")
         finally:
             listener.close()
             self._listener = None
@@ -106,6 +114,11 @@ class TcpControlChannel(ControlChannel):
     def close(self) -> None:
         self._stopping.set()
         self._outbox.put(None)
+        if self._listener is not None:
+            try:
+                self._listener.close()
+            except OSError:
+                pass
         if self._socket is not None:
             try:
                 self._socket.shutdown(socket.SHUT_RDWR)

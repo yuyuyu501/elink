@@ -12,15 +12,55 @@ from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QToolButton,
 )
 
+from .. import icons
 from .preview import PreviewWidget
 from .widgets import StatusPill, label
+
+
+class PictureDialog(QDialog):
+    def __init__(self, picture: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("画面设置")
+        self.setMinimumWidth(300)
+        form = QFormLayout(self)
+        self.resolution = QComboBox()
+        self.resolution.addItems(["1280×720", "1920×1080", "2560×1440", "3840×2160"])
+        current = f"{picture['width']}×{picture['height']}"
+        if self.resolution.findText(current) < 0:
+            self.resolution.addItem(current)
+        self.resolution.setCurrentText(current)
+        self.fps = QDoubleSpinBox()
+        self.fps.setRange(5, 60)
+        self.fps.setValue(picture["fps"])
+        self.bitrate = QDoubleSpinBox()
+        self.bitrate.setDecimals(3)
+        self.bitrate.setRange(0.3, 20)
+        self.bitrate.setValue(picture["bitrate_kbps"] / 1000)
+        form.addRow("分辨率", self.resolution)
+        form.addRow("帧率", self.fps)
+        form.addRow("码率（Mbps）", self.bitrate)
+        apply = QToolButton()
+        apply.setIcon(icons.icon("check"))
+        apply.setToolTip("应用画面设置")
+        apply.clicked.connect(self.accept)
+        form.addRow("", apply)
+
+    def picture(self) -> dict:
+        width, height = map(int, self.resolution.currentText().split("×"))
+        return {"width": width, "height": height, "fps": self.fps.value(),
+                "bitrate_kbps": round(self.bitrate.value() * 1000)}
 
 
 class StreamWindow(QWidget):
@@ -28,6 +68,8 @@ class StreamWindow(QWidget):
     release_requested = Signal()
     disconnect_requested = Signal()
     stats_toggled = Signal(bool)
+    picture_requested = Signal()
+    watch_toggled = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(None)
@@ -61,6 +103,17 @@ class StreamWindow(QWidget):
         self.pill = StatusPill("运行中", "ok")
         bar.addWidget(self.pill)
         bar.addStretch(1)
+        self.picture_button = QToolButton()
+        self.picture_button.setIcon(icons.icon("settings"))
+        self.picture_button.setToolTip("画面设置")
+        self.picture_button.clicked.connect(self.picture_requested.emit)
+        bar.addWidget(self.picture_button)
+        self.watch_button = QToolButton()
+        self.watch_button.setIcon(icons.icon("eye"))
+        self.watch_button.setToolTip("观看模式")
+        self.watch_button.setCheckable(True)
+        self.watch_button.toggled.connect(self.watch_toggled.emit)
+        bar.addWidget(self.watch_button)
         self.stats_button = QPushButton("统计")
         self.stats_button.setObjectName("streamButton")
         self.stats_button.setCheckable(True)

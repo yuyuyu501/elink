@@ -44,10 +44,10 @@ def _peer_key(peer: dict) -> str:
 
 def _connectable(peer: dict) -> bool:
     try:
-        port = int(peer.get("srt_port") or 0)
+        port = int(peer.get("session_port") or 0)
     except (ValueError, TypeError):
         return False
-    return bool(peer.get("hosting") and peer.get("ip") and 0 < port <= 65535)
+    return bool(peer.get("ip") and not peer.get("busy") and 0 < port <= 65535)
 
 
 class ComputerName(ElidedLabel):
@@ -362,7 +362,7 @@ class DevicesPage(QWidget):
 
     def _update_discovery_hint(self) -> None:
         if not self._discovery_enabled:
-            text = "设备发现已关闭 · 可在设置中开启"
+            text = "设备发现暂不可用"
         elif self._peers:
             text = f"已发现 {len(self._peers)} 台设备 · 自动更新"
         else:
@@ -422,9 +422,9 @@ class DevicesPage(QWidget):
         self.enter_button.setEnabled(ready)
         self.watch_button.setEnabled(ready)
         if not online:
-            message = "设备已离线，重新发现后可连接。" if self._discovery_enabled else "请先在设置中开启设备发现。"
+            message = "设备已离线，重新发现后可连接。" if self._discovery_enabled else "设备发现暂不可用。"
         elif not ready:
-            message = "对方尚未开放桌面连接。当前版本需在对方的「高级连接 → 主机配置」中开启串流。"
+            message = "设备正在使用中。" if peer.get("busy") else "对方连接监听尚未就绪。"
         else:
             message = ""
         self.connection_hint.setText(message)
@@ -442,8 +442,8 @@ class DevicesPage(QWidget):
         lines = [f"系统：{peer.get('platform') or '未知'}"]
         if local:
             lines.append(f"设备发现：{'已开启' if self._discovery_enabled else '已关闭'}")
-            ready = self._local_hosting and self._local_srt_ready
-            lines.append(f"桌面连接：{'已开放' if ready else '未开放'}")
+            ready = self._local_srt_ready
+            lines.append(f"桌面连接：{'会话运行中' if self._local_hosting else '等待连接' if ready else '监听未就绪'}")
             if ready:
                 lines.append(f"串流地址：{self._local_srt}")
                 lines.append(f"控制端口：{self._local_control_port}")

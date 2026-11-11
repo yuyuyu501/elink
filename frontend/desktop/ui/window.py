@@ -38,13 +38,14 @@ from PySide6.QtWidgets import (
 
 from .. import __version__, icons, settings as user_settings, startup
 from ..discovery import DiscoveryService
+from ..connection import DesktopConnection, saved_picture
 from ..service import HostSettings, SessionService, SessionStats, ViewerSettings
 from ..theme import ACCENT, MUTED
 from .devices_page import DevicesPage
 from .pages import ENCODERS, PRESETS, RESOLUTIONS, HostPage, OverviewPage, ViewerPage
 from .preview import PreviewFrame
 from .settings_page import SettingsPage
-from .stream_window import StreamWindow
+from .stream_window import PictureDialog, StreamWindow
 from .widgets import ClickableCard, IconTile, NoticeBar, StatusDot, TitleBar, divider, hint, label
 
 NAV_ITEMS = [
@@ -103,6 +104,9 @@ class MainWindow(QMainWindow):
         host_settings, viewer_settings = user_settings.load()
         self._host_settings = host_settings
         self._viewer_settings = viewer_settings
+        self.connection = DesktopConnection(
+            self.service, self.discovery.identity, host_settings, self
+        )
 
         central = QFrame(self)
         central.setObjectName("windowRoot")
@@ -131,8 +135,6 @@ class MainWindow(QMainWindow):
         self.log("界面已就绪", "info")
         if auto_refresh:
             self._refresh_devices()
-        if self.ui_settings.auto_host:
-            QTimer.singleShot(250, self._auto_start_host)
 
     # ---- 构建：侧栏 ----
     def _build_sidebar(self) -> QWidget:
@@ -176,15 +178,6 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         layout.addWidget(device)
         layout.addWidget(divider())
-        advanced_button = QPushButton("高级连接")
-        advanced_button.setObjectName("navItem")
-        advanced_button.setIcon(icons.icon("sliders-horizontal", MUTED))
-        advanced_button.setIconSize(QSize(17, 17))
-        advanced_menu = QMenu(advanced_button)
-        for key, caption in (("host", "主机配置"), ("viewer", "手动连接"), ("overview", "运行总览")):
-            advanced_menu.addAction(caption, lambda checked=False, key=key: self._show_page(key))
-        advanced_button.setMenu(advanced_menu)
-        layout.addWidget(advanced_button)
 
         settings_button = QPushButton("设置")
         settings_button.setObjectName("navItem")
@@ -296,7 +289,7 @@ class MainWindow(QMainWindow):
         self.host_page.clipboard_toggled.connect(lambda enabled: self._toggle_clipboard("host", enabled))
         self.host_page.report_requested.connect(lambda: self._export_report("host"))
         self.viewer_page.start_requested.connect(self._start_manual_viewer)
-        self.viewer_page.stop_requested.connect(self.service.stop)
+        self.viewer_page.stop_requested.connect(self._disconnect_session)
         self.viewer_page.back_requested.connect(self._back_from_viewer)
         self.viewer_page.control_toggled.connect(self._toggle_control)
         self.viewer_page.clipboard_toggled.connect(lambda enabled: self._toggle_clipboard("viewer", enabled))
@@ -306,6 +299,13 @@ class MainWindow(QMainWindow):
         self.viewer_page.stats_toggled.connect(self._toggle_stats_overlay)
         self.viewer_page.release_requested.connect(self._release_viewer_input)
         self.devices_page.connect_peer.connect(self._connect_peer)
+        self.viewer_page.picture_requested.connect(self._edit_picture)
+        self.connection.error.connect(lambda message: self.log(message, "error"))
+        self.connection.changed.connect(self._connection_changed)
+        self.connection.connected.connect(self._session_connected)
+        self.connection.picture_applied.connect(self._picture_applied)
+        self.connection.mode_applied.connect(self._mode_applied)
+        self.connection.finished.connect(self._session_finished)
 
         for keys, callback in (
             ("F8", self._release_viewer_input),
@@ -321,8 +321,6 @@ class MainWindow(QMainWindow):
         settings = self.settings_page
         settings.startup_changed.connect(self._change_startup)
         settings.tray_changed.connect(self._change_tray)
-        settings.discovery_changed.connect(self._change_discovery)
-        settings.auto_host_changed.connect(self._change_auto_host)
         settings.open_data_requested.connect(lambda: self._open_dir(self.root))
         settings.open_logs_requested.connect(lambda: self._open_dir(self.root / "logs"))
         settings.copy_diagnostics_requested.connect(self._copy_diagnostics)
@@ -348,6 +346,8 @@ class MainWindow(QMainWindow):
         self._start_viewer(settings, navigate=True)
 
     def _back_from_viewer(self) -> None:
+        if self._viewer_from_devices:
+            self._disconnect_session()
         self._show_page("devices" if self._viewer_from_devices else "overview")
 
     def _show_device_list(self) -> None:
@@ -417,6 +417,13 @@ class MainWindow(QMainWindow):
             self.log("剪贴板同步已" + ("开启" if enabled else "关闭"), "info")
 
     def _toggle_control(self, enabled: bool) -> None:
+        if self._loading_settings:
+            return
+        if self.connection.role == "viewer" and self.connection.busy:
+            if not enabled:
+                self.service.set_control_enabled(False, self._viewer_settings)
+            self.connection.set_control(enabled)
+            return
         self._viewer_settings.control_enabled = enabled
         if self.service.running and self.service.mode == "viewer":
             self.service.set_control_enabled(enabled, self._viewer_settings)
@@ -458,7 +465,7 @@ class MainWindow(QMainWindow):
                 state, "idle"
             )
             self._stream_window.set_status(text, stream_tone)
-        if state == "idle":
+        if state == "idle" and self.connection.phase not in {"updating", "preparing", "receiving"}:
             if self.service.mode == "":
                 self.host_page.preview_frame.preview.set_info("")
                 self.viewer_page.preview_frame.preview.set_info("")
@@ -516,7 +523,10 @@ class MainWindow(QMainWindow):
         window.set_status(self.status_label.text(), self.status_dot.property("tone") or "ok")
         window.stats_toggled.connect(self._toggle_stats_overlay)
         window.release_requested.connect(self._release_viewer_input)
-        window.disconnect_requested.connect(self.service.stop)
+        window.disconnect_requested.connect(self._disconnect_session)
+        window.picture_requested.connect(self._edit_picture)
+        window.watch_toggled.connect(lambda watching: self._toggle_control(not watching))
+        window.watch_button.setChecked(not self._viewer_settings.control_enabled)
         window.closed.connect(self._on_stream_closed)
         self._stream_window = window
         window.show_fullscreen()
@@ -552,14 +562,13 @@ class MainWindow(QMainWindow):
         if self._active_mode != "viewer" or not self.service.running:
             self.notice_bar.show_message("释放输入仅在观看会话中可用。", "warn")
             return
-        self._viewer_settings.control_enabled = False
         self.viewer_page.control_toggle.setChecked(False)
         self.service.set_control_enabled(False, self._viewer_settings)
         self.log("已释放键鼠输入（F8）", "info")
 
     def _stop_viewer_shortcut(self) -> None:
         if self.service.running and self.service.mode == "viewer":
-            self.service.stop()
+            self._disconnect_session()
 
     def _on_control(self, text: str) -> None:
         self.control_label.setText(text or "控制通道未连接")
@@ -586,6 +595,9 @@ class MainWindow(QMainWindow):
 
     def _on_peers(self, peers: list[dict]) -> None:
         self.devices_page.set_peers(peers)
+        if self.connection.busy:
+            self.devices_page.enter_button.setEnabled(False)
+            self.devices_page.watch_button.setEnabled(False)
 
     def _on_discovery_status(self, message: str) -> None:
         self._discovery_message = message
@@ -605,47 +617,92 @@ class MainWindow(QMainWindow):
         port = _srt_port(settings.srt_url) if srt_ready else 0
         self.discovery.set_hosting(hosting, port, settings.control_port)
         self.devices_page.set_local_state(
-            hosting, settings.srt_url, settings.control_port, srt_ready=srt_ready
+            hosting, settings.srt_url, settings.control_port,
+            srt_ready=self.connection.server.isListening()
+        )
+        self.discovery.set_connection(
+            self.connection.server.serverPort() if self.connection.server.isListening() else 0,
+            self.connection.busy,
         )
 
     def _connect_peer(self, peer: dict, control_enabled: bool = True) -> None:
-        if self.service.running:
+        if self.connection.busy:
             self.notice_bar.show_message("已有一条会话在运行，请先停止后再连接。", "warn")
             return
         peer = next((item for item in self.discovery.peers() if item["id"] == peer.get("id")), None)
         if peer is None:
             self.notice_bar.show_message("设备已离线，请等待重新发现。", "warn")
             return
-        if not peer.get("hosting") or int(peer.get("srt_port") or 0) <= 0:
-            self.notice_bar.show_message("对方没有开放 SRT 主机，暂时无法连接。", "warn")
+        if not peer.get("session_port") or peer.get("busy"):
+            self.notice_bar.show_message("对方连接监听未就绪或正在使用中。", "warn")
             return
-        host = str(peer.get("ip", ""))
-        if not host:
-            return
-        port = int(peer.get("srt_port") or 9000)
-        control = int(peer.get("control_port") or 7000)
-        self.viewer_page.transport.setCurrentIndex(0)
-        self.viewer_page.sync_transport()
-        self.viewer_page.srt_url.setText(f"srt://{host}:{port}")
-        self.viewer_page.control_host.setText(host)
-        self.viewer_page.control_port.setValue(control)
-        if not control_enabled:
-            if self._watch_interaction_preferences is None:
-                self._watch_interaction_preferences = (
-                    self.viewer_page.clipboard_switch.isChecked(),
-                    self.viewer_page.gamepad_switch.isChecked(),
-                )
-            self.viewer_page.clipboard_switch.setChecked(False)
-            self.viewer_page.gamepad_switch.setChecked(False)
-        elif self._watch_interaction_preferences is not None:
-            clipboard, gamepad = self._watch_interaction_preferences
-            self._watch_interaction_preferences = None
-            self.viewer_page.clipboard_switch.setChecked(clipboard)
-            self.viewer_page.gamepad_switch.setChecked(gamepad)
-        self.viewer_page.control_toggle.setChecked(control_enabled)
         self._viewer_from_devices = True
-        self.log(f"连接发现设备：{peer.get('name', host)} · {host}:{port}", "info")
-        self._start_viewer(self.viewer_page.settings(), navigate=True)
+        self.connection.connect_peer(peer, self._viewer_settings, control_enabled)
+
+    def _connection_changed(self) -> None:
+        phase = self.connection.phase
+        self._on_peers(self.discovery.peers())
+        self.viewer_page.picture_button.setEnabled(phase == "active")
+        self.viewer_page.watch_button.setEnabled(phase == "active")
+        if self._stream_window:
+            self._stream_window.picture_button.setEnabled(phase == "active")
+            self._stream_window.watch_button.setEnabled(phase == "active")
+        if phase in {"connecting", "preparing", "receiving", "updating"}:
+            self.notice_bar.show_message("正在调整画面…" if phase == "updating" else "正在建立桌面连接…", "info")
+        self._sync_discovery_hosting()
+
+    def _session_connected(self, settings: ViewerSettings) -> None:
+        self._viewer_settings = settings
+        self._active_mode = "viewer"
+        self._loading_settings = True
+        self.viewer_page.control_toggle.setChecked(settings.control_enabled)
+        self.viewer_page.watch_button.setChecked(not settings.control_enabled)
+        self._loading_settings = False
+        self._show_page("viewer")
+
+    def _session_finished(self) -> None:
+        self.devices_page.set_peers(self.discovery.peers())
+        if self._viewer_from_devices:
+            self._show_page("devices")
+
+    def _disconnect_session(self) -> None:
+        if self.connection.phase != "idle":
+            self.connection.disconnect()
+        else:
+            self.service.stop()
+
+    def _mode_applied(self, enabled: bool) -> None:
+        self._viewer_settings.control_enabled = enabled
+        self._loading_settings = True
+        self.viewer_page.control_toggle.setChecked(enabled)
+        for button in (self.viewer_page.watch_button,
+                       self._stream_window.watch_button if self._stream_window else None):
+            if button is not None:
+                button.blockSignals(True)
+                button.setChecked(not enabled)
+                button.blockSignals(False)
+        self._loading_settings = False
+        self.service.set_control_enabled(enabled, self._viewer_settings)
+        self.service.set_clipboard_enabled(enabled and self._viewer_settings.clipboard_enabled)
+        self.service.set_gamepad_enabled(enabled and self._viewer_settings.gamepad_enabled,
+                                         self._viewer_settings)
+
+    def _picture_applied(self, picture: dict) -> None:
+        for name, value in picture.items():
+            setattr(self._viewer_settings, f"stream_{name}", value)
+        self._persist_ui()
+        self.notice_bar.show_message("桌面已连接", "info")
+
+    def _edit_picture(self) -> None:
+        if self.connection.role != "viewer" or self.connection.phase != "active":
+            return
+        enabled = self._viewer_settings.control_enabled
+        self.service.set_control_enabled(False, self._viewer_settings)
+        dialog = PictureDialog(saved_picture(self._viewer_settings), self._stream_window or self)
+        accepted = dialog.exec()
+        self.service.set_control_enabled(enabled, self._viewer_settings)
+        if accepted:
+            self.connection.configure(dialog.picture())
 
     # ---- 设置 / 托盘 / 发现开关 ----
     def _apply_ui_settings(self) -> None:
@@ -663,12 +720,8 @@ class MainWindow(QMainWindow):
         )
         self.settings_page.set_ui(self.ui_settings)
         self._setup_tray(self.ui_settings.close_to_tray)
-        if self.ui_settings.allow_discovery:
-            if not self.discovery.start():
-                self.ui_settings.allow_discovery = False
-                self.settings_page.set_ui(self.ui_settings)
-        else:
-            self.discovery.stop()
+        self.connection.start()
+        self.discovery.start()
         self.devices_page.set_discovery_state(self.discovery.running, self._discovery_message)
         self.settings_page.set_discovery_state(self.discovery.running)
         self._on_peers(self.discovery.peers())
@@ -706,33 +759,6 @@ class MainWindow(QMainWindow):
         self._setup_tray(enabled)
         self._persist_ui()
         self.log("关闭到托盘已" + ("开启" if enabled else "关闭"), "info")
-
-    def _change_discovery(self, enabled: bool) -> None:
-        if enabled:
-            ok = self.discovery.start()
-            if not ok:
-                self.ui_settings.allow_discovery = False
-                self.settings_page.set_ui(self.ui_settings)
-                self.notice_bar.show_message("设备发现无法启动：UDP 端口可能被占用。", "error")
-                return
-        else:
-            self.discovery.stop()
-        self.ui_settings.allow_discovery = enabled
-        self._persist_ui()
-        self.devices_page.set_discovery_state(self.discovery.running, self._discovery_message)
-        self._on_peers(self.discovery.peers())
-        self.log("设备发现已" + ("开启" if enabled else "关闭"), "info")
-
-    def _change_auto_host(self, enabled: bool) -> None:
-        self.ui_settings.auto_host = enabled
-        self._persist_ui()
-        self.log("启动后自动开启主机模式已" + ("开启" if enabled else "关闭"), "info")
-
-    def _auto_start_host(self) -> None:
-        if not self.ui_settings.auto_host or self.service.running:
-            return
-        self.log("按设置自动开启主机模式…", "info")
-        self._start_host(self.host_page.settings(), navigate=False)
 
     def _setup_tray(self, enabled: bool) -> None:
         if not enabled:
@@ -971,6 +997,7 @@ class MainWindow(QMainWindow):
                     2500,
                 )
             return
+        self.connection.close()
         if self.service.running:
             self.service.stop()
             deadline = time.monotonic() + 3.0

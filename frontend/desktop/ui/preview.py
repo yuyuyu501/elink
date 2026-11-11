@@ -29,7 +29,7 @@ from PySide6.QtWidgets import QFrame, QSizePolicy, QVBoxLayout, QWidget
 from backend.media.frame import Frame
 
 PLACEHOLDER_TITLE = "等待画面"
-PLACEHOLDER_HINT = "开始推流或连接主机后，这里会显示实时画面"
+PLACEHOLDER_HINT = "正在等待远端画面"
 HUD_MARGIN = 14
 
 

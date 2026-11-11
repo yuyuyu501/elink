@@ -391,6 +391,12 @@ class FfmpegEncoderBase(BaseEncoder):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+        for thread in (self._reader, self._stderr_thread):
+            if thread is not None:
+                thread.join(timeout=2)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
         self._proc = None
         self._opened = False
 
@@ -632,6 +638,12 @@ class FfmpegDecoderBase(BaseDecoder):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+            for thread in (self._reader, self._stderr_thread):
+                if thread is not None:
+                    thread.join(timeout=2)
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
         self._proc = None
         self._opened = False
 

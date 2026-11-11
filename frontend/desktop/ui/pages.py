@@ -128,7 +128,8 @@ def _header(
     row.setSpacing(12)
 
     if back is not None:
-        back_button = _plain("← 总览", object_name="ghost")
+        back_button = _plain("", "log-out", object_name="ghost")
+        back_button.setToolTip("返回")
         back_button.clicked.connect(back.emit)
         row.addWidget(back_button, 0, Qt.AlignmentFlag.AlignTop)
 
@@ -618,6 +619,7 @@ class ViewerPage(QWidget):
     gamepad_toggled = Signal(bool)
     report_requested = Signal()
     fullscreen_requested = Signal()
+    picture_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -628,11 +630,11 @@ class ViewerPage(QWidget):
         root.setSpacing(14)
 
         header, actions, self.pill = _header(
-            "观看模式",
-            "连接对方主机，实时观看画面并（可选）接管键鼠。",
+            "远程桌面",
+            "",
             back=self.back_requested,
         )
-        self.stats_button = QPushButton("统计")
+        self.stats_button = _plain("", "activity")
         self.stats_button.setObjectName("chip")
         self.stats_button.setCheckable(True)
         self.stats_button.setEnabled(False)
@@ -640,25 +642,38 @@ class ViewerPage(QWidget):
         self.stats_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stats_button.toggled.connect(self.stats_toggled.emit)
         actions.addWidget(self.stats_button)
-        self.release_button = _plain("释放输入", "keyboard")
+        self.release_button = _plain("", "keyboard")
         self.release_button.setToolTip("释放远端键鼠控制（F8）")
         self.release_button.setEnabled(False)
         self.release_button.clicked.connect(self.release_requested.emit)
         actions.addWidget(self.release_button)
-        self.fullscreen_button = _plain("全屏", "maximize")
+        self.fullscreen_button = _plain("", "maximize")
         self.fullscreen_button.setToolTip("打开独立全屏播放器（F11）")
         self.fullscreen_button.setEnabled(False)
         self.fullscreen_button.clicked.connect(self.fullscreen_requested.emit)
         actions.addWidget(self.fullscreen_button)
-        self.snapshot_button = _plain("截图", "camera")
+        self.snapshot_button = _plain("", "camera")
+        self.snapshot_button.setToolTip("截图")
         self.snapshot_button.setEnabled(False)
         actions.addWidget(self.snapshot_button)
-        self.report_button = _plain("报告", "file-down")
+        self.report_button = _plain("", "file-down")
         self.report_button.setToolTip("导出当前会话的解码/渲染耗时报告")
         self.report_button.setEnabled(False)
         self.report_button.clicked.connect(self.report_requested.emit)
         actions.addWidget(self.report_button)
         root.addWidget(header)
+
+        self.picture_button = _plain("", "settings")
+        self.picture_button.setToolTip("画面设置")
+        self.picture_button.setEnabled(False)
+        self.picture_button.clicked.connect(self.picture_requested.emit)
+        actions.addWidget(self.picture_button)
+        self.watch_button = _plain("", "eye")
+        self.watch_button.setToolTip("观看模式")
+        self.watch_button.setCheckable(True)
+        self.watch_button.setEnabled(False)
+        self.watch_button.toggled.connect(lambda watching: self.control_toggle.setChecked(not watching))
+        actions.addWidget(self.watch_button)
 
         body = QHBoxLayout()
         body.setSpacing(16)
@@ -757,6 +772,13 @@ class ViewerPage(QWidget):
         rail_layout_wrap.addWidget(rail, 1)
         rail_layout_wrap.addLayout(action_row)
         body.addLayout(rail_layout_wrap, 0)
+        self.session_rail = rail
+        rail.hide()
+        self.start_button.hide()
+        self.stop_button.setText("")
+        self.stop_button.setToolTip("断开连接")
+        actions.addWidget(self.stop_button)
+        body.removeItem(rail_layout_wrap)
 
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.settings()))
         self.stop_button.clicked.connect(self.stop_requested.emit)
@@ -811,6 +833,8 @@ class ViewerPage(QWidget):
         self.report_button.setEnabled(running)
         self.fullscreen_button.setEnabled(running)
         self.stats_button.setEnabled(running)
+        self.picture_button.setEnabled(running)
+        self.watch_button.setEnabled(running)
         self.release_button.setEnabled(running and self.control_toggle.isChecked())
         for widget in (self.transport, self.srt_url, self.file_path, self.control_host, self.control_port):
             widget.setEnabled(not running)

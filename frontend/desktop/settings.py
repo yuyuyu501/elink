@@ -23,12 +23,10 @@ DEFAULT_VIEWER = ViewerSettings()
 
 @dataclass
 class UiSettings:
-    """窗口行为与发现开关（与后端参数分开保存）。"""
+    """窗口行为（与后端参数分开保存）。"""
 
     start_on_login: bool = False
     close_to_tray: bool = False
-    allow_discovery: bool = True
-    auto_host: bool = False
 
 
 def _read() -> dict:
