@@ -31,6 +31,7 @@ def _venv_python() -> str:
 def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = False) -> Path:
     dist = (ROOT / (dist_dir or "dist")).resolve()
     resources = ROOT / "frontend" / "desktop" / "resources"
+    ffmpeg_dir = _ffmpeg_source() if os.name == "nt" else None
 
     args = [
         _venv_python(),
@@ -75,10 +76,42 @@ def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = F
 
     output = dist / APP_NAME
     _copy_extras(output)
+    if ffmpeg_dir is not None:
+        _copy_ffmpeg(ffmpeg_dir, output)
     _write_build_info(output)
     executable = output / (f"{APP_NAME}.exe" if os.name == "nt" else APP_NAME)
     print(executable)
     return executable
+
+
+def _ffmpeg_source() -> Path:
+    configured = os.environ.get("ELINK_FFMPEG_DIR")
+    found = shutil.which("ffmpeg")
+    source = Path(configured).resolve() if configured else None
+    if source is None and found:
+        source = Path(found).resolve().parent
+    if source is None or not (source / "ffmpeg.exe").is_file():
+        raise RuntimeError("Set ELINK_FFMPEG_DIR to a real ffmpeg distribution bin directory")
+    # Chocolatey shims are launchers and must never become the bundled dependency.
+    if (source / "ffmpeg.exe").stat().st_size < 1024 * 1024:
+        raise RuntimeError("ffmpeg.exe is a launcher; set ELINK_FFMPEG_DIR to the actual distribution")
+    return source
+
+
+def _copy_ffmpeg(source: Path, output: Path) -> None:
+    target = output / "ffmpeg"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / "ffmpeg.exe", target / "ffmpeg.exe")
+    for dll in source.glob("*.dll"):
+        shutil.copy2(dll, target / dll.name)
+    notices = [
+        path for folder in (source, source.parent) for path in folder.iterdir()
+        if path.is_file() and path.name.lower().startswith(("license", "copying", "readme"))
+    ]
+    if not any(path.name.lower().startswith(("license", "copying")) for path in notices):
+        raise RuntimeError("ffmpeg distribution is missing its license")
+    for path in notices:
+        shutil.copy2(path, target / path.name)
 
 
 def _copy_extras(output: Path) -> None:
@@ -120,7 +153,7 @@ def _write_build_info(output: Path) -> None:
         "python": sys.version,
         "platform": sys.platform,
         "packages": versions,
-        "ffmpeg_required": True,
+        "ffmpeg_bundled": (output / "ffmpeg" / "ffmpeg.exe").is_file(),
     }
     (output / "build-info.json").write_text(
         json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"

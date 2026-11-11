@@ -12,8 +12,8 @@
 
 ## ffmpeg
 
-本项目**不打包** ffmpeg，运行时需要系统中可用的 `ffmpeg`（建议含 `libx264` 与 `libsrt`）。
-分发时请遵守所选 ffmpeg 构建的许可证（通常为 GPLv3）。
+Windows 发布包在 `ffmpeg/` 中携带 ffmpeg（含 `libx264` 与 `libsrt`），
+同时保留所用发行版的许可证及说明文件。源码运行时使用配置路径或系统 PATH。
 
 ## PySide6 / Qt
 

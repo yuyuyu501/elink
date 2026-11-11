@@ -50,7 +50,9 @@ jobs:
           $code = $LASTEXITCODE
           if (Test-Path out/self-test.json) {
             $report = Get-Content out/self-test.json -Raw | ConvertFrom-Json
-            if ($report.ok) { exit 0 }
+            if (-not $report.ok) { exit 1 }
+          } else {
+            exit 1
           }
           exit $code
       - name: Print self-test report on failure

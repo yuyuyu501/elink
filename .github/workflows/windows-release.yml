@@ -34,6 +34,9 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "C:\ProgramData\chocolatey\bin"
           $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
           ffmpeg -version
+          $binary = Get-ChildItem 'C:\ProgramData\chocolatey\lib\ffmpeg' -Filter ffmpeg.exe -Recurse | Where-Object Length -gt 1MB | Select-Object -First 1
+          if (-not $binary) { throw 'Actual ffmpeg distribution not found' }
+          "ELINK_FFMPEG_DIR=$($binary.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Verify tag matches application version
         if: startsWith(github.ref, 'refs/tags/')
         run: |

@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,21 +44,41 @@ def run_self_test(executable: Path, timeout: float = 180.0) -> dict:
 
     print(f"自检: {executable}")
     env = os.environ.copy()
+    bundled_ffmpeg = executable.parent / "ffmpeg" / "ffmpeg.exe"
+    if not bundled_ffmpeg.is_file():
+        raise RuntimeError("Bundled ffmpeg.exe is missing")
+    windows = Path(env.get("SystemRoot", r"C:\Windows"))
+    env["PATH"] = os.pathsep.join(str(windows / part) for part in ("System32", "", "System32/Wbem"))
+    protocols = subprocess.run(
+        [str(bundled_ffmpeg), "-hide_banner", "-protocols"],
+        capture_output=True, text=True, env=env, timeout=15,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if protocols.returncode or "srt" not in protocols.stdout.split():
+        raise RuntimeError("Bundled ffmpeg is missing SRT support or runtime dependencies")
     if env.get("CI") or env.get("ELINK_SELFTEST_HEADLESS") == "1":
         # GitHub Actions 的 Windows runner 没有交互式桌面；真实 windows 平台插件
         # 在服务会话里无法初始化。CI 下强制 offscreen，只验证页面/媒体/后端。
         env["ELINK_SELFTEST_HEADLESS"] = "1"
     try:
-        process = subprocess.run(
-            [str(executable), "--self-test", str(report_path)],
-            timeout=timeout,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        with tempfile.TemporaryDirectory(prefix="elink-selftest-") as data:
+            env["ELINK_DATA_DIR"] = data
+            process = subprocess.run(
+                [str(executable), "--self-test", str(report_path)],
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=data,
+            )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"产物自检超时（{timeout}s）") from exc
 
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"Self-test exited with {process.returncode}\n"
+            f"stdout={process.stdout[-2000:]}\nstderr={process.stderr[-2000:]}"
+        )
     if not report_path.is_file():
         raise RuntimeError(
             "产物没有生成自检报告\n"
@@ -66,6 +87,13 @@ def run_self_test(executable: Path, timeout: float = 180.0) -> dict:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if not report.get("ok"):
         raise RuntimeError(f"产物自检未通过: {report.get('error', report)}")
+    if not report.get("frozen") or Path(report.get("ffmpeg", {}).get("path", "")).resolve() != bundled_ffmpeg.resolve():
+        raise RuntimeError("Self-test did not use the bundled application and ffmpeg")
+    if not report.get("ffmpeg", {}).get("has_libx264"):
+        raise RuntimeError("Bundled ffmpeg is missing libx264")
+    report["exit_code"] = process.returncode
+    report["system_ffmpeg_excluded"] = True
+    report["srt_available"] = True
     media = report.get("media", {})
     if media.get("decoded_frames", 0) <= 0:
         raise RuntimeError("产物媒体链路自检失败：没有解出任何帧")
@@ -105,8 +133,7 @@ def make_installer(folder: Path, version: str, out_dir: Path) -> Path | None:
         found = shutil.which("iscc") or shutil.which("ISCC")
         iscc = Path(found) if found else None
     if iscc is None:
-        print("未找到 Inno Setup（ISCC.exe），跳过安装包。安装后重跑即可生成。")
-        return None
+        raise RuntimeError("Inno Setup (ISCC.exe) is required; use --no-installer for a portable-only build")
 
     script = ROOT / "packaging" / "windows" / "elink.iss"
     args = [
@@ -118,12 +145,11 @@ def make_installer(folder: Path, version: str, out_dir: Path) -> Path | None:
     ]
     print("ISCC:", " ".join(args))
     subprocess.run(args, cwd=ROOT, check=True)
-    candidates = sorted(out_dir.glob("Elink-*-setup.exe"), key=lambda p: p.stat().st_mtime)
-    if not candidates:
-        print("ISCC 执行成功但没有找到 setup 产物，请检查 .iss 的 OutputBaseFilename。")
-        return None
-    print(f"安装包: {candidates[-1]}")
-    return candidates[-1]
+    target = out_dir / f"Elink-{version}-windows-x64-setup.exe"
+    if not target.is_file():
+        raise RuntimeError(f"ISCC did not produce {target.name}")
+    print(f"安装包: {target}")
+    return target
 
 
 def package(dist_dir: Path | None = None, *, installer: bool = True, run_tests: bool = True) -> dict:
@@ -174,10 +200,16 @@ def package(dist_dir: Path | None = None, *, installer: bool = True, run_tests: 
             "ffmpeg": report.get("ffmpeg", {}).get("version"),
             "frozen": report.get("frozen"),
             "backend_import": report.get("registry", {}).get("module_import"),
+            "exit_code": report["exit_code"],
+            "system_ffmpeg_excluded": report["system_ffmpeg_excluded"],
+            "srt_available": report["srt_available"],
+        },
+        "bundled_ffmpeg": {
+            "path": "ffmpeg/ffmpeg.exe",
+            "sha256": sha256(executable.parent / "ffmpeg" / "ffmpeg.exe"),
         },
         "limitations": [
             "installer is not code-signed; SmartScreen may warn",
-            "ffmpeg must be available on PATH at runtime",
         ],
     }
     verification_path = out_dir / "verification.json"

@@ -9,11 +9,20 @@ from __future__ import annotations
 
 import functools
 import subprocess
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from backend.logging.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def resolve_ffmpeg_path(ffmpeg_path: str = "ffmpeg") -> str:
+    """Frozen applications use their own dependency, including with older saved settings."""
+    if getattr(sys, "frozen", False) and sys.platform == "win32":
+        return str(Path(sys.executable).parent / "ffmpeg" / "ffmpeg.exe")
+    return ffmpeg_path
 
 #: 项目内支持的软件编码后端 -> ffmpeg 编码器名
 KNOWN_ENCODERS: dict[str, str] = {
@@ -104,6 +113,7 @@ def _read_version(ffmpeg: str) -> str:
 @functools.lru_cache(maxsize=4)
 def probe_ffmpeg(ffmpeg_path: str = "ffmpeg") -> ProbeResult:
     """探测 ffmpeg 可用编码器/解码器（同一路径只探测一次）。"""
+    ffmpeg_path = resolve_ffmpeg_path(ffmpeg_path)
     try:
         version = _read_version(ffmpeg_path)
         encoders, _ = _list_codecs(ffmpeg_path, "-encoders")

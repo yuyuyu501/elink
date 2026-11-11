@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from backend.config.schema import VideoEncodeConfig
@@ -152,8 +152,9 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
 
     导入放在函数内部：某个后端模块引入的可选依赖缺失时，只跳过它自己。
     """
-    from backend.media.video.codec.probe import probe_ffmpeg
+    from backend.media.video.codec.probe import probe_ffmpeg, resolve_ffmpeg_path
 
+    ffmpeg_path = resolve_ffmpeg_path(ffmpeg_path)
     probe = probe_ffmpeg(ffmpeg_path)
     registry = CodecRegistry()
 
@@ -216,7 +217,7 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
         registry.register_encoder(
             codec,
             name,
-            lambda stream, config, _cls=cls: _cls(stream, config),
+            lambda stream, config, _cls=cls: _cls(stream, replace(config, ffmpeg_path=ffmpeg_path)),
             available=availability(name),
             priority=_PRIORITY_HARDWARE if is_hardware else _PRIORITY_SOFTWARE,
         )
@@ -231,7 +232,7 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
         registry.register_decoder(
             codec,
             name,
-            lambda stream, config, _cls=cls: _cls(stream, config),
+            lambda stream, config, _cls=cls: _cls(stream, replace(config, ffmpeg_path=ffmpeg_path)),
             available=decoder_availability(_decoder_probe_name(codec, name)),
             priority=_PRIORITY_HARDWARE if is_hardware else _PRIORITY_SOFTWARE,
         )

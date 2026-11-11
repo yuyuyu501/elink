@@ -18,6 +18,8 @@
 ## 2. 本地完整打包
 
 需要 Windows x64、Python 3.11–3.13、PyInstaller；安装包需要 Inno Setup 6。
+构建时通过 `ELINK_FFMPEG_DIR` 指向实际 ffmpeg 发行版的 `bin` 目录
+（含 libx264、SRT，且上级目录保留许可证）；不可使用 Chocolatey 启动器。
 可以复用本机已有的 ISCC：
 
 ```powershell
@@ -43,9 +45,11 @@ dist/
 
 `scripts/package_windows.py` 会先跑回归测试，再用打包后的 exe 跑
 `--self-test`（界面、后端 import、编码/解封装/解码闭环）。自检失败不会产出发布资产。
+自检清除系统 ffmpeg 的 PATH，并使用临时配置目录，要求内置 ffmpeg 支持
+libx264 和 SRT、EXE 正常退出且报告通过。
 
 如果 `ELINK_ISCC` 未设置，脚本会查找 `Program Files` 下的 Inno Setup 6，
-或 PATH 中的 `ISCC`；找不到时只产出便携 ZIP，并在输出中说明。
+或 PATH 中的 `ISCC`；找不到时构建失败。仅需便携 ZIP 时显式传入 `--no-installer`。
 
 ## 3. GitHub Actions（推荐）
 

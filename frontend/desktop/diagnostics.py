@@ -182,6 +182,7 @@ def run_self_test(output: Path) -> int:
     }
 
     try:
+        from PySide6.QtCore import QTimer
         from PySide6.QtWidgets import QApplication
 
         from .paths import data_dir, ensure_dirs
@@ -198,9 +199,9 @@ def run_self_test(output: Path) -> int:
         window.show()
         app.processEvents()
         report["ui"] = _ui_report(window, app, output.with_name(output.stem + "-ui.png"))
-        window._exit_requested = True
-        window.close()
-        app.processEvents()
+        window.shutdown_complete.connect(app.quit)
+        QTimer.singleShot(0, window.request_exit)
+        app.exec()
 
         report["ffmpeg"] = _ffmpeg_report()
         report["registry"] = _registry_report()
@@ -223,15 +224,7 @@ def run_self_test(output: Path) -> int:
 
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"ok": report["ok"], "report": str(output)}, ensure_ascii=False))
-    if report["ok"]:
-        # PySide6 6.12 的 offscreen 插件在进程退出阶段可能把退出码改成 1；
-        # 自检已经写完报告并打印 ok，直接结束进程，避免 CI 误判。
-        if sys.stdout is not None:
-            sys.stdout.flush()
-        if sys.stderr is not None:
-            sys.stderr.flush()
-        os._exit(0)
-    return 1
+    return 0 if report["ok"] else 1
 
 
 def _version() -> str:
@@ -244,6 +237,7 @@ def _ffmpeg_report() -> dict:
     probe = probe_ffmpeg()
     return {
         "available": probe.available,
+        "path": probe.ffmpeg_path,
         "version": getattr(probe, "version", ""),
         "has_libx264": probe.has_encoder("libx264") if probe.available else False,
         "error": getattr(probe, "error", ""),

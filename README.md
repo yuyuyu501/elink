@@ -210,7 +210,7 @@ py -3.13 -m scripts.build
 > 所以磁盘上不会出现独立的 `backend/` 目录，但 backend 确实在 exe 里（本次包内有
 > 222 个 backend 模块）；`_internal/` 放的是 Python 运行时、Qt DLL 与图标等资源。
 > 后端不是独立服务，它和界面在同一个进程里，用后台线程跑采集/编码/SRT/控制通道。
-> 唯一没有打包进 exe 的运行时依赖是 **ffmpeg**，需要目标机器 PATH 中可用。
+> Windows 发布包内置 **ffmpeg**，无需目标机器另行安装；源码运行仍需配置 ffmpeg。
 
 **打包必须验证产物本身**：`scripts/package_windows.py` 会用打好的 exe 跑
 `--self-test`，检查 Qt 平台插件、图标资源、字体、ffmpeg 通路

@@ -17,7 +17,7 @@ from backend.event.bus import EventBus
 from backend.logging.logger import get_logger
 from backend.media.container.demuxer import Demuxer
 from backend.media.container.mpegts import MpegTsDemuxer, MpegTsMuxer
-from backend.media.video.codec.probe import ProbeResult, probe_ffmpeg, resolve_encoder
+from backend.media.video.codec.probe import ProbeResult, probe_ffmpeg, resolve_encoder, resolve_ffmpeg_path
 from backend.media.video.render.image_sink import ImageSinkRenderer
 from backend.pipeline.receive_pipeline import ReceivePipeline
 from backend.pipeline.video_pipeline import VideoPipeline
@@ -59,6 +59,7 @@ class Runtime:
 # ---- 环境探测 ----
 def prepare_environment(config: AppConfig) -> tuple[ProbeResult, CodecRegistry]:
     """探测 ffmpeg 能力并构建注册表；两者缺一不可。"""
+    config.encode.ffmpeg_path = resolve_ffmpeg_path(config.encode.ffmpeg_path)
     probe = probe_ffmpeg(config.encode.ffmpeg_path)
     if not probe.available:
         raise BootstrapError(
