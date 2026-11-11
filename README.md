@@ -200,7 +200,7 @@ py -3.13 -m scripts.build
 
 安装包需要 Inno Setup 6 的 `ISCC.exe`：可设 `ELINK_ISCC` 指向已有工具链，
 或安装到默认 `Program Files`。完整发布流程见 [RELEASING.md](RELEASING.md)
-（`docs/` 默认不进 Git），Release 正文在 [releases/v0.6.1.md](releases/v0.6.1.md)。
+（`docs/` 默认不进 Git），Release 正文在 [releases/v0.6.2.md](releases/v0.6.2.md)。
 
 > **onedir 不能只拷 exe**：`Elink.exe` 依赖同目录的 `_internal/`、`docs/`、
 > `web/` 等文件。便携 ZIP 解压后请保留整个 `Elink/` 目录，或者用安装包；

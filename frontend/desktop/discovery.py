@@ -15,6 +15,7 @@ from PySide6.QtCore import QByteArray, QObject, QTimer, Signal
 from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QUdpSocket
 
 from . import __version__
+from .network_candidates import network_candidates
 from .network_interfaces import network_interfaces
 
 DISCOVERY_PORT = 49320
@@ -53,6 +54,8 @@ class DiscoveryService(QObject):
         self._last_fingerprint = ()
         self._interfaces: list[dict] = []
         self._bindings: dict[str, tuple[QUdpSocket, dict]] = {}
+        self._candidates: list[dict] = []
+        self._last_targeted_queries: dict[tuple[str, int], float] = {}
         self._status = ""
 
         self._socket = QUdpSocket(self)
@@ -90,6 +93,8 @@ class DiscoveryService(QObject):
             bound.deleteLater()
         self._bindings.clear()
         self._interfaces.clear()
+        self._candidates.clear()
+        self._last_targeted_queries.clear()
         self._status = ""
         self._socket.close()
         self._running = False
@@ -164,6 +169,12 @@ class DiscoveryService(QObject):
             else:
                 self.status_changed.emit(f"网卡 {interface['name']} 发现不可用：{bound.errorString()}")
                 bound.deleteLater()
+        self._candidates = network_candidates(self._interfaces)
+        targets = {(item["ip"], item["interface_index"]) for item in self._candidates}
+        self._last_targeted_queries = {
+            target: sent for target, sent in self._last_targeted_queries.items()
+            if target in targets
+        }
         self._publish_status()
 
     def _publish_status(self) -> None:
@@ -195,15 +206,28 @@ class DiscoveryService(QObject):
                 continue
             interface = self._bindings.get(receiver.localAddress().toString())
             source = interface[1]["name"] if interface else self._source_for(ip)
-            self._remember(message, ip, source)
             if message.get("kind") == "query":
                 self._announce(sender, receiver)
+            else:
+                self._remember(message, ip, source)
             self._publish()
 
     def _send_query(self) -> None:
         self._last_query = time.monotonic()
         payload = self._payload("query", nonce=uuid.uuid4().hex[:12])
         self._broadcast(payload)
+        data = QByteArray(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        now = time.monotonic()
+        bindings = {
+            interface["index"]: bound for bound, interface in self._bindings.values()
+        }
+        for candidate in self._candidates:
+            target = (candidate["ip"], candidate["interface_index"])
+            bound = bindings.get(candidate["interface_index"])
+            if bound is None or now - self._last_targeted_queries.get(target, 0) < QUERY_INTERVAL_S:
+                continue
+            bound.writeDatagram(data, QHostAddress(candidate["ip"]), self._port)
+            self._last_targeted_queries[target] = now
 
     def _announce(self, target: QHostAddress | None = None, sender: QUdpSocket | None = None) -> None:
         self._last_announce = time.monotonic()

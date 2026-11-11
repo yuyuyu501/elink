@@ -14,6 +14,7 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtNetwork import QHostAddress, QNetworkInterface
 
 from frontend.desktop.discovery import DiscoveryService, PEER_TTL_S, PROTOCOL
+from frontend.desktop.network_candidates import candidate_addresses, network_candidates
 from frontend.desktop.network_interfaces import network_interfaces
 
 APP = QCoreApplication.instance() or QCoreApplication([])
@@ -57,6 +58,39 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in inventory], ["Ethernet", "Virtual adapter", "Disconnected"])
         self.assertFalse(inventory[-1]["up"])
         self.assertEqual(inventory[0]["addresses"][0]["prefix"], 24)
+
+
+class NetworkCandidateTests(unittest.TestCase):
+    def test_neighbors_and_host_routes_filter_and_deduplicate_by_interface(self):
+        interfaces = [
+            interface(),
+            interface(ip="100.98.115.92", prefix=32, broadcast="100.98.115.92", index=26, name="VPN"),
+            interface(ip="127.0.0.1", loopback=True, index=1, name="Loopback"),
+        ]
+        neighbors = [
+            {"ip": "192.168.1.10", "interface_index": 2, "state": 5},
+            {"ip": "192.168.1.10", "interface_index": 2, "state": 4},
+            {"ip": "100.122.191.87", "interface_index": 26, "state": 5},
+            {"ip": "100.122.191.88", "interface_index": 26, "state": 0},
+            {"ip": "10.0.0.2", "interface_index": 9, "state": 5},
+        ]
+        routes = [
+            {"ip": "100.122.191.87", "interface_index": 26, "prefix_length": 32},
+            {"ip": "100.122.191.89", "interface_index": 26, "prefix_length": 32},
+            {"ip": "192.168.2.0", "interface_index": 2, "prefix_length": 24},
+            {"ip": "192.168.1.1", "interface_index": 2, "prefix_length": 32},
+            {"ip": "192.168.1.10", "interface_index": 2, "prefix_length": 32},
+        ]
+        self.assertEqual(candidate_addresses(interfaces, neighbors, routes), [
+            {"ip": "192.168.1.1", "interface_index": 2},
+            {"ip": "192.168.1.10", "interface_index": 2},
+            {"ip": "100.122.191.87", "interface_index": 26},
+            {"ip": "100.122.191.89", "interface_index": 26},
+        ])
+
+    def test_non_windows_keeps_broadcast_discovery_available(self):
+        with patch("frontend.desktop.network_candidates.os.name", "posix"):
+            self.assertEqual(network_candidates([interface()]), [])
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -124,7 +158,7 @@ class DiscoveryTests(unittest.TestCase):
         self.service._prune(110 + PEER_TTL_S + 1)
         self.assertEqual(self.service.peers(), [])
 
-    def test_reader_validates_messages_and_responds_on_receiving_socket(self):
+    def test_query_is_answered_but_only_announce_registers_peer(self):
         receiver = MagicMock()
         receiver.hasPendingDatagrams.side_effect = [True, True, False]
         receiver.pendingDatagramSize.return_value = 200
@@ -135,10 +169,52 @@ class DiscoveryTests(unittest.TestCase):
         receiver.localAddress.return_value = QHostAddress("192.168.1.2")
         self.service._bindings = {"192.168.1.2": (receiver, {"name": "Ethernet"})}
         self.service._read_datagrams(receiver)
-        self.assertEqual(len(self.service.peers()), 1)
+        self.assertEqual(self.service.peers(), [])
         reply = json.loads(bytes(receiver.writeDatagram.call_args.args[0]))
         self.assertEqual(reply["kind"], "announce")
+
+        receiver.hasPendingDatagrams.side_effect = [True, False]
+        receiver.readDatagram.side_effect = [
+            (json.dumps(PEER).encode(), QHostAddress("192.168.1.10"), 49320),
+        ]
+        self.service._read_datagrams(receiver)
+        self.assertEqual(len(self.service.peers()), 1)
         self.assertEqual(self.service.peers()[0]["interface"], "Ethernet")
+        self.service._bindings.clear()
+
+    def test_candidates_are_queried_once_per_interval_through_matching_interface(self):
+        first, second = MagicMock(), MagicMock()
+        first_interface = {**interface(), **interface()["addresses"][0]}
+        second_data = interface(ip="100.98.115.92", prefix=32, index=26, name="VPN")
+        second_interface = {**second_data, **second_data["addresses"][0]}
+        self.service._bindings = {
+            "192.168.1.2": (first, first_interface),
+            "100.98.115.92": (second, second_interface),
+        }
+        self.service._candidates = [
+            {"ip": "100.122.191.87", "interface_index": 26},
+            {"ip": "192.168.1.10", "interface_index": 2},
+        ]
+        with patch("frontend.desktop.discovery.time.monotonic", return_value=100):
+            self.service._send_query()
+        self.assertEqual(
+            [call.args[1].toString() for call in first.writeDatagram.call_args_list].count("192.168.1.10"),
+            1,
+        )
+        self.assertEqual(
+            [call.args[1].toString() for call in second.writeDatagram.call_args_list],
+            ["100.122.191.87"],
+        )
+        with patch("frontend.desktop.discovery.time.monotonic", return_value=102):
+            self.service._send_query()
+        self.assertEqual(
+            [call.args[1].toString() for call in first.writeDatagram.call_args_list].count("192.168.1.10"),
+            1,
+        )
+        self.assertEqual(
+            [call.args[1].toString() for call in second.writeDatagram.call_args_list].count("100.122.191.87"),
+            1,
+        )
         self.service._bindings.clear()
 
 
