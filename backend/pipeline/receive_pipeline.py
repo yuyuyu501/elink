@@ -75,12 +75,14 @@ class ReceivePipeline:
         self.bus = bus
         self.stats = ReceivePipelineStats()
         self.stream: StreamInfo | None = None
+        self.process_diagnostics: dict = {}
 
     def run(self) -> ReceivePipelineStats:
         started_at = time.perf_counter()
         self._publish(PipelineStarted(stage="receive"))
 
         decoder: BaseDecoder | None = None
+        self.process_diagnostics = {}
         pending: list[Packet] = []
 
         try:
@@ -123,7 +125,13 @@ class ReceivePipeline:
 
             for frame in decoder.flush():
                 self._render(frame)
+        except Exception as exc:
+            if decoder is not None and hasattr(decoder, "diagnostics"):
+                exc.process_diagnostics = decoder.diagnostics()
+            raise
         finally:
+            if decoder is not None and hasattr(decoder, "diagnostics"):
+                self.process_diagnostics = decoder.diagnostics()
             if decoder is not None:
                 decoder.close()
             self.renderer.close()
@@ -156,7 +164,13 @@ class ReceivePipeline:
         )
 
         decoder = self.decoder_factory(stream, self.encode_config)
-        decoder.open()
+        try:
+            decoder.open()
+        except Exception as exc:
+            if hasattr(decoder, "diagnostics"):
+                exc.process_diagnostics = decoder.diagnostics()
+            decoder.close()
+            raise
         return decoder
 
     def _decode(self, decoder: BaseDecoder, packet: Packet) -> None:

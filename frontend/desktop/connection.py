@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from .service import HostSettings, SessionService, ViewerSettings
+from .error_report import save_error
 
 SESSION_PORT = 49321
 PROTOCOL = "elink-session-v1"
@@ -70,6 +71,9 @@ class DesktopConnection(QObject):
         self._viewer = ViewerSettings()
         self._srt_port = self._control_port = 0
         self._pending_action = None
+        self.fault_id = ""
+        self._fault_source = "local"
+        self.changed.connect(self._update_error_context)
         self._timer = QTimer(self)
         self._timer.setInterval(100)
         self._timer.timeout.connect(self._tick)
@@ -86,7 +90,9 @@ class DesktopConnection(QObject):
         if self.server.isListening():
             return True
         if not self.server.listen(QHostAddress.SpecialAddress.AnyIPv4, port):
-            self.error.emit(f"连接监听失败：{self.server.errorString()}")
+            detail = f"连接监听失败：{self.server.errorString()}"
+            self._report(detail)
+            self.error.emit(detail)
             return False
         self.changed.emit()
         return True
@@ -98,6 +104,9 @@ class DesktopConnection(QObject):
 
     def _attach(self, sock: QTcpSocket, role: str) -> None:
         self.socket, self.role = sock, role
+        self._clear_failure()
+        self.service.failure_id = ""
+        self.service.failure_message = ""
         self._buffer.clear()
         self._last_rx = self._started = time.monotonic()
         self.phase = "connecting"
@@ -120,12 +129,14 @@ class DesktopConnection(QObject):
         if self.busy:
             self.error.emit("已有会话正在连接或运行")
             return
+        self._clear_failure()
         try:
             picture = saved_picture(viewer)
             port = int(peer["session_port"])
             if not 0 < port <= 65535:
                 raise ValueError("连接端口无效")
         except (KeyError, ValueError, TypeError) as exc:
+            self._report(exc)
             self.error.emit(str(exc))
             return
         self._peer, self._viewer = dict(peer), replace(viewer)
@@ -165,11 +176,13 @@ class DesktopConnection(QObject):
             if len(self._buffer) > MAX_MESSAGE:
                 raise ValueError("会话消息过长")
         except (ValueError, TypeError, KeyError) as exc:
+            self._report(exc)
             self._fail(str(exc))
 
     def _message(self, message: dict) -> None:
         kind = message.get("kind")
         if kind == "error":
+            self._remote_failure(message)
             self._fail(str(message.get("message", "连接失败")), notify=False)
         elif kind == "ping":
             self._send("pong")
@@ -195,6 +208,7 @@ class DesktopConnection(QObject):
                 raise ValueError("会话端口无效")
             self.phase = "receiving"
             self._started = time.monotonic()
+            self._update_error_context()
             self._viewer = replace(
                 self._viewer, transport="srt", srt_mode="caller",
                 srt_url=f"srt://{self._peer['ip']}:{self._srt_port}",
@@ -207,8 +221,10 @@ class DesktopConnection(QObject):
         elif self.role == "host" and kind == "active" and self.phase == "preparing":
             self.phase = "active"
             self._previous = None
+            self._clear_failure()
             self.changed.emit()
         elif self.role == "host" and kind == "configure" and self.phase == "active":
+            self._clear_failure()
             try:
                 picture = picture_settings(message["picture"])
             except ValueError as exc:
@@ -226,6 +242,7 @@ class DesktopConnection(QObject):
         elif self.role == "host" and kind == "stopped" and self.phase == "updating":
             self._stop_then(self._start_host)
         elif self.role == "host" and kind == "media_failed" and self.phase == "preparing":
+            self._remote_failure(message)
             self._failed_media(str(message.get("message", "画面接收失败")))
         elif self.role == "host" and kind == "mode" and self.phase == "active":
             if not isinstance(message.get("control"), bool):
@@ -239,7 +256,10 @@ class DesktopConnection(QObject):
             self._control = message["control"]
             self.mode_applied.emit(self._control)
         elif kind in {"rejected", "rollback"} and self.role == "viewer":
+            self._remote_failure(message)
+            self._report(str(message.get("message", "画面设置失败")))
             self.error.emit(str(message.get("message", "画面设置失败")))
+            self._clear_failure()
         else:
             raise ValueError("会话消息与当前状态不匹配")
 
@@ -258,9 +278,11 @@ class DesktopConnection(QObject):
             control_port=self._control_port, allow_inject=self._control,
             clipboard_enabled=self._control, gamepad_enabled=self._control,
         )
+        self._update_error_context()
         try:
             self.service.start_host(settings)
         except Exception as exc:
+            self._report(exc)
             self._failed_media(str(exc))
         self.changed.emit()
 
@@ -273,6 +295,7 @@ class DesktopConnection(QObject):
         if self.role == "viewer" and self.phase == "receiving":
             self.phase = "active"
             self._previous = None
+            self._clear_failure()
             self._send("active")
             self._viewer = replace(
                 self._viewer, **{f"stream_{key}": value for key, value in self._picture.items()}
@@ -283,10 +306,13 @@ class DesktopConnection(QObject):
     def configure(self, picture: dict) -> None:
         if self.role != "viewer" or self.phase != "active":
             return
+        self._clear_failure()
         try:
             picture = picture_settings(picture)
         except ValueError as exc:
+            self._report(exc)
             self.error.emit(str(exc))
+            self._clear_failure()
             return
         self._send("configure", picture=picture)
 
@@ -299,19 +325,24 @@ class DesktopConnection(QObject):
         self.service.stop()
 
     def _service_state(self, state: str, detail: str) -> None:
+        self._update_error_context()
         if state == "error" and self.socket is not None:
             self._failed_media(detail)
 
     def _failed_media(self, detail: str) -> None:
+        detail = getattr(self.service, "failure_message", "") or detail
+        self._report(detail)
         if self.role == "host" and self._previous is not None:
             self._picture, self._previous = self._previous, None
             self.phase = "updating"
             self._started = time.monotonic()
-            self._send("rollback", message=f"画面设置失败，恢复此前参数：{detail}")
+            self._send("rollback", message=f"画面设置失败，恢复此前参数：{detail}",
+                       fault_id=self.fault_id, source=self.identity)
             self._send("stop_media")
         elif self.role == "viewer" and self.phase == "receiving":
             self.phase = "updating"
-            self._stop_then(lambda: self._send("media_failed", message=detail))
+            self._stop_then(lambda: self._send("media_failed", message=detail,
+                                              fault_id=self.fault_id, source=self.identity))
         else:
             self._fail(detail)
 
@@ -350,6 +381,7 @@ class DesktopConnection(QObject):
 
     def _disconnected(self, sock: QTcpSocket) -> None:
         if sock is self.socket:
+            self._report("对端会话连接意外断开")
             self.disconnect()
 
     def _socket_error(self, sock: QTcpSocket) -> None:
@@ -357,7 +389,31 @@ class DesktopConnection(QObject):
             self._fail(f"连接失败：{sock.errorString()}", notify=False)
 
     def _fail(self, detail: str, *, notify: bool = True) -> None:
+        self._report(detail)
         if notify:
-            self._send("error", message=detail)
+            self._send("error", message=detail, fault_id=self.fault_id, source=self.identity)
         self.error.emit(detail)
         self.disconnect()
+
+    def _update_error_context(self) -> None:
+        self.service.error_context = {
+            "role": self.role, "phase": self.phase, "identity": self.identity,
+            "peer": self.socket.peerAddress().toString() if self.socket else self._peer.get("ip", ""),
+            "picture": dict(self._picture),
+        }
+
+    def _clear_failure(self) -> None:
+        self.fault_id = ""
+        self._fault_source = "local"
+
+    def _remote_failure(self, message: dict) -> None:
+        fault_id = message.get("fault_id")
+        if isinstance(fault_id, str) and 0 < len(fault_id) <= 64:
+            self.fault_id = fault_id
+        self._fault_source = f"remote:{str(message.get('source', 'peer'))[:128]}"
+
+    def _report(self, error: BaseException | str) -> None:
+        self._update_error_context()
+        fault_id = self.fault_id or getattr(self.service, "failure_id", "")
+        self.fault_id = save_error(error, fault_id=fault_id, source=self._fault_source,
+                                   context=self.service.error_context)

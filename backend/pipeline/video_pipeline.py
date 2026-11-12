@@ -84,6 +84,8 @@ class VideoPipeline:
         self._stop_event = threading.Event()
         self._capture_thread: threading.Thread | None = None
         self._timebase = Timebase.mpegts()
+        self._capture_error: Exception | None = None
+        self.process_diagnostics: dict = {}
 
     # ---- 主入口 ----
     def run(self, duration_s: float | None = None, max_frames: int = 0) -> VideoPipelineStats:
@@ -91,6 +93,7 @@ class VideoPipeline:
         self._publish(PipelineStarted(stage="video"))
 
         self.capture.open()
+        self._capture_error = None
         self._stop_event.clear()
         self._capture_thread = threading.Thread(
             target=self._capture_loop,
@@ -101,9 +104,12 @@ class VideoPipeline:
         self._capture_thread.start()
 
         encoder: BaseEncoder | None = None
+        self.process_diagnostics = {}
         try:
             first = self._queue.get()
             if first is _STOP:
+                if self._capture_error is not None:
+                    raise self._capture_error
                 logger.warning("采集未产生任何帧")
                 return self.stats
 
@@ -120,10 +126,18 @@ class VideoPipeline:
                     break
                 self._encode(encoder, self._apply_filters(item))
 
+            if self._capture_error is not None:
+                raise self._capture_error
             for packet in encoder.flush():
                 self.stats.bytes_written += self.muxer.write(packet)
                 self.stats.packets_written += 1
+        except Exception as exc:
+            if encoder is not None and hasattr(encoder, "diagnostics"):
+                exc.process_diagnostics = encoder.diagnostics()
+            raise
         finally:
+            if encoder is not None and hasattr(encoder, "diagnostics"):
+                self.process_diagnostics = encoder.diagnostics()
             self._stop_event.set()
             if self._capture_thread is not None and self._capture_thread.is_alive():
                 self._capture_thread.join(timeout=5)
@@ -158,12 +172,7 @@ class VideoPipeline:
                 if max_frames and self.stats.frames_captured >= max_frames:
                     break
 
-                try:
-                    frame = self.capture.read()
-                except Exception:
-                    logger.exception("采集失败，停止采集线程")
-                    break
-
+                frame = self.capture.read()
                 # 采集节拍由本管线控制，因此按帧率栅格重新打时间戳：
                 # 把线程调度抖动写进 PTS 会让下游（封装/播放器）看到长短不一的
                 # 帧间隔，进而触发重复 DTS 之类的重排问题。
@@ -180,6 +189,9 @@ class VideoPipeline:
                     self._stop_event.wait(delay)
                 else:
                     next_deadline = time.perf_counter()
+        except Exception as exc:
+            self._capture_error = exc
+            logger.exception("采集失败，停止采集线程")
         finally:
             self._offer(_STOP)
 

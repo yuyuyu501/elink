@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from .. import __version__, icons, settings as user_settings, startup
 from ..discovery import DiscoveryService
 from ..connection import DesktopConnection, saved_picture
+from ..error_report import remember, save_error
 from ..service import HostSettings, SessionService, SessionStats, ViewerSettings
 from ..theme import ACCENT, MUTED
 from .devices_page import DevicesPage
@@ -300,7 +301,9 @@ class MainWindow(QMainWindow):
         self.viewer_page.release_requested.connect(self._release_viewer_input)
         self.devices_page.connect_peer.connect(self._connect_peer)
         self.viewer_page.picture_requested.connect(self._edit_picture)
-        self.connection.error.connect(lambda message: self.log(message, "error"))
+        self.connection.error.connect(lambda message: self.log(
+            message, "error", fault_id=self.connection.fault_id,
+            source=self.connection._fault_source))
         self.connection.changed.connect(self._connection_changed)
         self.connection.connected.connect(self._session_connected)
         self.connection.picture_applied.connect(self._picture_applied)
@@ -334,7 +337,8 @@ class MainWindow(QMainWindow):
 
         self.service.frame_ready.connect(self._on_frame)
         self.service.state_changed.connect(self._on_state)
-        self.service.log.connect(self.log)
+        self.service.log.connect(lambda message, level: self.log(
+            message, level, fault_id=self.service.failure_id))
         self.service.stats_changed.connect(self._on_stats)
         self.service.devices_changed.connect(self._on_devices)
         self.service.control_changed.connect(self._on_control)
@@ -474,7 +478,8 @@ class MainWindow(QMainWindow):
             if self._stats_overlay_enabled:
                 self._toggle_stats_overlay(False)
         if state == "error":
-            self.log(detail or "未知错误", "error")
+            self.log(detail or "未知错误", "error",
+                     fault_id=self.service.failure_id or self.connection.fault_id)
         self._sync_discovery_hosting(state)
 
     def _on_stats(self, stats: SessionStats) -> None:
@@ -866,8 +871,12 @@ class MainWindow(QMainWindow):
             self.showMaximized()
 
     # ---- 工具 ----
-    def log(self, message: str, level: str = "info") -> None:
+    def log(self, message: str, level: str = "info", *, fault_id: str = "",
+            source: str = "local") -> None:
         self._recent_logs.append((time.strftime("%H:%M:%S"), level, message))
+        remember(f"{level}: {message}")
+        if level == "error":
+            save_error(message, fault_id=fault_id, source=source, context=self.service.error_context)
         if level in {"warn", "error"}:
             self.notice_bar.show_message(message, level)
 

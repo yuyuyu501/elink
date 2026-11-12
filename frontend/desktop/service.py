@@ -35,6 +35,7 @@ from backend.bootstrap import build_receive_resources, build_send_resources, pre
 from backend.config.schema import AppConfig
 from backend.control_channel.protocol import EventType, InputEvent
 from backend.control_channel.tcp import TcpControlChannel
+from backend.errors.network import TransportClosedError
 from backend.media.device.display import DisplayInfo, list_displays
 from backend.media.device.enumerate import DeviceKind, enumerate_devices
 from backend.media.frame import Frame
@@ -42,6 +43,7 @@ from backend.media.video.filter.pixel_format import BaseVideoFilter
 from backend.media.video.filter.scaler import Scaler
 
 from .paths import resource_dir
+from .error_report import remember, save_error
 
 MAX_PREVIEW_FPS = 30.0
 
@@ -250,6 +252,10 @@ class SessionService(QObject):
         self._host_live: HostSettings | None = None
         self._stats_worker: threading.Thread | None = None
         self._control_worker: threading.Thread | None = None
+        self.failure_id = ""
+        self.failure_message = ""
+        self.error_context: dict = {}
+        self.log.connect(lambda message, level: remember(f"{level}: {message}"))
 
     # ---- 查询 ----
     @property
@@ -361,6 +367,8 @@ class SessionService(QObject):
 
     # ---- 内部：公共 ----
     def _begin(self, mode: str) -> None:
+        self.failure_id = ""
+        self.failure_message = ""
         self._mode = mode
         self._stop.clear()
         self._stats = SessionStats()
@@ -387,6 +395,21 @@ class SessionService(QObject):
         if self._started_at:
             self._stats.elapsed_s = round(time.monotonic() - self._started_at, 1)
         self.stats_changed.emit(self._stats)
+
+    def record_failure(self, error: BaseException | str) -> None:
+        context = {
+            **self.error_context, "role": self._mode,
+            "settings": self._settings_snapshot,
+            "srt": self._transport.diagnostics() if self._transport else None,
+            "codec": getattr(self._pipeline, "process_diagnostics", None),
+        }
+        self.failure_id = save_error(error, fault_id=self.failure_id, context=context)
+        if not self.failure_message:
+            self.failure_message = str(error)
+
+    def _check_media_end(self) -> None:
+        if not self._stop.is_set() and self._transport is not None:
+            raise TransportClosedError("画面传输意外结束", detail=self._transport.diagnostics())
 
     def _stats_loop(self, source, *, is_host: bool) -> None:
         """每秒把管线统计搬到界面（读取失败不影响主流程）。"""
@@ -445,10 +468,12 @@ class SessionService(QObject):
             self.host_prepared.emit()
 
             stats = pipeline.run()
+            self._check_media_end()
             self.log.emit(f"发送结束：{stats.summary()}", "info")
             self._stats.bytes_out = getattr(stats, "bytes_written", self._stats.bytes_out)
         except Exception as exc:
             if not self._stop.is_set():
+                self.record_failure(exc)
                 self.log.emit(f"主机模式失败：{exc}", "error")
                 self.state_changed.emit("error", str(exc))
         finally:
@@ -509,9 +534,11 @@ class SessionService(QObject):
             self._stats_worker.start()
 
             stats = pipeline.run()
+            self._check_media_end()
             self.log.emit(f"接收结束：{stats.summary()}", "info")
         except Exception as exc:
             if not self._stop.is_set():
+                self.record_failure(exc)
                 self.log.emit(f"观看模式失败：{exc}", "error")
                 self.state_changed.emit("error", str(exc))
         finally:
@@ -538,6 +565,8 @@ class SessionService(QObject):
                     time.sleep(0.2)
             except Exception as exc:
                 if not self._stop.is_set():
+                    save_error(exc, context={**self.error_context, "stage": "control",
+                                             "settings": self._settings_snapshot})
                     self.log.emit(f"控制通道异常：{exc}", "warn")
                     self.control_changed.emit("控制通道未连接")
 
@@ -570,8 +599,11 @@ class SessionService(QObject):
                 while not self._stop.is_set():
                     time.sleep(0.2)
             except Exception as exc:
-                self.log.emit(f"控制通道连接失败：{exc}", "warn")
-                self.control_changed.emit("控制通道未连接")
+                if not self._stop.is_set():
+                    save_error(exc, context={**self.error_context, "stage": "control",
+                                             "settings": self._settings_snapshot})
+                    self.log.emit(f"控制通道连接失败：{exc}", "warn")
+                    self.control_changed.emit("控制通道未连接")
 
         self._control_worker = threading.Thread(target=run, name="control-client", daemon=True)
         self._control_worker.start()

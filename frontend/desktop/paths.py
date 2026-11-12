@@ -44,7 +44,7 @@ def data_dir() -> Path:
 
 
 def ensure_dirs(root: Path) -> None:
-    for name in ("logs", "captures", "config"):
+    for name in ("logs", "captures", "config", "error"):
         (root / name).mkdir(parents=True, exist_ok=True)
 
 
@@ -54,3 +54,7 @@ def settings_file() -> Path:
 
 def log_file() -> Path:
     return data_dir() / "logs" / "desktop.log"
+
+
+def error_dir() -> Path:
+    return data_dir() / "error"

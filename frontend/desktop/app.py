@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import traceback
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from . import __version__, icons
 from .paths import APP_NAME, data_dir, ensure_dirs, log_file, resource_dir
 from .theme import apply_theme
 from .ui.window import MainWindow
+from .error_report import install_recent_logs, save_error
 
 logger = get_logger(__name__)
 
@@ -37,13 +39,26 @@ def _configure_logging(level: str = "INFO") -> None:
     path = log_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(path, encoding="utf-8")
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)-5s [%(name)s] %(message)s")
-        )
-        logging.getLogger().addHandler(handler)
+        root = logging.getLogger("elink")
+        if not any(isinstance(handler, logging.FileHandler)
+                   and Path(handler.baseFilename) == path.resolve() for handler in root.handlers):
+            setup_logging(level, log_file=str(path))
     except OSError:
         logger.warning("无法写入日志文件: %s", path, exc_info=True)
+    install_recent_logs()
+
+    def thread_exception(args):
+        save_error(args.exc_value, context={"thread": args.thread.name if args.thread else ""})
+        logger.error("未捕获的后台线程异常",
+                     exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    threading.excepthook = thread_exception
+
+    def exception_hook(kind, value, tb):
+        save_error(value.with_traceback(tb), context={"stage": "desktop"})
+        logger.error("未捕获的界面异常", exc_info=(kind, value, tb))
+
+    sys.excepthook = exception_hook
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         window = MainWindow(root)
     except Exception as exc:  # 启动期异常必须让用户看到，而不是静默退出
+        save_error(exc, context={"stage": "startup"})
         logger.exception("界面启动失败")
         QMessageBox.critical(None, APP_NAME, f"启动失败：{exc}")
         return 1
@@ -92,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def exception_hook(kind, value, tb):
         logger.error("未捕获的界面异常", exc_info=(kind, value, tb))
-        window.log("".join(traceback.format_exception(kind, value, tb)), "error")
+        fault_id = save_error(value.with_traceback(tb), context={"stage": "ui"})
+        window.log("".join(traceback.format_exception(kind, value, tb)), "error", fault_id=fault_id)
 
     sys.excepthook = exception_hook
 

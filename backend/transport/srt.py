@@ -59,11 +59,16 @@ class SrtTransport:
         self._proc: subprocess.Popen[bytes] | None = None
         self._stderr_tail: deque[str] = deque(maxlen=40)
         self._stderr_thread: threading.Thread | None = None
+        self._diagnostics: dict = {}
+        self._aborted = False
 
     # ---- 生命周期 ----
     def open(self) -> None:
         if self._proc is not None:
             return
+        self._aborted = False
+        self._diagnostics = {}
+        self._stderr_tail.clear()
 
         # ffmpeg 默认 probesize=5MB / analyzeduration=5s：短会话里它会先把整个
         # 流攒齐才开始转发，表现为「结束时才收到数据」。我们的 TS 开头就有
@@ -101,6 +106,7 @@ class SrtTransport:
             ]
 
         logger.info("启动 SRT 通道(%s): %s", self.mode, self.url)
+        self._diagnostics = {"command": cmd, "exit_code": None, "direction": self.direction}
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -121,7 +127,11 @@ class SrtTransport:
     def abort(self) -> None:
         """Terminate ffmpeg first so blocked pipe reads and writes can finish."""
         proc = self._proc
-        if proc is not None and proc.poll() is None:
+        if proc is not None and not self._aborted:
+            self._diagnostics = self.diagnostics()
+            if self._diagnostics["exit_code"] is not None:
+                return
+            self._aborted = True
             try:
                 if os.name == "nt":
                     # Package-manager launchers may keep ffmpeg in a child process.
@@ -143,6 +153,8 @@ class SrtTransport:
         proc = self._proc
         if proc is None:
             return
+        if not self._aborted:
+            self._diagnostics = self.diagnostics()
         for stream in (proc.stdin, proc.stdout):
             try:
                 if stream and not stream.closed:
@@ -180,7 +192,18 @@ class SrtTransport:
         return self._proc.stdout
 
     def stderr_text(self) -> str:
-        return " | ".join(self._stderr_tail) or "无 stderr 输出"
+        return " | ".join(self._stderr_tail.copy()) or "无 stderr 输出"
+
+    def diagnostics(self) -> dict:
+        if self._aborted or self._proc is None:
+            return dict(self._diagnostics)
+        exit_code = self._proc.poll()
+        if exit_code is not None and self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=0.2)
+        return {
+            "command": self._proc.args, "exit_code": exit_code,
+            "stderr": self.stderr_text(), "direction": self.direction,
+        }
 
     def _stderr_loop(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None

@@ -31,6 +31,17 @@ from backend.media.timebase import Timebase
 
 logger = get_logger(__name__)
 
+
+def _process_diagnostics(codec) -> dict:
+    proc = codec._proc
+    if proc is None:
+        return dict(getattr(codec, "_diagnostics", {}))
+    exit_code = proc.poll()
+    if exit_code is not None and codec._stderr_thread is not None:
+        codec._stderr_thread.join(timeout=0.2)
+    return {"command": proc.args, "exit_code": exit_code,
+            "stderr": list(codec._stderr_tail.copy())}
+
 START_CODE = b"\x00\x00\x01"
 START_CODE4 = b"\x00\x00\x00\x01"
 READ_CHUNK = 64 * 1024
@@ -352,6 +363,8 @@ class FfmpegEncoderBase(BaseEncoder):
             "pipe:1",
         ]
         logger.debug("启动编码后端(%s): %s", self.name, " ".join(cmd))
+        self._diagnostics = {"command": cmd, "exit_code": None}
+        self._stderr_tail.clear()
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -376,11 +389,15 @@ class FfmpegEncoderBase(BaseEncoder):
         self._stderr_thread.start()
         self._opened = True
 
+    def diagnostics(self) -> dict:
+        return _process_diagnostics(self)
+
     def close(self) -> None:
         proc = self._proc
         if proc is None:
             self._opened = False
             return
+        self._diagnostics = self.diagnostics()
         try:
             if proc.stdin and not proc.stdin.closed:
                 proc.stdin.close()
@@ -501,7 +518,7 @@ class FfmpegEncoderBase(BaseEncoder):
         )
 
     def _stderr_text(self) -> str:
-        return " | ".join(self._stderr_tail) or "无 stderr 输出"
+        return " | ".join(self._stderr_tail.copy()) or "无 stderr 输出"
 
 
 class FfmpegDecoderBase(BaseDecoder):
@@ -568,6 +585,8 @@ class FfmpegDecoderBase(BaseDecoder):
             "pipe:1",
         ]
         logger.debug("启动解码后端(%s): %s", self.name, " ".join(cmd))
+        self._diagnostics = {"command": cmd, "exit_code": None}
+        self._stderr_tail.clear()
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -625,9 +644,13 @@ class FfmpegDecoderBase(BaseDecoder):
             raise DecodeError(self._reader_error, detail=self._stderr_text())
         return frames
 
+    def diagnostics(self) -> dict:
+        return _process_diagnostics(self)
+
     def close(self) -> None:
         proc = self._proc
         if proc is not None:
+            self._diagnostics = self.diagnostics()
             try:
                 if proc.stdin and not proc.stdin.closed:
                     proc.stdin.close()
@@ -700,4 +723,4 @@ class FfmpegDecoderBase(BaseDecoder):
                 self._stderr_tail.append(line)
 
     def _stderr_text(self) -> str:
-        return " | ".join(self._stderr_tail) or "无 stderr 输出"
+        return " | ".join(self._stderr_tail.copy()) or "无 stderr 输出"

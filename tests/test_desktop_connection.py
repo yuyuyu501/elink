@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -22,6 +24,17 @@ from frontend.desktop.settings import UiSettings, _merge
 from backend.transport.srt import SrtTransport
 
 APP = QCoreApplication.instance() or QCoreApplication([])
+
+def setUpModule():
+    global _test_data, _test_environment
+    _test_data = tempfile.TemporaryDirectory()
+    _test_environment = patch.dict(os.environ, ELINK_DATA_DIR=_test_data.name)
+    _test_environment.start()
+
+
+def tearDownModule():
+    _test_environment.stop()
+    _test_data.cleanup()
 
 
 def wait_until(predicate, timeout=3, detail=None):
@@ -117,6 +130,8 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(len(self.host_media.starts), 1)
 
     def test_picture_restart_preserves_session_and_commits_after_frames(self):
+        from frontend.desktop.paths import error_dir
+        reports = set(error_dir().glob("*.txt"))
         self.connect()
         old_socket = self.viewer.socket
         picture = {"width": 1280, "height": 720, "fps": 60, "bitrate_kbps": 6500}
@@ -125,6 +140,11 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(self.applied[-1], picture)
         self.assertIs(self.viewer.socket, old_socket)
         self.assertEqual(len(self.host_media.starts), 2)
+        self.viewer.disconnect()
+        wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+        new_reports = set(error_dir().glob("*.txt")) - reports
+        self.assertFalse(new_reports, "\n".join(path.read_text(encoding="utf-8")
+                                               for path in new_reports))
 
     def test_invalid_picture_does_not_stop_current_session(self):
         self.connect()
@@ -206,6 +226,27 @@ class ConnectionTests(unittest.TestCase):
         self.viewer._tick()
         wait_until(lambda: self.host.phase == self.viewer.phase == "idle")
         self.assertTrue(any("超时" in error for error in self.errors))
+        self.assertTrue(self.viewer.fault_id)
+        self.assertEqual(self.host.fault_id, self.viewer.fault_id)
+        from frontend.desktop.paths import error_dir
+        text = "\n".join(path.read_text(encoding="utf-8") for path in error_dir().glob("*.txt"))
+        self.assertIn('"source": "remote:viewer"', text)
+
+    def test_recovery_starts_a_new_fault_after_rollback(self):
+        from frontend.desktop.paths import error_dir
+        self.connect()
+        self.host_media.fail_next = True
+        picture = {"width": 1280, "height": 720, "fps": 30, "bitrate_kbps": 4000}
+        self.viewer.configure(picture)
+        wait_until(lambda: len(self.applied) == 2 and self.host.phase == "active")
+        previous_reports = set(error_dir().glob("*.txt"))
+        self.assertEqual(self.host.fault_id, "")
+        self.assertEqual(self.viewer.fault_id, "")
+        self.assertEqual(self.host._fault_source, "local")
+        self.viewer._last_rx = time.monotonic() - 60
+        self.viewer._tick()
+        wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+        self.assertEqual(len(set(error_dir().glob("*.txt")) - previous_reports), 1)
 
     def test_failed_start_releases_both_sides(self):
         self.host_media.fail_next = True
@@ -258,6 +299,9 @@ class MediaIntegrationTests(unittest.TestCase):
     def test_srt_picture_update_and_reconnect_with_real_encoder_decoder(self):
         from types import SimpleNamespace
         from frontend.desktop.diagnostics import _synthetic_frame
+        from frontend.desktop.paths import error_dir
+
+        reports = set(error_dir().glob("*.txt"))
 
         class Capture:
             config = SimpleNamespace(fps=30)
@@ -283,7 +327,23 @@ class MediaIntegrationTests(unittest.TestCase):
         host.error.connect(errors.append)
         viewer.error.connect(errors.append)
         viewer.picture_applied.connect(applied.append)
-        self.assertTrue(host.start(0))
+        # Client ephemeral ports must not occupy the adjacent control port.
+        for port in range(23000, 23100, 3):
+            try:
+                with socket.socket() as session_probe, socket.socket() as control_probe, socket.socket(
+                    socket.AF_INET, socket.SOCK_DGRAM
+                ) as srt_probe:
+                    session_probe.bind(("0.0.0.0", port))
+                    control_probe.bind(("0.0.0.0", port + 1))
+                    srt_probe.bind(("0.0.0.0", port + 2))
+                self.assertTrue(host.start(port))
+                break
+            except OSError:
+                continue
+        else:
+            host.close()
+            viewer.close()
+            self.fail("No available session/control/SRT port group")
         peer = {"id": "media-host", "ip": "127.0.0.1",
                 "session_port": host.server.serverPort()}
         settings = ViewerSettings(stream_width=320, stream_height=240,
@@ -322,6 +382,9 @@ class MediaIntegrationTests(unittest.TestCase):
                 viewer.deleteLater()
                 host.deleteLater()
                 APP.processEvents()
+        new_reports = set(error_dir().glob("*.txt")) - reports
+        self.assertFalse(new_reports, "\n".join(path.read_text(encoding="utf-8")
+                                               for path in new_reports))
 
 
 if __name__ == "__main__":
