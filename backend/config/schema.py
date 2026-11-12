@@ -29,7 +29,7 @@ class CaptureConfig:
         if self.region is None:
             return None
         x, y, w, h = self.region
-        return (max(0, x), max(0, y), max(2, w - w % 2), max(2, h - h % 2))
+        return (x, y, max(2, w - w % 2), max(2, h - h % 2))
 
 
 @dataclass

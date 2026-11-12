@@ -347,7 +347,9 @@ class MediaIntegrationTests(unittest.TestCase):
         peer = {"id": "media-host", "ip": "127.0.0.1",
                 "session_port": host.server.serverPort()}
         settings = ViewerSettings(stream_width=320, stream_height=240,
-                                  stream_bitrate_kbps=800)
+                                  stream_bitrate_kbps=800, clipboard_enabled=False,
+                                  gamepad_enabled=False)
+        injected = []
         def state():
             return {
                 "host": (host.phase, host_media.running),
@@ -358,12 +360,35 @@ class MediaIntegrationTests(unittest.TestCase):
             }
         with patch("backend.bootstrap.build_capture", side_effect=lambda _: Capture()), patch(
             "frontend.desktop.service._display_region", return_value=(0, 0, 320, 240)
-        ):
+        ), patch.object(host_media, "_inject_remote_input",
+                        side_effect=lambda event: injected.append(event) or True), patch.object(
+            host_media, "_start_clipboard"
+        ), patch.object(host_media, "_start_gamepad_host"):
             try:
                 viewer.connect_peer(peer, settings, False)
                 wait_until(lambda: viewer.phase == "active" or bool(errors), timeout=25)
                 self.assertFalse(errors)
                 self.assertEqual(len(applied), 1)
+                from backend.control_channel.protocol import EventType, InputEvent
+                from backend.control_channel.base import ChannelState
+                wait_until(lambda: viewer_media._control is not None
+                           and viewer_media._control.state == ChannelState.OPEN)
+                self.assertFalse(viewer_media.set_input_focus(True))
+                viewer.set_control(True)
+                wait_until(lambda: host_media._host_live.allow_inject)
+                viewer_media.set_control_enabled(True, viewer_media._viewer_live)
+                self.assertTrue(viewer_media.set_input_focus(True))
+                self.assertTrue(viewer_media.send_input(InputEvent(
+                    EventType.MOUSE_MOVE, x=65535, y=65535, extra={"coordinates": "normalized"})))
+                self.assertTrue(viewer_media.send_input(InputEvent(
+                    EventType.MOUSE_BUTTON, button=1, pressed=True, extra={"positioned": True})))
+                wait_until(lambda: len(injected) == 2)
+                viewer.set_control(False)
+                wait_until(lambda: len(injected) == 3)
+                self.assertEqual([event.event_type for event in injected],
+                                 [EventType.MOUSE_MOVE, EventType.MOUSE_BUTTON, EventType.MOUSE_BUTTON])
+                self.assertFalse(injected[-1].pressed)
+                viewer_media.set_control_enabled(False, viewer_media._viewer_live)
                 viewer.configure({"width": 320, "height": 240, "fps": 20, "bitrate_kbps": 1000})
                 wait_until(lambda: len(applied) == 2 or bool(errors), timeout=25, detail=state)
                 self.assertFalse(errors)

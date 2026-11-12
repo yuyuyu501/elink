@@ -66,15 +66,13 @@ class _MSLLHOOKSTRUCT(ctypes.Structure):
     ]
 
 
-HOOKPROC = ctypes.WINFUNCTYPE(
-    ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
-)
+HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
 user32.SetWindowsHookExW.restype = ctypes.c_void_p
 user32.SetWindowsHookExW.argtypes = [
     ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD
 ]
-user32.CallNextHookEx.restype = ctypes.c_void_p
+user32.CallNextHookEx.restype = ctypes.c_ssize_t
 user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
 user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
 user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
@@ -95,8 +93,13 @@ class SendInputHookCapture:
 
     backend = "lowlevel_hook"
 
-    def __init__(self, *, capture_injected: bool = False) -> None:
+    def __init__(self, *, capture_injected: bool = False, keyboard_only: bool = False,
+                 active=lambda: True) -> None:
         self.capture_injected = capture_injected
+        self.keyboard_only = keyboard_only
+        self.active = active
+        self._error = None
+        self._alt_down = False
         self._queue: "queue.Queue[protocol.InputEvent]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._thread_id = 0
@@ -111,10 +114,17 @@ class SendInputHookCapture:
     def open(self) -> None:
         if self._thread is not None:
             return
+        self._running.clear()
+        self._error = None
         self._thread = threading.Thread(target=self._run, name="input-hook", daemon=True)
         self._thread.start()
         if not self._running.wait(3):
+            self.close()
             raise HookError("低级钩子安装超时")
+        if self._error is not None:
+            error = self._error
+            self.close()
+            raise error
         logger.info("输入捕获已启动（后端=%s）", self.backend)
 
     def close(self) -> None:
@@ -149,31 +159,39 @@ class SendInputHookCapture:
         self._keyboard_hook = user32.SetWindowsHookExW(
             WH_KEYBOARD_LL, self._keyboard_proc, module, 0
         )
-        self._mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._mouse_proc, module, 0)
-        if not self._keyboard_hook or not self._mouse_hook:
-            logger.error("钩子安装失败: %s", ctypes.get_last_error())
-            self._running.set()
-            return
-
-        self._running.set()
-        message = wintypes.MSG()
         try:
+            if not self.keyboard_only:
+                self._mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._mouse_proc, module, 0)
+            if not self._keyboard_hook or (not self.keyboard_only and not self._mouse_hook):
+                raise HookError("钩子安装失败", detail={"win32": ctypes.get_last_error()})
+            message = wintypes.MSG()
+            user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
+            self._running.set()
             while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(message))
                 user32.DispatchMessageW(ctypes.byref(message))
+        except Exception as exc:
+            self._error = exc
         finally:
             if self._keyboard_hook:
                 user32.UnhookWindowsHookEx(self._keyboard_hook)
             if self._mouse_hook:
                 user32.UnhookWindowsHookEx(self._mouse_hook)
             self._keyboard_hook = self._mouse_hook = None
+            self._running.set()
 
     def _keyboard_callback(self, code, wparam, lparam):  # pragma: no cover - 系统回调
-        if code >= 0:
+        if code >= 0 and self.active():
             data = ctypes.cast(lparam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
             injected = bool(data.flags & LLKHF_INJECTED)
             if self.capture_injected or not injected:
                 pressed = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                vk = int(data.vkCode)
+                if self.keyboard_only:
+                    if vk in (0x12, 0xA4, 0xA5):
+                        self._alt_down = pressed
+                    if vk not in (0x5B, 0x5C) and not (vk == 0x09 and self._alt_down):
+                        return user32.CallNextHookEx(None, code, wparam, lparam)
                 self._enqueue(
                     protocol.InputEvent(
                         event_type=protocol.EventType.KEY,
@@ -182,9 +200,11 @@ class SendInputHookCapture:
                         scan_code=int(data.scanCode),
                         pressed=pressed,
                         modifiers=self.modifiers,
-                        extra={"injected": injected},
+                        extra={"injected": injected, "extended": bool(data.flags & 1)},
                     )
                 )
+                if self.keyboard_only:
+                    return 1
         return user32.CallNextHookEx(None, code, wparam, lparam)
 
     def _mouse_callback(self, code, wparam, lparam):  # pragma: no cover - 系统回调
@@ -229,6 +249,8 @@ class SendInputHookCapture:
             WM_MBUTTONDOWN: (3, True),
             WM_MBUTTONUP: (3, False),
         }
+        if message not in buttons:
+            return None
         button, pressed = buttons[message]
         return protocol.InputEvent(
             event_type=protocol.EventType.MOUSE_BUTTON,

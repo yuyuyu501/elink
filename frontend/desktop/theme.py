@@ -273,23 +273,21 @@ QPushButton#deviceTool:hover { background: #F0F6FF; }
 QPushButton#deviceTool:disabled { background: transparent; color: #86909C; }
 QPushButton#deviceTool:focus { background: #EAF1FF; }
 
-/* ---- 全屏串流窗口 ---- */
+/* ---- 独立远控窗口 ---- */
 QWidget#streamWindow { background: #05070B; }
 QFrame#streamToolbar {
-    background: rgba(11, 18, 32, 235); border: 1px solid #2A3B55; border-radius: 12px;
+    background: #FFFFFF; border: none; border-bottom: 1px solid #E4E9F0;
 }
-QLabel#streamTitle { color: #E6EDF7; font-size: 13px; font-weight: 600; }
-QPushButton#streamButton {
-    background: #16243A; border: 1px solid #2A3B55; color: #D6E1F0;
-    border-radius: 8px; padding: 5px 10px; font-size: 12px;
+QLabel#streamTitle { color: #1D2129; font-size: 13px; font-weight: 600; }
+QToolButton#streamTool, QToolButton#streamClose {
+    background: transparent; border: none; border-radius: 0; padding: 0;
 }
-QPushButton#streamButton:hover { background: #1E3352; border-color: #3B5580; }
-QPushButton#streamButton:checked { background: #2B6BFF; border-color: #2B6BFF; color: #FFFFFF; }
-QPushButton#streamButtonDanger {
-    background: #3A1E24; border: 1px solid #6E3941; color: #FFB7B7;
-    border-radius: 8px; padding: 5px 10px; font-size: 12px;
+QToolButton#streamTool:hover { background: #EAF1FF; }
+QToolButton#streamClose:hover { background: #FFECEC; }
+QScrollArea#streamPanel {
+    background: #FFFFFF; border: 1px solid #D5DEE9; border-radius: 6px;
 }
-QPushButton#streamButtonDanger:hover { background: #4B262E; }
+QScrollArea#streamPanel QWidget { background: #FFFFFF; }
 """
 
 

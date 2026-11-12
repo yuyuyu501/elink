@@ -215,8 +215,11 @@ class WindowConnectionTests(unittest.TestCase):
         self.window.devices_page.watch_button.click()
         self.assertFalse(self.request.call_args.args[2])
         self.window._session_connected(ViewerSettings(control_enabled=False))
-        self.assertEqual(self.window.stack.currentIndex(), PAGE_INDEX["viewer"])
-        self.assertTrue(self.window.viewer_page.watch_button.isChecked())
+        self.assertEqual(self.window.stack.currentIndex(), PAGE_INDEX["devices"])
+        self.assertTrue(self.window._stream_window.watch_button.isChecked())
+        self.assertTrue(self.window._stream_window.isWindow())
+        self.assertFalse(self.window._stream_window.isFullScreen())
+        self.assertFalse(hasattr(self.window, "viewer_page"))
         self.window._show_device_list()
         self.assertEqual(self.window.devices_page.stack.currentIndex(), 0)
 
@@ -228,6 +231,54 @@ class WindowConnectionTests(unittest.TestCase):
         settings = self.request.call_args.args[1]
         self.assertFalse(settings.clipboard_enabled)
         self.assertFalse(settings.gamepad_enabled)
+
+    def test_connect_opens_one_window_before_media_is_ready_and_close_disconnects(self):
+        def connect(*_):
+            self.window.connection.role = "viewer"
+            self.window.connection.phase = "connecting"
+        self.request.side_effect = connect
+        self.window.devices_page.enter_button.click()
+        stream = self.window._stream_window
+        self.assertIsNotNone(stream)
+        self.assertTrue(stream.isVisible())
+        self.assertEqual(self.window.stack.currentIndex(), PAGE_INDEX["devices"])
+        self.window._open_stream_window()
+        self.assertIs(stream, self.window._stream_window)
+        with patch.object(self.window.connection, "disconnect") as disconnect:
+            stream.close()
+            disconnect.assert_called_once()
+        self.assertIsNone(self.window._stream_window)
+
+    def test_picture_restart_preserves_window_and_clears_old_frame(self):
+        from frontend.desktop.diagnostics import _synthetic_frame
+        self.window._session_connected(ViewerSettings(control_enabled=True))
+        stream = self.window._stream_window
+        stream.set_frame(_synthetic_frame(0))
+        self.window.connection.phase = "updating"
+        self.window._connection_changed()
+        self.assertFalse(stream.preview.has_frame)
+        self.window._on_state("idle", "")
+        self.assertIs(stream, self.window._stream_window)
+        self.window._session_connected(ViewerSettings(control_enabled=True))
+        self.assertIs(stream, self.window._stream_window)
+        self.window.connection.phase = "active"
+        self.window._connection_changed()
+        self.assertTrue(stream.picture_button.isEnabled())
+
+    def test_watch_ack_and_preferences_update_window_service_and_saved_settings(self):
+        self.window._session_connected(ViewerSettings(control_enabled=True))
+        stream = self.window._stream_window
+        with patch.object(self.window.service, "set_control_enabled") as control, patch.object(
+            self.window.service, "set_clipboard_enabled"
+        ), patch.object(self.window.service, "set_gamepad_enabled"):
+            self.window._mode_applied(False)
+            control.assert_called_once()
+        self.assertTrue(stream.watch_button.isChecked())
+        self.assertFalse(stream.preview.control_enabled)
+        stream.mouse_mode.setCurrentIndex(1)
+        self.assertEqual(self.window._viewer_settings.mouse_mode, "relative")
+        self.assertEqual(self.window.connection._viewer.mouse_mode, "relative")
+        self.assertEqual(stream.preview.mouse_mode, "relative")
 
     def test_busy_session_is_not_replaced(self):
         with patch.object(SessionService, "running", new_callable=lambda: property(lambda _: True)):

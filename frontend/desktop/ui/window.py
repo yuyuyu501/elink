@@ -19,7 +19,7 @@ from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -43,7 +43,7 @@ from ..error_report import remember, save_error
 from ..service import HostSettings, SessionService, SessionStats, ViewerSettings
 from ..theme import ACCENT, MUTED
 from .devices_page import DevicesPage
-from .pages import ENCODERS, PRESETS, RESOLUTIONS, HostPage, OverviewPage, ViewerPage
+from .pages import ENCODERS, PRESETS, RESOLUTIONS, HostPage, OverviewPage
 from .preview import PreviewFrame
 from .settings_page import SettingsPage
 from .stream_window import PictureDialog, StreamWindow
@@ -52,7 +52,6 @@ from .widgets import ClickableCard, IconTile, NoticeBar, StatusDot, TitleBar, di
 NAV_ITEMS = [
     ("overview", "总览", "activity"),
     ("host", "主机模式", "monitor"),
-    ("viewer", "观看模式", "eye"),
     ("devices", "我的设备", "monitor"),
 ]
 NAV_INDEX = {key: index for index, (key, _caption, _icon) in enumerate(NAV_ITEMS)}
@@ -73,14 +72,12 @@ class MainWindow(QMainWindow):
         self._native_frame_patched = False
         self._active_mode = ""  # 最近一次启动的模式：帧/统计可能晚于 mode 清零到达
         self._viewer_from_devices = False
-        self._watch_interaction_preferences: tuple[bool, bool] | None = None
         self._exit_requested = False
         self._tray = None
         self._tray_notified = False
         self._discovery_message = ""
         self._stats_overlay_enabled = False
         self._last_stats = None
-        self._shortcuts = []
         self._loading_settings = False
         self._recent_logs: deque[tuple[str, str, str]] = deque(maxlen=20)
         self._stream_window: StreamWindow | None = None
@@ -222,7 +219,6 @@ class MainWindow(QMainWindow):
             display_count=len(displays), control_port=self._host_settings.control_port
         )
         self.host_page = HostPage(displays)
-        self.viewer_page = ViewerPage()
         self.devices_page = DevicesPage()
         self.settings_page = SettingsPage(self.root)
 
@@ -233,7 +229,6 @@ class MainWindow(QMainWindow):
         for page in (
             self.overview_page,
             self.host_page,
-            self.viewer_page,
             self.devices_page,
             self.settings_page,
         ):
@@ -289,18 +284,7 @@ class MainWindow(QMainWindow):
         self.host_page.back_requested.connect(lambda: self._show_page("overview"))
         self.host_page.clipboard_toggled.connect(lambda enabled: self._toggle_clipboard("host", enabled))
         self.host_page.report_requested.connect(lambda: self._export_report("host"))
-        self.viewer_page.start_requested.connect(self._start_manual_viewer)
-        self.viewer_page.stop_requested.connect(self._disconnect_session)
-        self.viewer_page.back_requested.connect(self._back_from_viewer)
-        self.viewer_page.control_toggled.connect(self._toggle_control)
-        self.viewer_page.clipboard_toggled.connect(lambda enabled: self._toggle_clipboard("viewer", enabled))
-        self.viewer_page.gamepad_toggled.connect(self._toggle_gamepad)
-        self.viewer_page.report_requested.connect(lambda: self._export_report("viewer"))
-        self.viewer_page.fullscreen_requested.connect(self._toggle_stream_fullscreen)
-        self.viewer_page.stats_toggled.connect(self._toggle_stats_overlay)
-        self.viewer_page.release_requested.connect(self._release_viewer_input)
         self.devices_page.connect_peer.connect(self._connect_peer)
-        self.viewer_page.picture_requested.connect(self._edit_picture)
         self.connection.error.connect(lambda message: self.log(
             message, "error", fault_id=self.connection.fault_id,
             source=self.connection._fault_source))
@@ -309,17 +293,6 @@ class MainWindow(QMainWindow):
         self.connection.picture_applied.connect(self._picture_applied)
         self.connection.mode_applied.connect(self._mode_applied)
         self.connection.finished.connect(self._session_finished)
-
-        for keys, callback in (
-            ("F8", self._release_viewer_input),
-            ("F10", self._toggle_stats_shortcut),
-            ("F11", self._toggle_stream_fullscreen),
-            ("Ctrl+Alt+Shift+Q", self._stop_viewer_shortcut),
-        ):
-            shortcut = QShortcut(QKeySequence(keys), self)
-            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-            shortcut.activated.connect(callback)
-            self._shortcuts.append(shortcut)
 
         settings = self.settings_page
         settings.startup_changed.connect(self._change_startup)
@@ -331,10 +304,6 @@ class MainWindow(QMainWindow):
         self.host_page.snapshot_button.clicked.connect(
             lambda: self._snapshot(self.host_page.preview_frame)
         )
-        self.viewer_page.snapshot_button.clicked.connect(
-            lambda: self._snapshot(self.viewer_page.preview_frame)
-        )
-
         self.service.frame_ready.connect(self._on_frame)
         self.service.state_changed.connect(self._on_state)
         self.service.log.connect(lambda message, level: self.log(
@@ -342,18 +311,9 @@ class MainWindow(QMainWindow):
         self.service.stats_changed.connect(self._on_stats)
         self.service.devices_changed.connect(self._on_devices)
         self.service.control_changed.connect(self._on_control)
+        self.service.input_available.connect(self._on_input_available)
 
     # ---- 服务回调 ----
-    def _start_manual_viewer(self, settings: ViewerSettings) -> None:
-        self._viewer_from_devices = False
-        self._watch_interaction_preferences = None
-        self._start_viewer(settings, navigate=True)
-
-    def _back_from_viewer(self) -> None:
-        if self._viewer_from_devices:
-            self._disconnect_session()
-        self._show_page("devices" if self._viewer_from_devices else "overview")
-
     def _show_device_list(self) -> None:
         self.devices_page.show_list()
         self._show_page("devices")
@@ -370,26 +330,12 @@ class MainWindow(QMainWindow):
             self._show_page("host")
         self.service.start_host(settings)
 
-    def _start_viewer(self, settings: ViewerSettings, *, navigate: bool = False) -> None:
-        if self.service.running:
-            self._show_page("viewer")
-            return
-        self._viewer_settings = settings
-        self._active_mode = "viewer"
-        self._close_stream_window()
-        self._toggle_stats_overlay(False)
-        self.viewer_page.preview_frame.preview.clear()
-        self.viewer_page.preview_frame.preview.set_badge("远端画面")
-        if navigate:
-            self._show_page("viewer")
-        self.service.start_viewer(settings)
-
     def _export_report(self, mode: str) -> None:
         if not self.service.running:
             self.notice_bar.show_message("当前没有运行中的会话，无法导出性能报告。", "warn")
             return
         target, _filter = QFileDialog.getSaveFileName(
-            self,
+            self._stream_window or self,
             "导出性能报告",
             str(user_settings.captures_dir() / f"elink-{mode}-report-{time.strftime('%Y%m%d-%H%M%S')}.json"),
             "JSON (*.json)",
@@ -402,13 +348,6 @@ class MainWindow(QMainWindow):
             self.notice_bar.show_message(f"性能报告写入失败：{exc}", "error")
             return
         self.notice_bar.show_message(f"性能报告已保存：{path}", "info")
-
-    def _toggle_gamepad(self, enabled: bool) -> None:
-        self._viewer_settings.gamepad_enabled = enabled
-        if self.service.running and self.service.mode == "viewer":
-            self.service.set_gamepad_enabled(enabled, self._viewer_settings)
-        if not self._loading_settings:
-            self.log("手柄转发已" + ("开启" if enabled else "关闭"), "info")
 
     def _toggle_clipboard(self, mode: str, enabled: bool) -> None:
         if mode == "host":
@@ -439,23 +378,18 @@ class MainWindow(QMainWindow):
         if self._active_mode == "host":
             self.host_page.preview_frame.preview.set_frame(frame)
         elif self._active_mode == "viewer":
-            self.viewer_page.preview_frame.preview.set_frame(frame)
             if self._stream_window is not None:
                 self._stream_window.set_frame(frame)
 
     def _on_state(self, state: str, detail: str) -> None:
+        if state == "idle" and self.service.running:
+            return
         running = state in {"running", "stopping"}
         self.host_page.set_running(running)
-        self.viewer_page.set_running(running)
         if self.service.mode == "host":
             self.host_page.set_state(state, detail)
-            self.viewer_page.set_state("idle", "")
-        elif self.service.mode == "viewer":
-            self.viewer_page.set_state(state, detail)
-            self.host_page.set_state("idle", "")
         else:
             self.host_page.set_state("idle", "")
-            self.viewer_page.set_state("idle", "")
         self.overview_page.set_state(state, detail)
 
         tone = {"running": "ok", "idle": "idle", "stopping": "busy", "error": "error"}.get(state, "idle")
@@ -472,7 +406,6 @@ class MainWindow(QMainWindow):
         if state == "idle" and self.connection.phase not in {"updating", "preparing", "receiving"}:
             if self.service.mode == "":
                 self.host_page.preview_frame.preview.set_info("")
-                self.viewer_page.preview_frame.preview.set_info("")
             self._on_control("控制通道未连接")
             self._close_stream_window()
             if self._stats_overlay_enabled:
@@ -488,7 +421,6 @@ class MainWindow(QMainWindow):
         if self._active_mode == "host":
             self.host_page.show_stats(stats)
         elif self._active_mode == "viewer":
-            self.viewer_page.show_stats(stats)
             if self._stream_window is not None:
                 self._stream_window.set_stats_lines(self._stats_lines(stats))
             if self._stats_overlay_enabled:
@@ -508,36 +440,39 @@ class MainWindow(QMainWindow):
 
     def _update_stats_overlay(self) -> None:
         lines = self._stats_lines()
-        self.viewer_page.preview_frame.preview.set_stats_lines(lines)
         if self._stream_window is not None:
             self._stream_window.set_stats_lines(lines)
 
-    def _toggle_stream_fullscreen(self) -> None:
-        if self._stream_window is not None:
-            self._close_stream_window()
-            return
-        if not (self.service.running and self.service.mode == "viewer"):
-            self.notice_bar.show_message("全屏播放器仅在观看会话运行时可打开。", "warn")
-            return
-        self._open_stream_window()
-
     def _open_stream_window(self) -> None:
+        if self._stream_window is not None:
+            self._stream_window.show()
+            self._stream_window.raise_()
+            self._stream_window.activateWindow()
+            return
         window = StreamWindow(self)
         window.set_stats_visible(self._stats_overlay_enabled)
         window.set_stats_lines(self._stats_lines())
         window.set_status(self.status_label.text(), self.status_dot.property("tone") or "ok")
         window.stats_toggled.connect(self._toggle_stats_overlay)
-        window.release_requested.connect(self._release_viewer_input)
-        window.disconnect_requested.connect(self._disconnect_session)
         window.picture_requested.connect(self._edit_picture)
         window.watch_toggled.connect(lambda watching: self._toggle_control(not watching))
-        window.watch_button.setChecked(not self._viewer_settings.control_enabled)
+        window.snapshot_requested.connect(self._snapshot_current)
+        window.report_requested.connect(lambda: self._export_report("viewer"))
+        window.preference_changed.connect(self._viewer_preference)
+        window.preview.bind_input(self.service.send_input, self.service.set_input_focus)
+        window.preview.input_error.connect(self.service._input_failure)
+        window.apply_settings(self._viewer_settings)
         window.closed.connect(self._on_stream_closed)
         self._stream_window = window
-        window.show_fullscreen()
+        window.show()
+        window.activateWindow()
 
     def _on_stream_closed(self) -> None:
+        if self._stream_window is None:
+            return
         self._stream_window = None
+        self._disconnect_session()
+        self._show_device_list()
         self.raise_()
         self.activateWindow()
 
@@ -546,34 +481,20 @@ class MainWindow(QMainWindow):
         if window is not None:
             window.close()
 
-    def _toggle_stats_shortcut(self) -> None:
-        if self._active_mode != "viewer":
-            return
-        self._toggle_stats_overlay(not self._stats_overlay_enabled)
-
     def _toggle_stats_overlay(self, enabled: bool) -> None:
         self._stats_overlay_enabled = bool(enabled)
-        self.viewer_page.set_stats_checked(self._stats_overlay_enabled)
-        preview = self.viewer_page.preview_frame.preview
-        preview.set_stats_visible(self._stats_overlay_enabled)
         if self._stream_window is not None:
             self._stream_window.set_stats_visible(self._stats_overlay_enabled)
         if self._stats_overlay_enabled:
             self._update_stats_overlay()
-        else:
-            preview.set_stats_lines([])
 
     def _release_viewer_input(self) -> None:
         if self._active_mode != "viewer" or not self.service.running:
             self.notice_bar.show_message("释放输入仅在观看会话中可用。", "warn")
             return
-        self.viewer_page.control_toggle.setChecked(False)
-        self.service.set_control_enabled(False, self._viewer_settings)
+        if self._stream_window is not None:
+            self._stream_window.release_input()
         self.log("已释放键鼠输入（F8）", "info")
-
-    def _stop_viewer_shortcut(self) -> None:
-        if self.service.running and self.service.mode == "viewer":
-            self._disconnect_session()
 
     def _on_control(self, text: str) -> None:
         self.control_label.setText(text or "控制通道未连接")
@@ -642,16 +563,26 @@ class MainWindow(QMainWindow):
             self.notice_bar.show_message("对方连接监听未就绪或正在使用中。", "warn")
             return
         self._viewer_from_devices = True
+        self._viewer_settings.control_enabled = control_enabled
+        self._active_mode = "viewer"
+        self._open_stream_window()
         self.connection.connect_peer(peer, self._viewer_settings, control_enabled)
+        if self.connection.phase == "idle":
+            self._close_stream_window()
 
     def _connection_changed(self) -> None:
         phase = self.connection.phase
         self._on_peers(self.discovery.peers())
-        self.viewer_page.picture_button.setEnabled(phase == "active")
-        self.viewer_page.watch_button.setEnabled(phase == "active")
         if self._stream_window:
-            self._stream_window.picture_button.setEnabled(phase == "active")
-            self._stream_window.watch_button.setEnabled(phase == "active")
+            self._stream_window.set_session_active(phase == "active")
+            self._stream_window.set_status(
+                "已连接" if phase == "active" else "调整中" if phase == "updating" else "连接中",
+                "ok" if phase == "active" else "busy",
+            )
+            if phase == "updating":
+                self._stream_window.preview.clear()
+            elif phase in {"stopping", "idle"}:
+                self._close_stream_window()
         if phase in {"connecting", "preparing", "receiving", "updating"}:
             self.notice_bar.show_message("正在调整画面…" if phase == "updating" else "正在建立桌面连接…", "info")
         self._sync_discovery_hosting()
@@ -659,18 +590,19 @@ class MainWindow(QMainWindow):
     def _session_connected(self, settings: ViewerSettings) -> None:
         self._viewer_settings = settings
         self._active_mode = "viewer"
-        self._loading_settings = True
-        self.viewer_page.control_toggle.setChecked(settings.control_enabled)
-        self.viewer_page.watch_button.setChecked(not settings.control_enabled)
-        self._loading_settings = False
-        self._show_page("viewer")
+        self._open_stream_window()
+        self._stream_window.apply_settings(settings)
+        self._show_page("devices")
 
     def _session_finished(self) -> None:
+        self._close_stream_window()
         self.devices_page.set_peers(self.discovery.peers())
         if self._viewer_from_devices:
             self._show_page("devices")
 
     def _disconnect_session(self) -> None:
+        if self._stream_window is not None:
+            self._stream_window.release_input()
         if self.connection.phase != "idle":
             self.connection.disconnect()
         else:
@@ -678,19 +610,37 @@ class MainWindow(QMainWindow):
 
     def _mode_applied(self, enabled: bool) -> None:
         self._viewer_settings.control_enabled = enabled
-        self._loading_settings = True
-        self.viewer_page.control_toggle.setChecked(enabled)
-        for button in (self.viewer_page.watch_button,
-                       self._stream_window.watch_button if self._stream_window else None):
-            if button is not None:
-                button.blockSignals(True)
-                button.setChecked(not enabled)
-                button.blockSignals(False)
-        self._loading_settings = False
+        if self._stream_window is not None:
+            self._stream_window.apply_settings(self._viewer_settings)
         self.service.set_control_enabled(enabled, self._viewer_settings)
         self.service.set_clipboard_enabled(enabled and self._viewer_settings.clipboard_enabled)
         self.service.set_gamepad_enabled(enabled and self._viewer_settings.gamepad_enabled,
                                          self._viewer_settings)
+        self._persist_ui()
+
+    def _on_input_available(self, available: bool) -> None:
+        if self._stream_window is not None:
+            self._stream_window.set_input_available(available)
+
+    def _viewer_preference(self, name: str, value) -> None:
+        if self._stream_window is not None:
+            self._stream_window.release_input()
+        if name not in {"mouse_mode", "clipboard_enabled", "gamepad_enabled",
+                        "sr_enabled", "sr_mode", "sr_output"}:
+            return
+        setattr(self._viewer_settings, name, value)
+        setattr(self.connection._viewer, name, value)
+        if name == "clipboard_enabled":
+            self.service.set_clipboard_enabled(value and self._viewer_settings.control_enabled)
+        elif name == "gamepad_enabled":
+            self.service.set_gamepad_enabled(value and self._viewer_settings.control_enabled,
+                                            self._viewer_settings)
+        elif name.startswith("sr_") and self.connection.phase == "active":
+            self.connection.configure(saved_picture(self._viewer_settings))
+            self._stream_window.session_controls.setEnabled(False)
+        if self._stream_window is not None:
+            self._stream_window.apply_settings(self._viewer_settings)
+        self._persist_ui()
 
     def _picture_applied(self, picture: dict) -> None:
         for name, value in picture.items():
@@ -701,11 +651,9 @@ class MainWindow(QMainWindow):
     def _edit_picture(self) -> None:
         if self.connection.role != "viewer" or self.connection.phase != "active":
             return
-        enabled = self._viewer_settings.control_enabled
-        self.service.set_control_enabled(False, self._viewer_settings)
+        self._release_viewer_input()
         dialog = PictureDialog(saved_picture(self._viewer_settings), self._stream_window or self)
         accepted = dialog.exec()
-        self.service.set_control_enabled(enabled, self._viewer_settings)
         if accepted:
             self.connection.configure(dialog.picture())
 
@@ -734,11 +682,6 @@ class MainWindow(QMainWindow):
         self._persist_ui()
 
     def _persist_ui(self) -> None:
-        self._viewer_settings.sr_enabled = self.viewer_page.sr_switch.isChecked()
-        self._viewer_settings.sr_mode = (
-            "rtx" if self.viewer_page.sr_mode.currentText() == "RTX" else "fsr"
-        )
-        self._viewer_settings.sr_output = self.viewer_page.sr_output.currentText()
         user_settings.save(self._host_settings, self._viewer_settings, self.ui_settings)
 
     def _change_startup(self, enabled: bool) -> None:
@@ -857,9 +800,7 @@ class MainWindow(QMainWindow):
 
     def _apply_overview_preset(self, key: str) -> None:
         if key == "file":
-            self.viewer_page.transport.setCurrentIndex(1)
-            self.viewer_page.sync_transport()
-            self._show_page("viewer")
+            self._show_device_list()
             return
         self.host_page.apply_profile(key)
         self._show_page("host")
@@ -879,6 +820,9 @@ class MainWindow(QMainWindow):
             save_error(message, fault_id=fault_id, source=source, context=self.service.error_context)
         if level in {"warn", "error"}:
             self.notice_bar.show_message(message, level)
+            if self._stream_window is not None:
+                self._stream_window.notice.show_message(message, level)
+                self._stream_window._layout()
 
     def _snapshot(self, frame: PreviewFrame) -> None:
         target = user_settings.captures_dir() / f"elink-{time.strftime('%Y%m%d-%H%M%S')}.png"
@@ -892,13 +836,12 @@ class MainWindow(QMainWindow):
             self._snapshot(self.host_page.preview_frame)
             return
         if self.service.mode == "viewer":
-            self._snapshot(self.viewer_page.preview_frame)
+            if self._stream_window is not None:
+                self._snapshot(self._stream_window)
             return
         current = self.stack.currentWidget()
         if isinstance(current, HostPage):
             self._snapshot(self.host_page.preview_frame)
-        elif isinstance(current, ViewerPage):
-            self._snapshot(self.viewer_page.preview_frame)
         else:
             self.log("当前没有画面可截图", "warn")
 
@@ -925,19 +868,6 @@ class MainWindow(QMainWindow):
         page.clipboard_switch.setChecked(host.clipboard_enabled)
         page.sync_transport()
 
-        viewer_page = self.viewer_page
-        viewer_page.transport.setCurrentIndex(0 if viewer.transport == "srt" else 1)
-        viewer_page.srt_url.setText(viewer.srt_url)
-        viewer_page.file_path.setText(viewer.file_path)
-        viewer_page.control_host.setText(viewer.control_host)
-        viewer_page.control_port.setValue(viewer.control_port)
-        viewer_page.control_toggle.setChecked(viewer.control_enabled)
-        viewer_page.clipboard_switch.setChecked(viewer.clipboard_enabled)
-        viewer_page.gamepad_switch.setChecked(viewer.gamepad_enabled)
-        viewer_page.sr_switch.setChecked(viewer.sr_enabled)
-        viewer_page.sr_output.setCurrentText(viewer.sr_output)
-        viewer_page.sr_mode.setCurrentText("RTX" if viewer.sr_mode == "rtx" else "FSR")
-        viewer_page.sync_transport()
         self._loading_settings = False
 
         self.overview_page.update_environment(

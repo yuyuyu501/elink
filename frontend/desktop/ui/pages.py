@@ -1,4 +1,4 @@
-"""总览、主机配置和观看会话页面。
+"""总览及主机配置页面。
 
 页面只做「收集参数 / 展示数据」；真正的 I/O 都通过信号交给
 ``MainWindow`` → ``SessionService``。这样界面可以随时重排，而不碰后端。
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import icons
-from ..service import HostSettings, SessionStats, ViewerSettings
+from ..service import HostSettings, SessionStats
 from .preview import PreviewFrame
 from .widgets import (
     ActionTile,
@@ -64,14 +64,6 @@ HOST_METRICS = [
     ("frames", "采集 / 编码"),
     ("injected", "远端输入"),
 ]
-
-VIEWER_METRICS = [
-    ("fps", "解码帧率"),
-    ("frames", "读包 / 解码"),
-    ("keyframes", "关键帧"),
-    ("elapsed", "运行时长"),
-]
-
 
 # --------------------------------------------------------------------------
 # 小工具
@@ -254,7 +246,7 @@ class OverviewPage(QWidget):
         self.start_button = _primary("开始推流", "play")
         self.start_button.clicked.connect(self.start_requested.emit)
         watch_button = _plain("观看别人画面", "eye")
-        watch_button.clicked.connect(lambda: self.navigate.emit("viewer"))
+        watch_button.clicked.connect(lambda: self.navigate.emit("devices"))
         buttons.addWidget(self.start_button)
         buttons.addWidget(watch_button)
         buttons.addStretch(1)
@@ -278,7 +270,7 @@ class OverviewPage(QWidget):
         action_layout.setSpacing(0)
         actions = [
             ("sliders-horizontal", "推流参数", lambda: self.navigate.emit("host")),
-            ("mouse", "键鼠接管", lambda: self.navigate.emit("viewer")),
+            ("mouse", "键鼠接管", lambda: self.navigate.emit("devices")),
             ("camera", "保存截图", self.snapshot_requested.emit),
             ("cpu", "设备检测", lambda: self.navigate.emit("devices")),
         ]
@@ -606,251 +598,6 @@ class HostPage(QWidget):
 # --------------------------------------------------------------------------
 # 观看
 # --------------------------------------------------------------------------
-class ViewerPage(QWidget):
-    """观看（控制端）。"""
-
-    start_requested = Signal(object)
-    stop_requested = Signal()
-    control_toggled = Signal(bool)
-    back_requested = Signal()
-    stats_toggled = Signal(bool)
-    release_requested = Signal()
-    clipboard_toggled = Signal(bool)
-    gamepad_toggled = Signal(bool)
-    report_requested = Signal()
-    fullscreen_requested = Signal()
-    picture_requested = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._running = False
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(14)
-
-        header, actions, self.pill = _header(
-            "远程桌面",
-            "",
-            back=self.back_requested,
-        )
-        self.stats_button = _plain("", "activity")
-        self.stats_button.setObjectName("chip")
-        self.stats_button.setCheckable(True)
-        self.stats_button.setEnabled(False)
-        self.stats_button.setToolTip("在画面上叠加连接统计（F10）")
-        self.stats_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.stats_button.toggled.connect(self.stats_toggled.emit)
-        actions.addWidget(self.stats_button)
-        self.release_button = _plain("", "keyboard")
-        self.release_button.setToolTip("释放远端键鼠控制（F8）")
-        self.release_button.setEnabled(False)
-        self.release_button.clicked.connect(self.release_requested.emit)
-        actions.addWidget(self.release_button)
-        self.fullscreen_button = _plain("", "maximize")
-        self.fullscreen_button.setToolTip("打开独立全屏播放器（F11）")
-        self.fullscreen_button.setEnabled(False)
-        self.fullscreen_button.clicked.connect(self.fullscreen_requested.emit)
-        actions.addWidget(self.fullscreen_button)
-        self.snapshot_button = _plain("", "camera")
-        self.snapshot_button.setToolTip("截图")
-        self.snapshot_button.setEnabled(False)
-        actions.addWidget(self.snapshot_button)
-        self.report_button = _plain("", "file-down")
-        self.report_button.setToolTip("导出当前会话的解码/渲染耗时报告")
-        self.report_button.setEnabled(False)
-        self.report_button.clicked.connect(self.report_requested.emit)
-        actions.addWidget(self.report_button)
-        root.addWidget(header)
-
-        self.picture_button = _plain("", "settings")
-        self.picture_button.setToolTip("画面设置")
-        self.picture_button.setEnabled(False)
-        self.picture_button.clicked.connect(self.picture_requested.emit)
-        actions.addWidget(self.picture_button)
-        self.watch_button = _plain("", "eye")
-        self.watch_button.setToolTip("观看模式")
-        self.watch_button.setCheckable(True)
-        self.watch_button.setEnabled(False)
-        self.watch_button.toggled.connect(lambda watching: self.control_toggle.setChecked(not watching))
-        actions.addWidget(self.watch_button)
-
-        body = QHBoxLayout()
-        body.setSpacing(16)
-        root.addLayout(body, 1)
-
-        left = QVBoxLayout()
-        left.setSpacing(12)
-        body.addLayout(left, 1)
-
-        self.preview_frame = PreviewFrame()
-        self.preview_frame.preview.set_badge("远端画面")
-        left.addWidget(self.preview_frame, 1)
-
-        self.metrics = MetricStrip(VIEWER_METRICS)
-        left.addWidget(self.metrics)
-
-        rail, rail_layout = _scroll_column(360)
-
-        connect = Card("连接主机", "SRT 地址或本地录像")
-        self.transport = SegmentedControl(["SRT 拉流", "读取文件"])
-        self.srt_url = QLineEdit("srt://127.0.0.1:9000")
-        self.srt_url.setPlaceholderText("srt://127.0.0.1:9000")
-        self.srt_url.setStyleSheet("font-family: 'Cascadia Mono'; font-size: 13px;")
-        self.file_path = QLineEdit("out/host.ts")
-        self.file_path.setPlaceholderText("out/host.ts")
-        connect.add(FormField("传输方式", self.transport))
-        self.srt_field = FormField("SRT 地址", self.srt_url)
-        self.file_field = FormField("文件路径", self.file_path)
-        connect.add(self.srt_field)
-        connect.add(self.file_field)
-        connect.add(divider())
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
-        self.control_host = QLineEdit("127.0.0.1")
-        self.control_host.setPlaceholderText("127.0.0.1")
-        self.control_port = QSpinBox()
-        self.control_port.setRange(1024, 65535)
-        self.control_port.setValue(7000)
-        grid.addWidget(FormField("对方地址", self.control_host), 0, 0)
-        grid.addWidget(FormField("控制端口", self.control_port), 0, 1)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        connect.body().addLayout(grid)
-        rail_layout.addWidget(connect)
-
-        capture = Card("输入与画质", "转发键鼠/剪贴板/手柄，或用 FSR 1 提升画面")
-        self.control_toggle = ToggleSwitch()
-        self.clipboard_switch = ToggleSwitch()
-        self.clipboard_switch.setChecked(True)
-        self.gamepad_switch = ToggleSwitch()
-        self.gamepad_switch.setChecked(True)
-        capture_switches = QVBoxLayout()
-        capture_switches.setSpacing(6)
-        capture_switches.addWidget(_switch_line("转发本机键鼠", self.control_toggle, "连接后生效"))
-        capture_switches.addWidget(_switch_line("同步剪贴板", self.clipboard_switch, "仅文本"))
-        capture_switches.addWidget(_switch_line("转发手柄", self.gamepad_switch, "XInput / ViGEmBus"))
-        capture.body().addLayout(capture_switches)
-        self.sr_switch = ToggleSwitch()
-        self.sr_mode = QComboBox()
-        self.sr_mode.setObjectName("srMode")
-        self.sr_mode.addItems(["FSR", "RTX"])
-        self.sr_mode.setFixedWidth(82)
-        self.sr_mode.setEnabled(False)
-        self.sr_mode.setToolTip("RTX VSR 需要 NVIDIA RTX；FSR 1 需要 OpenGL 4.2")
-        self.sr_output = QComboBox()
-        self.sr_output.setObjectName("srOutput")
-        self.sr_output.addItems(["1080p", "1440p", "4K"])
-        self.sr_output.setFixedWidth(100)
-        self.sr_output.setEnabled(False)
-        sr_row = QHBoxLayout()
-        sr_row.setSpacing(6)
-        sr_row.addWidget(self.sr_switch, 0, Qt.AlignmentFlag.AlignVCenter)
-        sr_title = card_title("超分")
-        sr_title.setToolTip("观看端重建画面；输出尺寸可选 1080p / 1440p / 4K")
-        sr_row.addWidget(sr_title, 0, Qt.AlignmentFlag.AlignVCenter)
-        sr_row.addStretch(1)
-        sr_row.addWidget(self.sr_mode, 0, Qt.AlignmentFlag.AlignVCenter)
-        sr_row.addWidget(self.sr_output, 0, Qt.AlignmentFlag.AlignVCenter)
-        capture.body().addLayout(sr_row)
-        self.sr_switch.toggled.connect(self.sr_output.setEnabled)
-        self.sr_switch.toggled.connect(self.sr_mode.setEnabled)
-        self.clipboard_switch.toggled.connect(self.clipboard_toggled.emit)
-        self.gamepad_switch.toggled.connect(self.gamepad_toggled.emit)
-        rail_layout.addWidget(capture)
-        rail_layout.addStretch(1)
-
-        self.start_button = _primary("开始观看", "play")
-        self.stop_button = _plain("停止", "square", object_name="danger")
-        self.stop_button.setEnabled(False)
-        action_row = QHBoxLayout()
-        action_row.setSpacing(10)
-        action_row.addWidget(self.start_button, 1)
-        action_row.addWidget(self.stop_button)
-        rail_layout_wrap = QVBoxLayout()
-        rail_layout_wrap.addWidget(rail, 1)
-        rail_layout_wrap.addLayout(action_row)
-        body.addLayout(rail_layout_wrap, 0)
-        self.session_rail = rail
-        rail.hide()
-        self.start_button.hide()
-        self.stop_button.setText("")
-        self.stop_button.setToolTip("断开连接")
-        actions.addWidget(self.stop_button)
-        body.removeItem(rail_layout_wrap)
-
-        self.start_button.clicked.connect(lambda: self.start_requested.emit(self.settings()))
-        self.stop_button.clicked.connect(self.stop_requested.emit)
-        self.control_toggle.toggled.connect(self._on_control_toggled)
-        self.transport.currentIndexChanged.connect(self._sync_transport)
-        self._sync_transport(0)
-
-    def _on_control_toggled(self, enabled: bool) -> None:
-        self.release_button.setEnabled(self._running and enabled)
-        self.control_toggled.emit(enabled)
-
-    def set_stats_checked(self, checked: bool) -> None:
-        self.stats_button.blockSignals(True)
-        self.stats_button.setChecked(checked)
-        self.stats_button.blockSignals(False)
-
-    def _sync_transport(self, index: int) -> None:
-        is_srt = index == 0
-        self.srt_field.setVisible(is_srt)
-        self.file_field.setVisible(not is_srt)
-        self.srt_url.setEnabled(is_srt and not self._running)
-        self.file_path.setEnabled(not is_srt and not self._running)
-
-    def sync_transport(self) -> None:
-        self._sync_transport(self.transport.currentIndex())
-
-    def settings(self) -> ViewerSettings:
-        return ViewerSettings(
-            transport="srt" if self.transport.currentIndex() == 0 else "file",
-            srt_url=self.srt_url.text().strip(),
-            file_path=self.file_path.text().strip(),
-            control_host=self.control_host.text().strip() or "127.0.0.1",
-            control_port=int(self.control_port.value()),
-            control_enabled=self.control_toggle.isChecked(),
-            clipboard_enabled=self.clipboard_switch.isChecked(),
-            gamepad_enabled=self.gamepad_switch.isChecked(),
-            sr_enabled=self.sr_switch.isChecked(),
-            sr_mode="rtx" if self.sr_mode.currentText() == "RTX" else "fsr",
-            sr_output=self.sr_output.currentText(),
-        )
-
-    def set_state(self, state: str, detail: str) -> None:
-        tone = {"running": "ok", "idle": "idle", "stopping": "busy", "error": "error"}.get(state, "idle")
-        text = {"running": "运行中", "idle": "空闲", "stopping": "停止中", "error": "出错"}.get(state, state)
-        self.pill.set(text, tone)
-
-    def set_running(self, running: bool) -> None:
-        self._running = running
-        self.start_button.setEnabled(not running)
-        self.stop_button.setEnabled(running)
-        self.snapshot_button.setEnabled(running)
-        self.report_button.setEnabled(running)
-        self.fullscreen_button.setEnabled(running)
-        self.stats_button.setEnabled(running)
-        self.picture_button.setEnabled(running)
-        self.watch_button.setEnabled(running)
-        self.release_button.setEnabled(running and self.control_toggle.isChecked())
-        for widget in (self.transport, self.srt_url, self.file_path, self.control_host, self.control_port):
-            widget.setEnabled(not running)
-        self.control_toggle.setEnabled(True)
-        self.sr_switch.setEnabled(not running)
-        self.sr_output.setEnabled(not running and self.sr_switch.isChecked())
-        self.sr_mode.setEnabled(not running and self.sr_switch.isChecked())
-        self._sync_transport(self.transport.currentIndex())
-
-    def show_stats(self, stats: SessionStats) -> None:
-        self.metrics.set("fps", f"{stats.fps:.1f} fps")
-        self.metrics.set("frames", f"{stats.frames_in} / {stats.frames_out}")
-        self.metrics.set("keyframes", str(stats.key_frames))
-        self.metrics.set("elapsed", f"{stats.elapsed_s:.0f} s")
-
-
 def _platform_text() -> str:
     system = platform.system()
     release = platform.release()

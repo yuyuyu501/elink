@@ -33,8 +33,10 @@ from PySide6.QtCore import QObject, Signal
 from backend import clipboard as clipboard_backend
 from backend.bootstrap import build_receive_resources, build_send_resources, prepare_environment
 from backend.config.schema import AppConfig
-from backend.control_channel.protocol import EventType, InputEvent
+from backend.control_channel.protocol import ControlCommand, EventType, InputEvent
+from backend.control_channel.base import ChannelState
 from backend.control_channel.tcp import TcpControlChannel
+from backend.input_injection.session import InputSession
 from backend.errors.network import TransportClosedError
 from backend.media.device.display import DisplayInfo, list_displays
 from backend.media.device.enumerate import DeviceKind, enumerate_devices
@@ -81,6 +83,7 @@ class ViewerSettings:
     control_host: str = "127.0.0.1"
     control_port: int = 7000
     control_enabled: bool = False
+    mouse_mode: str = "absolute"
     stream_width: int = 1920
     stream_height: int = 1080
     stream_fps: float = 30.0
@@ -231,6 +234,7 @@ class SessionService(QObject):
     control_changed = Signal(str)         # 控制通道状态描述
     devices_changed = Signal(list)        # list[dict]
     host_prepared = Signal()
+    input_available = Signal(bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -239,7 +243,13 @@ class SessionService(QObject):
         self._pipeline = None
         self._control: TcpControlChannel | None = None
         self._injector = None
-        self._hook = None
+        self._input_session: InputSession | None = None
+        self._input_lock = threading.RLock()
+        self._input_epoch = 0
+        self._input_captured = False
+        self._input_error_id = ""
+        self._capture_region = None
+        self._viewer_live: ViewerSettings | None = None
         self._clipboard: ClipboardBridge | None = None
         self._pads = None
         self._pad_poll = None
@@ -334,6 +344,7 @@ class SessionService(QObject):
             self.log.emit("已有会话在运行，请先停止", "warn")
             return
         self._settings_snapshot = {"mode": "viewer", **asdict(settings)}
+        self._viewer_live = settings
         self._begin("viewer")
         config = _viewer_config(settings)
         self._worker = threading.Thread(
@@ -345,7 +356,9 @@ class SessionService(QObject):
         self._worker.start()
 
     def stop(self) -> None:
+        self.set_input_focus(False)
         if not self.running:
+            self._stop_control()
             return
         self._stop.set()
         if self._transport is not None:
@@ -357,18 +370,13 @@ class SessionService(QObject):
                 pipeline.stop()
             except Exception:
                 pass
-        control = self._control
-        if control is not None:
-            try:
-                control.close()
-            except Exception:
-                pass
         self._stop_control()
 
     # ---- 内部：公共 ----
     def _begin(self, mode: str) -> None:
         self.failure_id = ""
         self.failure_message = ""
+        self._input_error_id = ""
         self._mode = mode
         self._stop.clear()
         self._stats = SessionStats()
@@ -387,9 +395,14 @@ class SessionService(QObject):
         if self._control_worker is not None:
             self._control_worker.join(timeout=2)
             self._control_worker = None
+        self._input_session = None
+        if self._injector is not None:
+            self._injector.close()
+            self._injector = None
         self._pipeline = None
         self._transport = None
         self._host_live = None
+        self._viewer_live = None
         self._mode = ""
         self.state_changed.emit("idle", reason)
         if self._started_at:
@@ -439,6 +452,7 @@ class SessionService(QObject):
     # ---- 内部：主机 ----
     def _run_host(self, config: AppConfig, filters: list, settings: HostSettings) -> None:
         runtime = None
+        self._capture_region = config.capture.clamped_region()
         try:
             _probe, registry = prepare_environment(config)
             runtime = build_send_resources(config, registry)
@@ -557,18 +571,26 @@ class SessionService(QObject):
                     "0.0.0.0", settings.control_port, server_side=True, timeout_s=30.0
                 )
                 self._control = channel
+                self._input_session = InputSession(self._inject_remote_input)
+                channel.on_message(lambda message: self._on_remote_input(message, settings)
+                                   if self._control is channel and not self._stop.is_set() else None)
                 self.control_changed.emit(f"等待控制端连接 :{settings.control_port}")
                 channel.open()
                 self.control_changed.emit(f"控制端已接入 :{settings.control_port}")
-                channel.on_message(lambda message: self._on_remote_input(message, settings))
-                while not self._stop.is_set():
-                    time.sleep(0.2)
+                while not self._stop.wait(0.2) and channel.state == ChannelState.OPEN:
+                    try:
+                        if self._input_session is not None:
+                            self._input_session.watchdog()
+                    except Exception as exc:
+                        self._input_failure(exc)
             except Exception as exc:
                 if not self._stop.is_set():
                     save_error(exc, context={**self.error_context, "stage": "control",
                                              "settings": self._settings_snapshot})
                     self.log.emit(f"控制通道异常：{exc}", "warn")
                     self.control_changed.emit("控制通道未连接")
+            finally:
+                self._release_remote_input()
 
         self._control_worker = threading.Thread(target=run, name="control-server", daemon=True)
         self._control_worker.start()
@@ -594,26 +616,33 @@ class SessionService(QObject):
                 if self._stop.is_set():
                     return
                 self.control_changed.emit(f"已连接控制通道 {settings.control_host}:{settings.control_port}")
-                if settings.control_enabled:
-                    self._start_local_capture(settings)
-                while not self._stop.is_set():
-                    time.sleep(0.2)
+                self.input_available.emit(True)
+                while not self._stop.wait(0.5) and channel.state == ChannelState.OPEN:
+                    with self._input_lock:
+                        if self._input_captured:
+                            channel.send_command(ControlCommand("input_focus", {
+                                "active": True, "epoch": self._input_epoch,
+                            }))
+                        else:
+                            channel.send_ping()
             except Exception as exc:
                 if not self._stop.is_set():
                     save_error(exc, context={**self.error_context, "stage": "control",
                                              "settings": self._settings_snapshot})
                     self.log.emit(f"控制通道连接失败：{exc}", "warn")
                     self.control_changed.emit("控制通道未连接")
+            finally:
+                self.set_input_focus(False)
+                self.input_available.emit(False)
 
         self._control_worker = threading.Thread(target=run, name="control-client", daemon=True)
         self._control_worker.start()
 
     def set_control_enabled(self, enabled: bool, settings: ViewerSettings) -> None:
-        """观看模式下切换「本机输入转发」。"""
-        if enabled:
-            self._start_local_capture(settings)
-        else:
-            self._stop_local_capture()
+        settings.control_enabled = enabled
+        self._viewer_live = settings
+        if not enabled:
+            self.set_input_focus(False)
 
     def set_host_control(self, enabled: bool) -> None:
         if self._host_live is not None:
@@ -624,55 +653,77 @@ class SessionService(QObject):
                 self._start_clipboard()
                 self._start_gamepad_host()
             else:
+                self._release_remote_input()
                 self._stop_clipboard()
                 self._stop_gamepad()
 
-    def _start_local_capture(self, settings: ViewerSettings) -> None:
-        if self._hook is not None:
-            return
-        try:
-            from backend.input_capture.windows.send_input_hook import SendInputHookCapture
-
-            hook = SendInputHookCapture(capture_injected=False)
-            hook.open()
-            self._hook = hook
-            self.log.emit("已开始捕获本机输入（仅在画面点击后生效）", "info")
-            self._filter_capture_thread = threading.Thread(
-                target=self._forward_loop, name="input-forward", daemon=True
-            )
-            self._filter_capture_thread.start()
-            self.control_changed.emit("本机输入转发已开启")
-        except Exception as exc:
-            self.log.emit(f"输入捕获不可用：{exc}", "warn")
-
-    def _forward_loop(self) -> None:
-        hook = self._hook
-        while hook is not None and hook is self._hook and not self._stop.is_set():
-            try:
-                event = hook.read(timeout_s=0.2)
-            except Exception:
-                break
-            if hook is not self._hook:
-                break
+    def set_input_focus(self, active: bool) -> bool:
+        with self._input_lock:
             channel = self._control
-            if event is None or channel is None:
-                continue
+            if active and (self._mode != "viewer" or self._viewer_live is None
+                           or not self._viewer_live.control_enabled or channel is None
+                           or channel.state != ChannelState.OPEN):
+                return False
+            if active == self._input_captured:
+                return True
+            self._input_captured = active
+            self._input_epoch += 1
             try:
-                channel.send_event(event)
-            except Exception:
-                continue
+                if channel is not None and channel.state == ChannelState.OPEN and self._mode == "viewer":
+                    channel.send_command(ControlCommand("input_focus", {
+                        "active": active, "epoch": self._input_epoch,
+                    }))
+            except Exception as exc:
+                self._input_captured = False
+                self._input_failure(exc)
+                return False
+            return True
 
-    def _stop_local_capture(self) -> None:
-        hook = self._hook
-        self._hook = None
-        if hook is not None:
+    def send_input(self, event: InputEvent) -> bool:
+        with self._input_lock:
+            if not self._input_captured or self._control is None:
+                return False
             try:
-                hook.close()
-            except Exception:
-                pass
-            self.control_changed.emit("本机输入转发已关闭")
+                event.extra = {**event.extra, "epoch": self._input_epoch}
+                self._control.send_event(event)
+                return True
+            except Exception as exc:
+                self._input_captured = False
+                self._input_failure(exc)
+                self.input_available.emit(False)
+                return False
+
+    def _input_failure(self, exc: Exception) -> None:
+        self._input_error_id = save_error(exc, fault_id=self._input_error_id,
+                                         context={**self.error_context, "stage": "input"})
+        self.log.emit(f"远控输入失败：{exc}", "warn")
+
+    def _inject_remote_input(self, event: InputEvent) -> bool:
+        if self._injector is None:
+            from backend.input_injection.windows.send_input import SendInputInjector
+            self._injector = SendInputInjector(region=self._capture_region)
+        success = self._injector.inject(event)
+        if success:
+            self._stats.injected_events += 1
+        return success
+
+    def _release_remote_input(self) -> None:
+        with self._input_lock:
+            if self._input_session is not None:
+                try:
+                    self._input_session.release()
+                except Exception as exc:
+                    self._input_failure(exc)
 
     def _on_remote_input(self, message, settings: HostSettings) -> None:
+        if isinstance(message, ControlCommand):
+            if (self._input_session is not None and isinstance(message.args, dict)
+                    and (settings.allow_inject or not message.args.get("active"))):
+                try:
+                    self._input_session.receive(message)
+                except Exception as exc:
+                    self._input_failure(exc)
+            return
         if not isinstance(message, InputEvent) or not settings.allow_inject:
             return
         if message.event_type is EventType.CLIPBOARD:
@@ -690,14 +741,11 @@ class SessionService(QObject):
                     self.log.emit(f"手柄注入失败：{exc}", "warn")
             return
         try:
-            if self._injector is None:
-                from backend.input_injection.windows.send_input import SendInputInjector
-
-                self._injector = SendInputInjector()
-            if self._injector.inject(message):
-                self._stats.injected_events += 1
+            if self._input_session is not None:
+                self._input_session.receive(message)
         except Exception as exc:
-            self.log.emit(f"输入注入失败：{exc}", "warn")
+            self._input_failure(exc)
+            self._release_remote_input()
 
     # ---- 内部：剪贴板 ----
     def _start_clipboard(self) -> None:
@@ -832,7 +880,8 @@ class SessionService(QObject):
             return
 
     def _stop_control(self) -> None:
-        self._stop_local_capture()
+        self.set_input_focus(False)
+        self._release_remote_input()
         control = self._control
         self._control = None
         if control is not None:
@@ -840,6 +889,7 @@ class SessionService(QObject):
                 control.close()
             except Exception:
                 pass
+        self.input_available.emit(False)
 
     # ---- 性能报告 ----
     def performance_report(self) -> dict:

@@ -101,8 +101,9 @@ class SendInputInjector:
 
     backend = "sendinput"
 
-    def __init__(self, *, use_scan_codes: bool = True) -> None:
+    def __init__(self, *, use_scan_codes: bool = True, region: tuple | None = None) -> None:
         self.use_scan_codes = use_scan_codes
+        self.region = region
         self.injected = 0
 
     # ---- 对外接口 ----
@@ -126,6 +127,16 @@ class SendInputInjector:
 
     # ---- 鼠标 ----
     def _mouse_move(self, event: protocol.InputEvent) -> bool:
+        mode = event.extra.get("coordinates", "pixels")
+        if mode == "relative":
+            return self._send_mouse(flags=MOUSEEVENTF_MOVE, data=0, dx=event.x, dy=event.y)
+        if mode == "normalized":
+            region = self.region or (0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+            x, y, width, height = region
+            return self._absolute_move(
+                x + round(event.x * max(0, width - 1) / 65535),
+                y + round(event.y * max(0, height - 1) / 65535),
+            )
         return self._absolute_move(event.x, event.y)
 
     def _mouse_button(self, event: protocol.InputEvent) -> bool:
@@ -141,7 +152,7 @@ class SendInputInjector:
             return False
 
         # 先移动到目标点，避免「在旧位置点击」——这是远程控制里最常见的错位
-        if not self._absolute_move(event.x, event.y):
+        if not event.extra.get("positioned") and not self._absolute_move(event.x, event.y):
             return False
         return self._send_mouse(flags=flags, data=0)
 
@@ -221,7 +232,10 @@ class SendInputInjector:
     def _send(self, item: _INPUT, count: int = 1) -> bool:
         sent = user32.SendInput(count, ctypes.byref(item), ctypes.sizeof(_INPUT))
         if sent != count:
-            logger.warning("SendInput 部分失败: %s/%s err=%s", sent, count, ctypes.get_last_error())
-            return False
+            raise InjectionError("Windows 输入注入失败", detail={
+                "stage": "SendInput", "sent": sent, "expected": count,
+                "win32": ctypes.get_last_error(), "input_type": item.type,
+                "flags": item.union.mi.dwFlags if item.type == INPUT_MOUSE else item.union.ki.dwFlags,
+            })
         self.injected += count
         return True

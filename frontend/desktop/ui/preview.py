@@ -8,24 +8,29 @@
 - 没有画面时画一个带柔光的占位，而不是纯黑，避免让人以为程序卡住；
 - 左上角显示来源/状态，左下角显示分辨率与帧号。
 
-这是纯绘制代码，不持有会话状态。
+输入坐标与绘制共用画面矩形，会话收发通过回调交给服务层。
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt
+import sys
+
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
     QImage,
+    QCursor,
     QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QFrame, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QSizePolicy, QVBoxLayout, QWidget
 
+from backend.control_channel.protocol import EventType, InputEvent
+from backend.input_capture.windows.raw_mouse import CursorConfinement, RawMouseInput
 from backend.media.frame import Frame
 
 PLACEHOLDER_TITLE = "等待画面"
@@ -36,12 +41,27 @@ HUD_MARGIN = 14
 class PreviewWidget(QWidget):
     """等比缩放显示帧，并叠加状态与 HUD。"""
 
+    capture_changed = Signal(bool)
+    input_error = Signal(object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMinimumSize(QSize(320, 180))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+        self.captured = False
+        self.control_enabled = False
+        self.mouse_mode = "absolute"
+        self._send_input = None
+        self._set_input_focus = None
+        self._keyboard_hook = None
+        self._raw_mouse = RawMouseInput()
+        self._confinement = CursorConfinement()
+        self._input_timer = QTimer(self)
+        self._input_timer.setInterval(8)
+        self._input_timer.timeout.connect(self._poll_keyboard)
 
         self._image: QImage | None = None
         self._info = ""
@@ -72,6 +92,7 @@ class PreviewWidget(QWidget):
         self.update()
 
     def clear(self) -> None:
+        self.release_input()
         self._image = None
         self._info = ""
         self._frames = 0
@@ -115,6 +136,187 @@ class PreviewWidget(QWidget):
         if self._image is None:
             return False
         return bool(self._image.save(path, "PNG"))
+
+    def bind_input(self, send, focus) -> None:
+        self._send_input, self._set_input_focus = send, focus
+
+    def set_control_enabled(self, enabled: bool) -> None:
+        self.control_enabled = enabled
+        if not enabled:
+            self.release_input()
+
+    def set_mouse_mode(self, mode: str) -> None:
+        self.release_input()
+        self.mouse_mode = "relative" if mode == "relative" else "absolute"
+
+    def video_contains(self, position) -> bool:
+        rect = self._target_rect()
+        return (not rect.isEmpty() and rect.x() <= position.x() < rect.x() + rect.width()
+                and rect.y() <= position.y() < rect.y() + rect.height())
+
+    def normalized_position(self, position) -> tuple[int, int] | None:
+        rect = self._target_rect()
+        if rect.isEmpty():
+            return None
+        x = max(0.0, min(rect.width() - 1, position.x() - rect.x()))
+        y = max(0.0, min(rect.height() - 1, position.y() - rect.y()))
+        return round(x * 65535 / max(1, rect.width() - 1)), round(y * 65535 / max(1, rect.height() - 1))
+
+    def capture_input(self) -> bool:
+        if self.captured:
+            return True
+        if (not self.control_enabled or not self.has_frame or not self.window().isActiveWindow()
+                or QApplication.activeModalWidget() or QApplication.activePopupWidget()
+                or self._set_input_focus is None):
+            return False
+        self.setFocus()
+        if not self._set_input_focus(True):
+            return False
+        self.captured = True
+        try:
+            if sys.platform == "win32" and QApplication.platformName() == "windows":
+                from backend.input_capture.windows.send_input_hook import SendInputHookCapture
+                hook = SendInputHookCapture(keyboard_only=True, active=lambda: self.captured)
+                try:
+                    hook.open()
+                    self._keyboard_hook = hook
+                    self._input_timer.start()
+                except Exception as exc:
+                    # Qt continues to supply ordinary keys if the shell hook is unavailable.
+                    self.input_error.emit(exc)
+                if self.mouse_mode == "relative":
+                    self.grabMouse(QCursor(Qt.CursorShape.BlankCursor))
+                    self._raw_mouse.start(int(self.winId()))
+                    self._confine_cursor()
+        except Exception as exc:
+            self.release_input()
+            self.input_error.emit(exc)
+            return False
+        self.capture_changed.emit(True)
+        return True
+
+    def release_input(self) -> None:
+        was_captured = self.captured
+        self.captured = False
+        self._input_timer.stop()
+        hook, self._keyboard_hook = self._keyboard_hook, None
+        if hook is not None:
+            hook.close()
+        self._raw_mouse.stop()
+        self._confinement.release()
+        if QWidget.mouseGrabber() is self:
+            self.releaseMouse()
+        self.unsetCursor()
+        if was_captured:
+            if self._set_input_focus is not None:
+                self._set_input_focus(False)
+            self.capture_changed.emit(False)
+
+    def _poll_keyboard(self) -> None:
+        if self._keyboard_hook is not None:
+            for event in self._keyboard_hook.read_all():
+                self._send(event)
+
+    def _send(self, event: InputEvent) -> None:
+        if self.captured and self._send_input is not None:
+            if not self._send_input(event):
+                self.release_input()
+
+    def _absolute_motion(self, position) -> None:
+        point = self.normalized_position(position)
+        if point is not None:
+            self._send(InputEvent(EventType.MOUSE_MOVE, x=point[0], y=point[1],
+                                  extra={"coordinates": "normalized"}))
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.captured and self.mouse_mode == "absolute":
+            self._absolute_motion(event.position())
+            if not self.video_contains(event.position()):
+                self.release_input()
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        if self.video_contains(event.position()) and self.capture_input():
+            self._mouse_button(event, True)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self.captured:
+            self._mouse_button(event, False)
+        event.accept()
+
+    def _mouse_button(self, event, pressed: bool) -> None:
+        button = {Qt.MouseButton.LeftButton: 1, Qt.MouseButton.RightButton: 2,
+                  Qt.MouseButton.MiddleButton: 3}.get(event.button())
+        if button is not None:
+            if self.mouse_mode == "absolute":
+                self._absolute_motion(event.position())
+            self._send(InputEvent(EventType.MOUSE_BUTTON, button=button, pressed=pressed,
+                                  extra={"positioned": True}))
+
+    def wheelEvent(self, event) -> None:
+        if self.captured and self.video_contains(event.position()):
+            if self.mouse_mode == "absolute":
+                self._absolute_motion(event.position())
+            self._send(InputEvent(EventType.MOUSE_WHEEL, delta=event.angleDelta().y()))
+        event.accept()
+
+    def _key(self, event, pressed: bool) -> None:
+        if self.captured and not event.isAutoRepeat():
+            vk = int(event.nativeVirtualKey() or 0)
+            if not vk:
+                vk = {Qt.Key.Key_Tab: 9, Qt.Key.Key_Return: 13, Qt.Key.Key_Escape: 27,
+                      Qt.Key.Key_Backspace: 8, Qt.Key.Key_Shift: 16, Qt.Key.Key_Control: 17,
+                      Qt.Key.Key_Alt: 18, Qt.Key.Key_Left: 37, Qt.Key.Key_Up: 38,
+                      Qt.Key.Key_Right: 39, Qt.Key.Key_Down: 40}.get(event.key(), int(event.key()))
+            scan = int(event.nativeScanCode() or 0)
+            if 0 < vk <= 255 and vk not in (0x77, 0x79, 0x7A):
+                self._send(InputEvent(EventType.KEY, key_code=vk, scan_code=scan & 255,
+                                      pressed=pressed, extra={"extended": bool(scan & 0x100)}))
+        event.accept()
+
+    def keyPressEvent(self, event) -> None:
+        self._key(event, True)
+
+    def keyReleaseEvent(self, event) -> None:
+        self._key(event, False)
+
+    def event(self, event) -> bool:
+        if getattr(self, "captured", False):
+            if event.type() in (QEvent.Type.FocusOut, QEvent.Type.WindowDeactivate):
+                self.release_input()
+            elif event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Tab:
+                self._key(event, event.type() == QEvent.Type.KeyPress)
+                return True
+        return super().event(event)
+
+    def leaveEvent(self, event) -> None:
+        if self.mouse_mode == "absolute":
+            self.release_input()
+        super().leaveEvent(event)
+
+    def _confine_cursor(self) -> None:
+        self._confinement.confine(int(self.winId()), self._target_rect().getRect(),
+                                 (self.width(), self.height()))
+
+    def resizeEvent(self, event) -> None:
+        if self.captured and self.mouse_mode == "relative":
+            try:
+                self._confine_cursor()
+            except Exception as exc:
+                self.release_input()
+                self.input_error.emit(exc)
+        super().resizeEvent(event)
+
+    def nativeEvent(self, event_type, message):
+        if self.captured and self.mouse_mode == "relative":
+            delta = self._raw_mouse.delta(message)
+            if delta:
+                self._send(InputEvent(EventType.MOUSE_MOVE,
+                                      x=max(-32767, min(32767, delta[0])),
+                                      y=max(-32767, min(32767, delta[1])),
+                                      extra={"coordinates": "relative"}))
+        return super().nativeEvent(event_type, message)
 
     # ---- 绘制 ----
     def _target_rect(self) -> QRect:
