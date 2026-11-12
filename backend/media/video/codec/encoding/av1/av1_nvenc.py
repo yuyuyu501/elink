@@ -17,7 +17,8 @@ class Av1NvencEncoder(FfmpegEncoderBase):
 
     ffmpeg_encoder = "av1_nvenc"
     preset_supported = False
-    private_params = (("-tune", "ll"), ("-rc", "cbr"))
+    private_params = (("-preset", "p1"), ("-tune", "ull"), ("-rc", "cbr"),
+                      ("-rc-lookahead", "0"), ("-zerolatency", "1"))
 
     @classmethod
     def available(cls, ffmpeg_path: str = "ffmpeg") -> bool:

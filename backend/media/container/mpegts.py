@@ -33,14 +33,17 @@ VIDEO_STREAM_ID = 0xE0
 
 STREAM_TYPE_H264 = 0x1B
 STREAM_TYPE_HEVC = 0x24
+STREAM_TYPE_AV1 = 0x06
 
 _STREAM_TYPE_OF = {
     CodecId.H264: STREAM_TYPE_H264,
     CodecId.H265: STREAM_TYPE_HEVC,
+    CodecId.AV1: STREAM_TYPE_AV1,
 }
 _CODEC_OF_STREAM_TYPE = {
     STREAM_TYPE_H264: CodecId.H264,
     STREAM_TYPE_HEVC: CodecId.H265,
+    STREAM_TYPE_AV1: CodecId.AV1,
 }
 
 TS_TIMEBASE = Timebase.mpegts()
@@ -95,7 +98,7 @@ def build_pat(
 
 
 def build_pmt(
-    program_number: int, pcr_pid: int, elementary: list[tuple[int, int]]
+    program_number: int, pcr_pid: int, elementary: list[tuple[int, int]], descriptors: bytes = b""
 ) -> bytes:
     body = (
         struct.pack(">H", program_number)
@@ -104,7 +107,8 @@ def build_pmt(
         + struct.pack(">H", 0xF000)
     )
     for stream_type, pid in elementary:
-        body += bytes([stream_type]) + struct.pack(">H", 0xE000 | pid) + struct.pack(">H", 0xF000)
+        body += (bytes([stream_type]) + struct.pack(">H", 0xE000 | pid)
+                 + struct.pack(">H", 0xF000 | len(descriptors)) + descriptors)
     return _build_section(0x02, body)
 
 
@@ -208,10 +212,16 @@ class MpegTsMuxer(Muxer):
             self._pmt_pid,
         )
         pmt = build_pmt(
-            self.config.program_number, self._es_pid, [(self._stream_type, self._es_pid)]
+            self.config.program_number, self._es_pid, [(self._stream_type, self._es_pid)],
+            self._descriptors(),
         )
         self._packetize(PAT_PID, b"\x00" + pat, pusi=True)
         self._packetize(self._pmt_pid, b"\x00" + pmt, pusi=True)
+
+    def _descriptors(self) -> bytes:
+        stream = self.streams[0]
+        payload = b"ELNK" + struct.pack(">HHf", stream.width, stream.height, stream.framerate)
+        return (b"\x05\x04AV01" if stream.codec is CodecId.AV1 else b"") + bytes([0x80, len(payload)]) + payload
 
     def _build_pes(self, payload: bytes, pts: int, dts: int) -> bytes:
         if dts != pts:
@@ -320,6 +330,7 @@ class MpegTsDemuxer(Demuxer):
         self._queue: list[Packet] = []
         self._eof = False
         self._video_pid: int | None = None
+        self._random_access: dict[int, bool] = {}
 
     def open(self) -> None:
         # TS 不需要预读头部，PAT/PMT 会随流出现；这里只重置状态。
@@ -373,6 +384,12 @@ class MpegTsDemuxer(Demuxer):
         offset = 4
         if afc & 0x02:
             offset = 5 + packet[4]
+            if pusi and packet[4] > 0:
+                random_access = bool(packet[5] & 0x40)
+            else:
+                random_access = False
+        else:
+            random_access = False
         if offset >= TS_PACKET_SIZE:
             return
         payload = packet[offset:]
@@ -383,6 +400,8 @@ class MpegTsDemuxer(Demuxer):
             self._parse_pmt(payload)
         elif pid in self._elementary:
             self._handle_pes(pid, payload, pusi)
+            if pusi:
+                self._random_access[pid] = random_access
 
     def _parse_pat(self, payload: bytes) -> None:
         if len(payload) < 9 or payload[0] != 0x00:
@@ -414,10 +433,27 @@ class MpegTsDemuxer(Demuxer):
             stream_type = section[pos]
             pid = ((section[pos + 1] & 0x1F) << 8) | section[pos + 2]
             es_info_len = ((section[pos + 3] & 0x0F) << 8) | section[pos + 4]
+            info = section[pos + 5:pos + 5 + es_info_len]
+            width = height = 0
+            fps = 0.0
+            av1 = False
+            at = 0
+            while at + 2 <= len(info):
+                tag, size = info[at:at + 2]
+                value = info[at + 2:at + 2 + size]
+                if len(value) != size:
+                    raise MpegTsError("无效流描述")
+                if tag == 5 and value == b"AV01":
+                    av1 = True
+                if tag == 0x80 and len(value) == 12 and value[:4] == b"ELNK":
+                    width, height, fps = struct.unpack(">HHf", value[4:])
+                at += size + 2
             pos += 5 + es_info_len
 
             codec = _CODEC_OF_STREAM_TYPE.get(stream_type)
             if codec is None:
+                continue
+            if stream_type == STREAM_TYPE_AV1 and not av1:
                 continue
             if pid in self._elementary:
                 continue
@@ -431,6 +467,7 @@ class MpegTsDemuxer(Demuxer):
                         media_type=MediaType.VIDEO,
                         codec=codec,
                         timebase=TS_TIMEBASE,
+                        width=width, height=height, framerate=fps,
                     )
                 )
                 logger.debug(
@@ -448,6 +485,8 @@ class MpegTsDemuxer(Demuxer):
             if buffer is None:
                 return
             buffer += payload
+            if len(buffer) > 32 * 1024 * 1024:
+                raise MpegTsError("视频包过大")
 
     def _split_pes_header(self, payload: bytes) -> tuple[tuple[int | None, int | None], bytes]:
         if len(payload) < 9 or payload[:3] != b"\x00\x00\x01":
@@ -483,7 +522,7 @@ class MpegTsDemuxer(Demuxer):
                 pts=pts,
                 dts=dts,
                 stream_id=0,
-                keyframe=is_keyframe(data, codec=codec),
+                keyframe=self._random_access.pop(pid, False) or is_keyframe(data, codec=codec),
             )
         )
 

@@ -6,9 +6,11 @@ from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QFrame,
-    QHBoxLayout, QPushButton, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+    QHBoxLayout, QPushButton, QScrollArea, QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget,
 )
 
+from backend.input_capture.mouse import MOUSE_MODES
+from backend.media.video.codec.probe import VIDEO_ENCODERS, codec_label, compatible_choices
 from .. import icons
 from .preview import PreviewWidget
 from .widgets import NoticeBar, StatusPill, label
@@ -16,8 +18,32 @@ from .widgets import NoticeBar, StatusPill, label
 TITLE_HEIGHT = 44
 
 
+def fps_control(slider: QSlider) -> QWidget:
+    slider.setRange(5, 120)
+    slider.setSingleStep(1)
+    slider.setTickInterval(30)
+    slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(2)
+    row = QHBoxLayout()
+    value = label(f"{slider.value()} FPS")
+    value.setMinimumWidth(62)
+    slider.valueChanged.connect(lambda number: value.setText(f"{number} FPS"))
+    row.addWidget(slider, 1)
+    row.addWidget(value)
+    layout.addLayout(row)
+    marks = QHBoxLayout()
+    for number in (30, 60, 90, 120):
+        marks.addWidget(label(str(number)), 1, Qt.AlignmentFlag.AlignRight)
+    marks.addSpacing(66)
+    layout.addLayout(marks)
+    return container
+
+
 class PictureDialog(QDialog):
-    def __init__(self, picture: dict, parent=None) -> None:
+    def __init__(self, picture: dict, parent=None, *, connection=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("画面设置")
         self.setMinimumWidth(300)
@@ -28,26 +54,128 @@ class PictureDialog(QDialog):
         if self.resolution.findText(current) < 0:
             self.resolution.addItem(current)
         self.resolution.setCurrentText(current)
-        self.fps = QDoubleSpinBox()
-        self.fps.setRange(5, 60)
-        self.fps.setValue(picture["fps"])
+        self.fps = QSlider(Qt.Orientation.Horizontal)
+        fps = fps_control(self.fps)
+        self.fps.setValue(round(picture["fps"]))
         self.bitrate = QDoubleSpinBox()
         self.bitrate.setDecimals(3)
         self.bitrate.setRange(0.3, 20)
         self.bitrate.setValue(picture["bitrate_kbps"] / 1000)
         form.addRow("分辨率", self.resolution)
-        form.addRow("帧率", self.fps)
+        form.addRow("帧率", fps)
         form.addRow("码率（Mbps）", self.bitrate)
-        apply = QToolButton()
-        apply.setIcon(icons.icon("check"))
-        apply.setToolTip("应用画面设置")
-        apply.clicked.connect(self.accept)
-        form.addRow("", apply)
+        self.connection = connection
+        self.codec = QComboBox()
+        self.encoder = QComboBox()
+        self.decoder = QComboBox()
+        for box in (self.codec, self.encoder, self.decoder):
+            box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.codec_status = label("")
+        if connection is not None and connection._codec_enabled:
+            form.addRow("视频格式", self.codec)
+            form.addRow("被控端编码器", self.encoder)
+            form.addRow("本机解码器", self.decoder)
+            form.addRow("", self.codec_status)
+            self.codec.currentIndexChanged.connect(self._backend_options)
+            self.encoder.currentIndexChanged.connect(self._decoder_options)
+            connection.capabilities_changed.connect(self._update_codecs)
+            connection.changed.connect(self._connection_state)
+            self._update_codecs()
+            options = connection._preferences if connection.phase == "selection" else connection._applied_options
+            for key in ("codec", "encoder", "decoder"):
+                box = getattr(self, key)
+                index = box.findData(options[key])
+                if index >= 0:
+                    box.setCurrentIndex(index)
+            self.codec_status.setText(
+                "" if all(getattr(self, k).findData(v) >= 0 for k, v in options.items())
+                else "保存的选项当前不可用，请重新选择")
+        self.apply_button = QToolButton()
+        self.apply_button.setIcon(icons.icon("check"))
+        self.apply_button.setToolTip("应用画面设置")
+        self.apply_button.clicked.connect(self.accept)
+        controls = QWidget()
+        row = QHBoxLayout(controls)
+        row.setContentsMargins(0, 0, 0, 0)
+        if connection is not None and connection._codec_enabled:
+            self.refresh_button = QToolButton()
+            self.refresh_button.setIcon(icons.icon("refresh-cw"))
+            self.refresh_button.setToolTip("重新检测双方编解码能力")
+            self.refresh_button.clicked.connect(connection.refresh_codecs)
+            row.addWidget(self.refresh_button)
+        row.addStretch()
+        row.addWidget(self.apply_button)
+        form.addRow("", controls)
+        self._connection_state()
+
+    @staticmethod
+    def _fill(box, names, labels=None):
+        selected = box.currentData()
+        box.blockSignals(True)
+        box.clear()
+        box.addItem("自动", "auto")
+        for name in names:
+            box.addItem(labels[name] if labels else codec_label(name), name)
+        index = box.findData(selected)
+        box.setCurrentIndex(max(0, index))
+        box.blockSignals(False)
+
+    def _update_codecs(self):
+        remote, local = self.connection.codec_capabilities
+        if remote is None or local is None:
+            self.codec_status.setText("正在检测编解码能力…")
+            return
+        try:
+            choices = compatible_choices(remote, local, {})
+        except ValueError:
+            choices = []
+        names = list(dict.fromkeys(choice["codec"] for choice in choices))
+        self._fill(self.codec, names, {"h264": "H.264", "hevc": "H.265", "av1": "AV1"})
+        self._backend_options()
+        self.codec_status.setText("" if names else "双方没有共同可用的视频格式")
+        self._connection_state()
+
+    def _backend_options(self, *_):
+        if self.connection is None:
+            return
+        remote, local = self.connection.codec_capabilities
+        if remote is None or local is None:
+            return
+        codec = self.codec.currentData()
+        dec_formats = {v["codec"] for v in local["decoders"].values()}
+        self._fill(self.encoder, [n for n, v in remote["encoders"].items()
+                                 if v["codec"] in dec_formats and codec in ("auto", v["codec"])])
+        self._decoder_options()
+
+    def _decoder_options(self, *_):
+        if self.connection is None:
+            return
+        remote, local = self.connection.codec_capabilities
+        if remote is None or local is None:
+            return
+        codec = self.codec.currentData()
+        if codec == "auto" and self.encoder.currentData() != "auto":
+            codec = VIDEO_ENCODERS.get(self.encoder.currentData(), "auto")
+        enc_formats = {v["codec"] for v in remote["encoders"].values()}
+        self._fill(self.decoder, [n for n, v in local["decoders"].items()
+                                 if v["codec"] in enc_formats and codec in ("auto", v["codec"])])
+
+    def _connection_state(self):
+        if self.connection is not None and hasattr(self, "apply_button"):
+            active = self.connection.phase in {"active", "selection"}
+            self.apply_button.setEnabled(active)
+            for box in (self.codec, self.encoder, self.decoder):
+                box.setEnabled(active)
+            if hasattr(self, "refresh_button"):
+                self.refresh_button.setEnabled(self.connection.phase == "active")
 
     def picture(self) -> dict:
         width, height = map(int, self.resolution.currentText().split("×"))
-        return {"width": width, "height": height, "fps": self.fps.value(),
-                "bitrate_kbps": round(self.bitrate.value() * 1000)}
+        result = {"width": width, "height": height, "fps": self.fps.value(),
+                  "bitrate_kbps": round(self.bitrate.value() * 1000)}
+        if self.connection is not None and self.connection._codec_enabled:
+            result.update({name: getattr(self, name).currentData() for name in ("codec", "encoder", "decoder")})
+        return result
 
 
 class StreamTitleBar(QFrame):
@@ -164,12 +292,32 @@ class StreamWindow(QWidget):
         controls.addWidget(self.watch_button)
         form = QFormLayout()
         self.mouse_mode = QComboBox()
-        self.mouse_mode.addItem("桌面鼠标", "absolute")
-        self.mouse_mode.addItem("游戏鼠标", "relative")
+        for text, mode in MOUSE_MODES:
+            self.mouse_mode.addItem(text, mode)
         form.addRow("鼠标", self.mouse_mode)
         self.mouse_mode.currentIndexChanged.connect(
             lambda _: self.preference_changed.emit("mouse_mode", self.mouse_mode.currentData()))
         controls.addLayout(form)
+        sensitivity = QHBoxLayout()
+        self.sensitivity = QSlider(Qt.Orientation.Horizontal)
+        self.sensitivity.setRange(-50, 50)
+        self.sensitivity.setSingleStep(1)
+        self.sensitivity_value = label("0.0")
+        self.sensitivity_value.setMinimumWidth(32)
+        self.sensitivity.valueChanged.connect(
+            lambda value: self.sensitivity_value.setText(f"{value / 10:.1f}"))
+        self.sensitivity.valueChanged.connect(
+            lambda value: self.preference_changed.emit("mouse_sensitivity", value / 10))
+        reset = QToolButton()
+        reset.setIcon(icons.icon("refresh-cw"))
+        reset.setFixedSize(28, 28)
+        reset.setToolTip("恢复默认灵敏度")
+        reset.clicked.connect(lambda: self.sensitivity.setValue(0))
+        sensitivity.addWidget(label("灵敏度"))
+        sensitivity.addWidget(self.sensitivity, 1)
+        sensitivity.addWidget(self.sensitivity_value)
+        sensitivity.addWidget(reset)
+        controls.addLayout(sensitivity)
         self.preferences = {}
         for name, text in (("clipboard_enabled", "同步剪贴板"), ("gamepad_enabled", "转发手柄"),
                            ("sr_enabled", "超分辨率")):
@@ -190,7 +338,7 @@ class StreamWindow(QWidget):
         self.sr_output.currentTextChanged.connect(
             lambda text: self.preference_changed.emit("sr_output", text))
         rows.addWidget(self.session_controls)
-        self.stats_button = QCheckBox("连接统计")
+        self.stats_button = QCheckBox("性能叠加")
         self.stats_button.toggled.connect(self.stats_toggled.emit)
         rows.addWidget(self.stats_button)
         rows.addWidget(self._command("截图", "camera", self.snapshot_requested.emit))
@@ -228,7 +376,7 @@ class StreamWindow(QWidget):
         return button
 
     def apply_settings(self, settings) -> None:
-        widgets = [self.watch_button, self.mouse_mode, self.sr_mode, self.sr_output,
+        widgets = [self.watch_button, self.mouse_mode, self.sensitivity, self.sr_mode, self.sr_output,
                    *self.preferences.values()]
         for widget in widgets:
             widget.blockSignals(True)
@@ -236,6 +384,9 @@ class StreamWindow(QWidget):
         self.watch_button.setChecked(not settings.control_enabled)
         self.mouse_mode.setCurrentIndex(max(0, self.mouse_mode.findData(settings.mouse_mode)))
         self.preview.set_mouse_mode(self.mouse_mode.currentData())
+        self.sensitivity.setValue(round(settings.mouse_sensitivity * 10))
+        self.sensitivity_value.setText(f"{settings.mouse_sensitivity:.1f}")
+        self.preview.set_sensitivity(settings.mouse_sensitivity)
         for name, check in self.preferences.items():
             check.setChecked(getattr(settings, name))
         self.sr_mode.setCurrentText(settings.sr_mode.upper())

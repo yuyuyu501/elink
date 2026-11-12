@@ -122,6 +122,12 @@ class DesktopCapture:
         self._width = 0
         self._height = 0
         self._start = 0.0
+        from backend.media.video.cursor.capture import CursorCapture
+        self.cursor = CursorCapture()
+        self.cursor_mode = "smart"
+        self.cursor_applied_mode = "smart"
+        self.cursor_visible = None
+        self._previous_bitmap = None
 
     # ---- 属性 ----
     @property
@@ -174,7 +180,8 @@ class DesktopCapture:
             self.close()
             raise CaptureError("CreateDIBSection 失败", detail=ctypes.get_last_error())
 
-        if not gdi32.SelectObject(self._mem_dc, self._bitmap):
+        self._previous_bitmap = gdi32.SelectObject(self._mem_dc, self._bitmap)
+        if not self._previous_bitmap:
             self.close()
             raise CaptureError("SelectObject 失败", detail=ctypes.get_last_error())
 
@@ -189,7 +196,7 @@ class DesktopCapture:
 
     def close(self) -> None:
         if self._mem_dc and self._bitmap:
-            gdi32.SelectObject(self._mem_dc, None)
+            gdi32.SelectObject(self._mem_dc, self._previous_bitmap)
         if self._bitmap:
             gdi32.DeleteObject(self._bitmap)
             self._bitmap = None
@@ -200,6 +207,7 @@ class DesktopCapture:
             user32.ReleaseDC(None, self._screen_dc)
             self._screen_dc = None
         self._bits = None
+        self.cursor.close()
 
     # ---- 取帧 ----
     def read(self) -> Frame:
@@ -222,7 +230,7 @@ class DesktopCapture:
 
         data = ctypes.string_at(self._bits, self._width * self._height * 4)
         pts = self.timebase.ticks(time.perf_counter() - self._start)
-        return Frame(
+        frame = Frame(
             data=data,
             timebase=self.timebase,
             pts=pts,
@@ -231,6 +239,15 @@ class DesktopCapture:
             pixel_format=PixelFormat.BGRA,
             domain=FrameDomain.CPU,
         )
+        from backend.media.video.cursor.overlay import CursorOverlay
+        mode = self.cursor_mode
+        self.cursor.include_image = mode != "local"
+        state = self.cursor.read()
+        self.cursor_visible = state.visible
+        self.cursor_applied_mode = mode
+        if mode != "local":
+            frame = CursorOverlay(origin=self._origin).composite(frame, state) if not state.is_empty else frame
+        return frame
 
     def __enter__(self) -> "DesktopCapture":
         self.open()

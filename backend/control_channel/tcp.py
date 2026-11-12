@@ -14,6 +14,7 @@ import socket
 import ssl
 import threading
 import time
+from dataclasses import replace
 
 from backend.control_channel import protocol
 from backend.control_channel.base import ChannelState, ControlChannel
@@ -22,6 +23,27 @@ from backend.event.bus import EventBus
 from backend.logging.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class _ControlQueue(queue.Queue):
+    """Only adjacent motion in the same capture epoch may be combined."""
+
+    def _put(self, item):
+        if (isinstance(item, protocol.InputEvent)
+                and item.event_type is protocol.EventType.MOUSE_MOVE and self.queue):
+            previous = self.queue[-1]
+            if (isinstance(previous, protocol.InputEvent)
+                    and previous.event_type is protocol.EventType.MOUSE_MOVE
+                    and previous.extra == item.extra):
+                if item.extra.get("coordinates") == "relative":
+                    x, y = previous.x + item.x, previous.y + item.y
+                    if -32767 <= x <= 32767 and -32767 <= y <= 32767:
+                        self.queue[-1] = replace(item, x=x, y=y)
+                        return
+                elif item.extra.get("coordinates") == "normalized":
+                    self.queue[-1] = item
+                    return
+        super()._put(item)
 
 
 class TcpControlChannel(ControlChannel):
@@ -50,7 +72,7 @@ class TcpControlChannel(ControlChannel):
         self._listener: socket.socket | None = None
         self._reader: threading.Thread | None = None
         self._writer: threading.Thread | None = None
-        self._outbox: "queue.Queue[bytes | None]" = queue.Queue()
+        self._outbox = _ControlQueue()
         self._stopping = threading.Event()
         self._connected = threading.Event()
 
@@ -76,6 +98,7 @@ class TcpControlChannel(ControlChannel):
             self.close()
             raise TransportClosedError("控制通道已停止")
         self._socket.settimeout(None)
+        self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.state = ChannelState.OPEN
         self._connected.set()
         self._reader = threading.Thread(target=self._read_loop, name="tcp-control-rx", daemon=True)
@@ -133,6 +156,11 @@ class TcpControlChannel(ControlChannel):
         return self._connected.wait(self.timeout_s if timeout_s is None else timeout_s)
 
     # ---- 收发 ----
+    def send_event(self, event: protocol.InputEvent) -> None:
+        if self.state != ChannelState.OPEN or self._socket is None:
+            raise TransportClosedError("控制通道未连接")
+        self._outbox.put(replace(event, extra=dict(event.extra)))
+
     def _write(self, data: bytes) -> None:
         if self._socket is None:
             raise TransportClosedError("控制通道未连接")
@@ -146,6 +174,10 @@ class TcpControlChannel(ControlChannel):
                 break
             if self._socket is None:
                 break
+            if isinstance(data, protocol.InputEvent):
+                data = protocol.encode_json(data)
+                with self._lock:
+                    self.sent_bytes += len(data)
             try:
                 self._socket.sendall(data)
             except OSError as exc:

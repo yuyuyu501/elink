@@ -38,6 +38,11 @@ def split_annexb(data: bytes) -> list[bytes]:
 
 def is_keyframe(data: bytes, *, codec: CodecId = CodecId.H264) -> bool:
     """以是否含 IDR 判断关键帧（H.264 NAL 类型 5）。"""
+    if codec is CodecId.H265:
+        return any(nal and 16 <= ((nal[0] >> 1) & 63) <= 21 for nal in split_annexb(data))
+    if codec is CodecId.AV1:
+        from backend.media.video.codec.framing import av1_keyframe
+        return av1_keyframe(data)
     if codec is not CodecId.H264:
         return False
     return any(nal and (nal[0] & 0x1F) == 5 for nal in split_annexb(data))

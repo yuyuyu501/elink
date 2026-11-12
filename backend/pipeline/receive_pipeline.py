@@ -34,6 +34,7 @@ DecoderFactory = Callable[[StreamInfo, VideoEncodeConfig], BaseDecoder]
 @dataclass
 class ReceivePipelineStats:
     packets_read: int = 0
+    bytes_read: int = 0
     frames_decoded: int = 0
     frames_rendered: int = 0
     keyframes: int = 0
@@ -95,6 +96,7 @@ class ReceivePipeline:
                     break
 
                 self.stats.packets_read += 1
+                self.stats.bytes_read += len(packet.data)
                 if packet.keyframe:
                     self.stats.keyframes += 1
                 if self.stats.first_pts is None:
@@ -104,6 +106,9 @@ class ReceivePipeline:
 
                 if decoder is None:
                     pending.append(packet)
+                    if (len(pending) > 240 or sum(len(p.data) for p in pending) > 32 * 1024 * 1024
+                            or time.perf_counter() - started_at > 10):
+                        raise DecodeError("等待视频初始化参数超时")
                     decoder = self._open_decoder(pending)
                     if decoder is None:
                         continue
@@ -148,15 +153,23 @@ class ReceivePipeline:
             return None
 
         base = self.demuxer.streams[0]
-        dimensions: tuple[int, int] | None = None
+        dimensions = (base.width, base.height) if base.width and base.height else None
         for packet in pending:
-            dimensions = detect_video_dimensions(packet.data, base.codec)
-            if dimensions:
+            parsed = detect_video_dimensions(packet.data, base.codec)
+            if parsed:
+                dimensions = parsed
                 break
         if dimensions is None:
-            return None
+            if self.encode_config.width and self.encode_config.height:
+                dimensions = self.encode_config.width, self.encode_config.height
+            else:
+                return None
 
         width, height = dimensions
+        if not (0 < width <= 7680 and 0 < height <= 4320):
+            raise DecodeError("无效视频尺寸")
+        if self.encode_config.realtime and base.codec.value != self.encode_config.codec:
+            raise DecodeError("视频格式与协商结果不一致")
         stream = base.copy_with(width=width, height=height)
         self.stream = stream
         logger.info(
@@ -164,6 +177,10 @@ class ReceivePipeline:
         )
 
         decoder = self.decoder_factory(stream, self.encode_config)
+        self.stats.extra["decoder"] = decoder.name
+        if self.encode_config.realtime and hasattr(decoder, "output_callback"):
+            decoder.output_callback = self._render
+            self.stats.extra["decode_output_ms"] = decoder.output_wait_ms
         try:
             decoder.open()
         except Exception as exc:
@@ -177,7 +194,7 @@ class ReceivePipeline:
         begin = time.perf_counter()
         frames = decoder.decode(packet)
         elapsed_ms = (time.perf_counter() - begin) * 1000.0
-        samples = self.stats.extra.setdefault("decode_ms", [])
+        samples = self.stats.extra.setdefault("decode_feed_ms", [])
         if len(samples) < 4096:
             samples.append(round(elapsed_ms, 3))
         for frame in frames:

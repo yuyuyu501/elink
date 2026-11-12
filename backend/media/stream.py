@@ -34,7 +34,7 @@ class StreamInfo:
     """一路流的描述信息。
 
     ``stream_id`` 在本端内唯一；``extra_data`` 存放解码所需参数集
-    （H.264 的 SPS/PPS、AAC 的 AudioSpecificConfig 等），Annex-B 形态。
+    （H.264/HEVC 的 Annex-B 参数集、AV1 的 sequence header OBU 等）。
     """
 
     stream_id: int = 0

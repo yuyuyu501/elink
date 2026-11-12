@@ -24,6 +24,10 @@ from backend.control_channel.base import ChannelState
 from backend.control_channel.protocol import ControlCommand, EventType, InputEvent
 from backend.input_capture.windows.raw_mouse import RawMouseInput, _RawInput
 from backend.input_injection.session import InputSession
+from backend.input_capture.mouse import MouseSensitivity, mouse_mode, relative_mouse, sensitivity_value
+from backend.media.video.cursor.capture import CursorState
+from backend.media.video.cursor.overlay import CursorOverlay
+from backend.media.frame import Frame
 from frontend.desktop.diagnostics import _synthetic_frame
 from frontend.desktop.service import HostSettings, SessionService, ViewerSettings
 from frontend.desktop.theme import apply_theme
@@ -242,6 +246,74 @@ class WindowInputTests(unittest.TestCase):
         self.assertEqual(dialog.bitrate.suffix(), "")
         self.assertEqual(dialog.picture()["bitrate_kbps"], 4000)
         dialog.close()
+
+    def test_three_modes_and_cursor_updates_keep_last_known_visibility(self):
+        self.assertEqual([self.window.mouse_mode.itemData(i) for i in range(3)],
+                         ["smart", "remote", "local"])
+        self.preview.set_cursor_state({"mode": "smart", "visible": False})
+        self.assertTrue(self.preview._relative)
+        self.preview.set_cursor_state({"mode": "smart", "visible": None})
+        self.assertTrue(self.preview._relative)
+        self.preview.set_cursor_state({"mode": "remote", "visible": True})
+        self.assertTrue(self.preview._relative)
+        self.preview.set_cursor_state({"mode": "smart", "visible": True})
+        self.assertFalse(self.preview._relative)
+        self.preview.set_mouse_mode("local")
+        self.preview.request_mouse_mode()
+        self.assertFalse(self.preview.capture_input())
+        self.preview.set_cursor_state({"mode": "local", "visible": True})
+        self.assertTrue(self.preview.capture_input())
+        self.assertFalse(self.preview._relative)
+
+    def test_local_mode_waits_for_cursor_free_video_before_capture(self):
+        self.preview.set_mouse_mode("local")
+        self.preview.request_mouse_mode()
+        self.preview.set_cursor_state({"mode": "local", "visible": True, "pts": 90000})
+        self.assertFalse(self.preview.capture_input())
+        self.preview.set_frame(_synthetic_frame(0).with_data(_synthetic_frame(0).data, pts=90000))
+        self.assertTrue(self.preview.capture_input())
+
+    def test_sensitivity_slider_reset_and_absolute_delta_scaling(self):
+        self.window.sensitivity.setValue(50)
+        self.assertEqual(self.window.sensitivity_value.text(), "5.0")
+        self.preview.set_sensitivity(5)
+        self.assertTrue(self.preview.capture_input())
+        rect = self.preview._target_rect()
+        start = QPointF(rect.center())
+        self.preview._absolute_motion(start)
+        self.preview._absolute_motion(start + QPointF(10, 0))
+        self.assertEqual(self.events[-1].x, self.preview.normalized_position(start + QPointF(20, 0))[0])
+        self.preview.release_input()
+        self.assertIsNone(self.preview._absolute_last)
+        self.assertEqual(self.preview._sensitivity.remainder, [0, 0])
+
+
+class MouseMathTests(unittest.TestCase):
+    def test_migration_bounds_and_fractional_relative_motion(self):
+        self.assertEqual(mouse_mode("absolute"), "smart")
+        self.assertEqual(mouse_mode("relative"), "remote")
+        self.assertEqual(mouse_mode("broken"), "smart")
+        self.assertEqual(mouse_mode([]), "smart")
+        self.assertEqual(mouse_mode({}), "smart")
+        for value, expected in ((None, 0), (float("nan"), 0), (100, 5), (-100, -5)):
+            self.assertEqual(sensitivity_value(value), expected)
+        sensitivity = MouseSensitivity(-5)
+        self.assertEqual(sensitivity.relative(1, -1), (0, 0))
+        self.assertEqual(sensitivity.relative(1, -1), (1, -1))
+        for mode in ("smart", "remote", "local"):
+            self.assertFalse(relative_mouse(mode, True))
+            self.assertTrue(relative_mouse(mode, False))
+
+    def test_cursor_negative_origin_hotspot_scaling_and_monochrome_inversion(self):
+        frame = Frame(data=bytes([20, 40, 60, 255]) * 16, width=4, height=4)
+        state = CursorState(-99, 1, 1, 1, 1, 1, True, bytes([200, 100, 50, 255]))
+        result = CursorOverlay(origin=(-100, 0)).composite(frame, state)
+        self.assertEqual(result.data[:4], state.image)
+        self.assertEqual(frame.data[:4], bytes([20, 40, 60, 255]))
+        inversion = CursorState(0, 0, 1, 1, image=bytes([255] * 4), background=bytes(4))
+        result = CursorOverlay(scale_x=2, scale_y=2).composite(frame, inversion)
+        self.assertEqual(result.data[:4], bytes([235, 215, 195, 255]))
+        self.assertEqual(result.data[4:8], result.data[:4])
 
 
 class ServiceInputTests(unittest.TestCase):

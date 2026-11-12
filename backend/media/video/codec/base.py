@@ -18,6 +18,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 
@@ -276,7 +277,7 @@ class BaseDecoder(ABC):
 class FfmpegEncoderBase(BaseEncoder):
     """基于 ffmpeg 子进程的视频编码器基类。
 
-    ``原始 Frame --stdin(rawvideo)--> ffmpeg(--c:v 后端) --stdout(ES)--> 切分 AU --> Packet``
+    ``Frame -> rawvideo -> ffmpeg -> Annex-B / IVF 分帧 -> Packet``
 
     子类只需声明：
 
@@ -321,12 +322,14 @@ class FfmpegEncoderBase(BaseEncoder):
             "-bf", str(cfg.max_b_frames),
         ]
         if self.preset_supported:
-            args += ["-preset", cfg.preset]
+            args += ["-preset", "veryfast" if "_qsv" in self.name else cfg.preset]
         if self.tune:
             args += ["-tune", self.tune]
         for key, value in self.private_params:
             args += [key, value]
-        args += ["-pix_fmt", cfg.pix_fmt]
+        if self.codec == "av1" and self.name == "libsvtav1" and cfg.realtime:
+            args += ["-svtav1-params", "tune=0:scd=0:pred-struct=1:lookahead=0", "-preset", "12"]
+        args += ["-pix_fmt", "vaapi" if self.name.endswith("_vaapi") else cfg.pix_fmt]
         return args
 
     def stream_format(self) -> str:
@@ -334,7 +337,7 @@ class FfmpegEncoderBase(BaseEncoder):
         return {
             CodecId.H264.value: "h264",
             CodecId.H265.value: "hevc",
-            CodecId.AV1.value: "obu",
+            CodecId.AV1.value: "ivf",
         }.get(self.codec, "h264")
 
     # ---- 生命周期 ----
@@ -352,6 +355,7 @@ class FfmpegEncoderBase(BaseEncoder):
             "-hide_banner",
             "-loglevel", "error",
             "-nostdin",
+            *(["-vaapi_device", "/dev/dri/renderD128"] if self.name.endswith("_vaapi") else []),
             "-f", "rawvideo",
             "-pix_fmt", input_pix_fmt,
             "-video_size", f"{width}x{height}",
@@ -473,8 +477,8 @@ class FfmpegEncoderBase(BaseEncoder):
 
     def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
-        parser = AnnexBParser()
-        splitter = AccessUnitSplitter()
+        from .framing import VideoFramer
+        framer = VideoFramer(self.codec)
         frame_duration = self._timestamp.ticks(1.0 / (self.stream.framerate or 30.0))
 
         try:
@@ -482,15 +486,10 @@ class FfmpegEncoderBase(BaseEncoder):
                 chunk = self._proc.stdout.read(READ_CHUNK)
                 if not chunk:
                     break
-                for nal in parser.push(chunk):
-                    for access_unit in splitter.push(nal):
-                        self._emit(access_unit, frame_duration)
-            for nal in parser.flush():
-                for access_unit in splitter.push(nal):
+                for access_unit in framer.push(chunk):
                     self._emit(access_unit, frame_duration)
-            tail = splitter.take()
-            if tail:
-                self._emit(tail, frame_duration)
+            for access_unit in framer.flush():
+                self._emit(access_unit, frame_duration)
         except Exception as exc:  # 读线程内异常留给 flush 抛出
             self._reader_error = f"读取编码输出失败: {exc}"
             logger.exception("%s 输出读取失败", self.name)
@@ -524,7 +523,7 @@ class FfmpegEncoderBase(BaseEncoder):
 class FfmpegDecoderBase(BaseDecoder):
     """基于 ffmpeg 子进程的视频解码器基类。
 
-    ``Packet(Annex-B) --stdin--> ffmpeg(--c:v 后端) --stdout(rawvideo)--> Frame``
+    ``Packet(Annex-B / OBU) -> ffmpeg -> rawvideo -> Frame``
 
     输出像素格式固定 BGRA。时间戳按「第 N 个输出帧对应第 N 个输入包」映射，
     因此要求码流没有 B 帧重排序。
@@ -548,15 +547,17 @@ class FfmpegDecoderBase(BaseDecoder):
         super().__init__(stream)
         self.config = config or VideoEncodeConfig()
         self._proc: subprocess.Popen[bytes] | None = None
-        self._frames: "queue.Queue[bytes]" = queue.Queue()
+        self._frames: "queue.Queue[Frame]" = queue.Queue(maxsize=1 if self.config.realtime else 0)
         self._pts_lock = threading.Lock()
-        self._pending_pts: deque[int] = deque()
+        self._pending_pts: deque[tuple[int, float]] = deque()
         self._reader: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=40)
         self._reader_error: str | None = None
         self._frame_size = 0
         self._timebase = Timebase.mpegts()
+        self.output_callback = None
+        self.output_wait_ms: deque[float] = deque(maxlen=4096)
 
     def open(self) -> None:
         width, height = self.stream.width, self.stream.height
@@ -565,9 +566,17 @@ class FfmpegDecoderBase(BaseDecoder):
         self._frame_size = width * height * 4
         self._timebase = Timebase.mpegts()
 
-        decode_args = ["-c:v", self.ffmpeg_decoder] if self.ffmpeg_decoder else []
+        decoder_name = self.codec if self.name.endswith("_vaapi") else self.ffmpeg_decoder
+        decode_args = ["-c:v", decoder_name] if decoder_name else []
+        filters = (("hwdownload", "format=nv12", "format=bgra")
+                   if self.name.endswith("_vaapi") else self.video_filters)
         filter_args = (
-            ["-vf", ",".join(self.video_filters)] if self.video_filters else []
+            ["-vf", ",".join(filters)] if filters else []
+        )
+        realtime_args = (
+            ["-probesize", "32", "-analyzeduration", "100000", "-fpsprobesize", "0",
+             "-flags", "low_delay", "-threads", "1"]
+            if self.config.realtime else []
         )
         cmd = [
             self.config.ffmpeg_path,
@@ -575,11 +584,14 @@ class FfmpegDecoderBase(BaseDecoder):
             "-loglevel", "error",
             "-nostdin",
             *self.input_args,
+            *realtime_args,
+            *decode_args,
             "-f", self.input_format,
             "-i", "pipe:0",
             "-an",
-            *decode_args,
             *filter_args,
+            "-threads", "1",
+            "-fps_mode", "passthrough",
             "-f", "rawvideo",
             "-pix_fmt", "bgra",
             "pipe:1",
@@ -614,9 +626,11 @@ class FfmpegDecoderBase(BaseDecoder):
     def decode(self, packet: Packet) -> list[Frame]:
         if self._proc is None or self._proc.stdin is None:
             raise DecodeError("解码器尚未打开")
+        if self._reader_error:
+            raise DecodeError(self._reader_error, detail=self._stderr_text())
 
         with self._pts_lock:
-            self._pending_pts.append(packet.pts or 0)
+            self._pending_pts.append((packet.pts or 0, time.perf_counter()))
 
         try:
             write_all(self._proc.stdin, bytes(packet.data))
@@ -625,7 +639,7 @@ class FfmpegDecoderBase(BaseDecoder):
                 "解码进程异常退出", detail=f"{exc}; stderr: {self._stderr_text()}"
             ) from exc
 
-        return self._drain(wait=DEFAULT_DRAIN_TIMEOUT)
+        return self._drain(wait=None if self.config.realtime else DEFAULT_DRAIN_TIMEOUT)
 
     def flush(self) -> list[Frame]:
         proc = self._proc
@@ -681,12 +695,13 @@ class FfmpegDecoderBase(BaseDecoder):
                     data = self._frames.get(timeout=wait)
             except queue.Empty:
                 break
-            frames.append(self._build_frame(data))
+            frames.append(data)
         return frames
 
     def _build_frame(self, data: bytes) -> Frame:
         with self._pts_lock:
-            pts = self._pending_pts.popleft() if self._pending_pts else 0
+            pts, entered = self._pending_pts.popleft() if self._pending_pts else (0, time.perf_counter())
+        self.output_wait_ms.append((time.perf_counter() - entered) * 1000)
         return Frame(
             data=data,
             timebase=self._timebase,
@@ -709,8 +724,20 @@ class FfmpegDecoderBase(BaseDecoder):
                     break
                 buf += chunk
                 while len(buf) >= self._frame_size:
-                    self._frames.put(bytes(buf[: self._frame_size]))
+                    frame = self._build_frame(bytes(buf[: self._frame_size]))
                     del buf[: self._frame_size]
+                    if self.output_callback is not None:
+                        self.output_callback(frame)
+                    else:
+                        while True:
+                            try:
+                                self._frames.put_nowait(frame)
+                                break
+                            except queue.Full:
+                                try:
+                                    self._frames.get_nowait()
+                                except queue.Empty:
+                                    pass
         except Exception as exc:
             self._reader_error = f"读取解码输出失败: {exc}"
             logger.exception("%s 解码输出读取失败", self.name)

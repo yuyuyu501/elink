@@ -14,6 +14,8 @@ from backend.logging.logger import get_logger
 
 from .paths import data_dir, settings_file
 from .service import HostSettings, ViewerSettings
+from backend.input_capture.mouse import mouse_mode, sensitivity_value
+from backend.media.video.codec.probe import codec_options
 
 logger = get_logger(__name__)
 
@@ -45,6 +47,18 @@ def load() -> tuple[HostSettings, ViewerSettings]:
     data = _read()
     host = _merge(HostSettings, data.get("host"))
     viewer = _merge(ViewerSettings, data.get("viewer"))
+    viewer.mouse_mode = mouse_mode(viewer.mouse_mode)
+    viewer.mouse_sensitivity = sensitivity_value(viewer.mouse_sensitivity)
+    viewer.stats_visible = viewer.stats_visible is True
+    preferences = viewer.codec_preferences if isinstance(viewer.codec_preferences, dict) else {}
+    viewer.codec_preferences = {}
+    for peer, options in preferences.items():
+        if not isinstance(peer, str) or len(peer) > 128:
+            continue
+        try:
+            viewer.codec_preferences[peer] = codec_options(options)
+        except ValueError:
+            continue
     return host, viewer
 
 

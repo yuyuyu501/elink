@@ -42,6 +42,11 @@ class VideoEncodeConfig:
     pix_fmt: str = "yuv420p"
     max_b_frames: int = 0
     ffmpeg_path: str = "ffmpeg"
+    realtime: bool = False
+    decoder: str = "auto"
+    width: int = 0
+    height: int = 0
+    framerate: float = 0.0
 
 
 @dataclass
@@ -86,6 +91,10 @@ class AppConfig:
     log_level: str = "INFO"
 
     def validate(self) -> None:
+        if self.encode.codec not in {"h264", "hevc", "av1"}:
+            raise ConfigError("不支持的视频格式")
+        if not isinstance(self.encode.encoder, str) or not isinstance(self.encode.decoder, str):
+            raise ConfigError("编解码器名称无效")
         if self.mode not in {"loopback", "send", "receive"}:
             raise ConfigError(f"未知运行模式: {self.mode}", detail=self.mode)
         if self.capture.fps <= 0:

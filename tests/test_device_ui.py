@@ -24,6 +24,7 @@ from frontend.desktop.settings import UiSettings
 from frontend.desktop.theme import apply_theme
 from frontend.desktop.ui.devices_page import ComputerName, DevicesPage
 from frontend.desktop.ui.window import MainWindow, PAGE_INDEX
+from frontend.desktop.ui.stream_window import PictureDialog
 
 APP = QApplication.instance() or QApplication([])
 apply_theme(APP)
@@ -276,9 +277,9 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertTrue(stream.watch_button.isChecked())
         self.assertFalse(stream.preview.control_enabled)
         stream.mouse_mode.setCurrentIndex(1)
-        self.assertEqual(self.window._viewer_settings.mouse_mode, "relative")
-        self.assertEqual(self.window.connection._viewer.mouse_mode, "relative")
-        self.assertEqual(stream.preview.mouse_mode, "relative")
+        self.assertEqual(self.window._viewer_settings.mouse_mode, "remote")
+        self.assertEqual(self.window.connection._viewer.mouse_mode, "remote")
+        self.assertEqual(stream.preview.mouse_mode, "remote")
 
     def test_busy_session_is_not_replaced(self):
         with patch.object(SessionService, "running", new_callable=lambda: property(lambda _: True)):
@@ -319,6 +320,71 @@ class WindowConnectionTests(unittest.TestCase):
         saved = settings.save.call_args.args[1]
         self.assertEqual(saved.stream_width, 1280)
         self.assertEqual(saved.stream_bitrate_kbps, 6500)
+
+    def test_fps_slider_stages_120_until_apply(self):
+        dialog = PictureDialog({"width": 1920, "height": 1080, "fps": 30, "bitrate_kbps": 4000})
+        self.assertEqual((dialog.fps.minimum(), dialog.fps.maximum(), dialog.fps.singleStep()), (5, 120, 1))
+        dialog.fps.setValue(120)
+        self.assertEqual(dialog.picture()["fps"], 120)
+        self.assertEqual(self.window._viewer_settings.stream_fps, 30)
+        dialog.close()
+
+    def test_codec_choices_follow_format_and_apply_state(self):
+        connection = self.window.connection
+        connection._codec_enabled = True
+        connection.phase = "active"
+        connection._peer_caps = {"encoders": {
+            "h264_nvenc": {"codec": "h264", "state": "available"},
+            "libx265": {"codec": "hevc", "state": "available"},
+        }, "decoders": {}}
+        self.window.service.codec_capabilities = {"encoders": {}, "decoders": {
+            "h264": {"codec": "h264", "state": "available"},
+            "hevc": {"codec": "hevc", "state": "available"},
+        }}
+        dialog = PictureDialog({"width": 1920, "height": 1080, "fps": 30, "bitrate_kbps": 4000},
+                               connection=connection)
+        dialog.codec.setCurrentIndex(dialog.codec.findData("hevc"))
+        self.assertEqual([dialog.encoder.itemData(i) for i in range(dialog.encoder.count())], ["auto", "libx265"])
+        self.assertEqual([dialog.decoder.itemData(i) for i in range(dialog.decoder.count())], ["auto", "hevc"])
+        dialog.encoder.setCurrentIndex(1)
+        dialog.decoder.setCurrentIndex(1)
+        self.assertEqual(dialog.picture()["codec"], "hevc")
+        self.assertEqual(dialog.picture()["encoder"], "libx265")
+        connection.phase = "validating"
+        connection.changed.emit()
+        self.assertFalse(dialog.apply_button.isEnabled())
+        dialog.close()
+        dialog.deleteLater()
+
+    def test_overlay_uses_measured_units_expiry_and_shared_persisted_toggle(self):
+        from frontend.desktop.service import SessionStats
+        self.window._session_connected(ViewerSettings(control_enabled=True))
+        stream = self.window._stream_window
+        stream.stats_button.setChecked(True)
+        self.assertTrue(stream.preview.stats_visible)
+        self.assertTrue(self.window._viewer_settings.stats_visible)
+        stats = SessionStats(fps=119.5, bitrate_kbps=8000, extra={
+            "sampled_at": time.monotonic(), "rtt_sampled_at": time.monotonic(),
+            "host_sampled_at": time.monotonic(), "rtt_ms": 12, "decode_ms": 3,
+            "encoder": "libx264", "decoder": "h264",
+        })
+        text = "\n".join(self.window._stats_lines(stats))
+        for value in ("119.5", "8.00 Mbps", "12.0 ms", "3.0 ms", "libx264", "丢包 --"):
+            self.assertIn(value, text)
+        stats.extra = {}
+        self.assertNotIn("119.5", "\n".join(self.window._stats_lines(stats)))
+        self.window._toggle_stats_overlay(False)
+        self.assertFalse(stream.stats_button.isChecked())
+        self.assertFalse(stream.preview.stats_visible)
+
+    def test_disconnect_replaces_connected_notice(self):
+        self.window.notice_bar.show_message("桌面已连接", "info")
+        self.window.connection.phase = "stopping"
+        self.window._connection_changed()
+        self.assertEqual(self.window.notice_bar._message, "正在断开连接…")
+        self.window.connection.phase = "idle"
+        self.window._connection_changed()
+        self.assertEqual(self.window.notice_bar._message, "桌面已断开")
 
     def test_removed_switches_and_manual_host_entry_are_absent(self):
         self.assertFalse(hasattr(self.window.settings_page, "discovery_row"))

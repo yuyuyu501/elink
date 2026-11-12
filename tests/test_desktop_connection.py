@@ -183,6 +183,54 @@ class ConnectionTests(unittest.TestCase):
         self.assertTrue(self.host.server.isListening())
         self.connect(False)
 
+    def test_either_side_and_simultaneous_close_are_normal_and_reconnectable(self):
+        from frontend.desktop.paths import error_dir
+        reports = set(error_dir().glob("*.txt"))
+        host_errors = []
+        self.host.error.connect(host_errors.append)
+        for initiator in ("host", "viewer", "both"):
+            self.connect()
+            session_id = self.viewer._session_id
+            self.assertTrue(session_id)
+            self.assertEqual(session_id, self.host._session_id)
+            if initiator in ("viewer", "both"):
+                self.viewer.disconnect()
+            if initiator in ("host", "both"):
+                self.host.disconnect()
+            # Late media errors during an acknowledged shutdown are expected.
+            for connection in (self.viewer, self.host):
+                if connection.phase == "stopping":
+                    connection._service_state("error", "closed")
+            wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+            self.assertFalse(self.viewer_media.running or self.host_media.running)
+        self.assertFalse(self.errors or host_errors)
+        self.assertEqual(set(error_dir().glob("*.txt")), reports)
+
+    def test_cancel_while_connecting_or_updating_does_not_restart_media(self):
+        from frontend.desktop.paths import error_dir
+        reports = set(error_dir().glob("*.txt"))
+        self.viewer.connect_peer(self.peer, ViewerSettings(), True)
+        self.viewer.disconnect()
+        wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+        self.connect()
+        self.viewer.configure({"width": 1280, "height": 720, "fps": 120, "bitrate_kbps": 6500})
+        self.viewer.disconnect()
+        wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+        starts = len(self.host_media.starts)
+        for _ in range(5):
+            APP.processEvents()
+        self.assertEqual(len(self.host_media.starts), starts)
+        self.assertEqual(set(error_dir().glob("*.txt")), reports)
+        self.assertFalse(self.errors)
+
+    def test_unexpected_socket_loss_is_reported_and_old_session_messages_are_ignored(self):
+        self.connect()
+        self.viewer._message({"kind": "bye", "session": "old-session"})
+        self.assertEqual(self.viewer.phase, "active")
+        self.viewer.socket.abort()
+        wait_until(lambda: self.host.phase == self.viewer.phase == "idle")
+        self.assertTrue(self.viewer.fault_id or self.host.fault_id)
+
     def test_wrong_target_is_rejected_without_starting_media(self):
         self.viewer.connect_peer({**self.peer, "id": "wrong"}, ViewerSettings(), True)
         wait_until(lambda: bool(self.errors))
@@ -270,6 +318,12 @@ class SettingsAndTransportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 picture_settings({**picture, **update})
 
+    def test_picture_accepts_120_fps_and_rejects_out_of_range(self):
+        picture = {"width": 1920, "height": 1080, "fps": 120, "bitrate_kbps": 4000}
+        self.assertEqual(picture_settings(picture)["fps"], 120)
+        for value in (4, 121, float("inf")):
+            with self.assertRaises(ValueError):
+                picture_settings({**picture, "fps": value})
     def test_srt_direction_is_independent_of_connection_mode(self):
         with patch("backend.transport.srt.subprocess.Popen") as process:
             sender = SrtTransport("srt://0.0.0.0:9000", mode="listener", direction="send")
@@ -295,6 +349,170 @@ class SettingsAndTransportTests(unittest.TestCase):
                              ["taskkill", "/PID", str(transport._proc.pid), "/T", "/F"])
 
 
+class CapableMedia(Media):
+    capabilities_changed = Signal()
+    codec_validated = Signal(int, str)
+
+    def __init__(self):
+        super().__init__()
+        self.codec_capabilities = {
+            "encoders": {name: {"codec": codec, "state": "available"} for name, codec in (
+                ("h264_nvenc", "h264"), ("libx264", "h264"), ("libx265", "hevc"), ("av1_nvenc", "av1"))},
+            "decoders": {name: {"codec": codec, "state": "available"} for name, codec in (
+                ("h264_qsv", "h264"), ("h264", "h264"), ("hevc", "hevc"), ("av1", "av1"))},
+        }
+        self.known_capabilities = self.codec_capabilities
+        self.validation_failure = None
+        self.validations = []
+        self.delay_validation = False
+
+    def refresh_codecs(self, _path="ffmpeg", *, refresh=False):
+        if self.codec_capabilities is None:
+            self.codec_capabilities = self.known_capabilities
+        QTimer.singleShot(0, self.capabilities_changed.emit)
+
+    def validate_codec(self, revision, kind, selection, picture, path):
+        self.validations.append((revision, kind, dict(selection), dict(picture)))
+        reason = "hardware unavailable" if self.validation_failure == (kind, selection[kind]) else ""
+        if not self.delay_validation:
+            QTimer.singleShot(0, lambda: self.codec_validated.emit(revision, reason))
+
+    def cancel_codec_validation(self, **_):
+        pass
+
+    def start_viewer(self, settings):
+        if self.fail_next:
+            self.fail_next = False
+            self.running, self.mode = True, "viewer"
+            self.starts.append(settings)
+            QTimer.singleShot(0, lambda: self.state_changed.emit("error", "decoder failed after preflight"))
+        else:
+            super().start_viewer(settings)
+
+
+class CodecConnectionTests(unittest.TestCase):
+    connect = ConnectionTests.connect
+    tearDown = ConnectionTests.tearDown
+
+    def setUp(self):
+        with patch(f"{__name__}.Media", CapableMedia):
+            ConnectionTests.setUp(self)
+
+    def test_initial_capability_exchange_prefers_verified_hardware(self):
+        self.connect()
+        self.assertEqual(self.host_media.starts[0].encoder, "h264_nvenc")
+        self.assertEqual(self.viewer_media.starts[0].decoder, "h264_qsv")
+        self.assertEqual(self.host._selection, self.viewer._selection)
+        self.assertTrue(self.viewer._codec_enabled)
+
+    def test_explicit_format_and_backends_apply_then_save(self):
+        self.connect()
+        options = {"codec": "hevc", "encoder": "libx265", "decoder": "hevc"}
+        picture = {"width": 1280, "height": 720, "fps": 120, "bitrate_kbps": 6000}
+        self.viewer.configure({**picture, **options})
+        wait_until(lambda: len(self.applied) == 2 and self.host.phase == "active")
+        self.assertEqual(self.applied[-1], picture)
+        self.assertEqual(self.host_media.starts[-1].codec, "hevc")
+        self.assertEqual(self.viewer_media.starts[-1].decoder, "hevc")
+        self.assertEqual(self.viewer._viewer.codec_preferences["host"], options)
+
+    def test_auto_preflight_failure_tries_next_encoder(self):
+        self.host_media.validation_failure = ("encoder", "h264_nvenc")
+        self.connect()
+        self.assertEqual(self.host_media.starts[-1].encoder, "libx264")
+        self.assertFalse(self.errors)
+
+    def test_auto_preflight_failure_tries_next_decoder(self):
+        self.viewer_media.validation_failure = ("decoder", "h264_qsv")
+        self.connect()
+        self.assertEqual(self.viewer_media.starts[-1].decoder, "h264")
+        self.assertFalse(self.errors)
+
+    def test_decode_runtime_failure_tries_another_pair_and_reaches_first_frame(self):
+        self.viewer_media.fail_next = True
+        self.connect()
+        self.assertEqual(len(self.viewer_media.starts), 2)
+        self.assertEqual(self.viewer_media.starts[-1].decoder, "h264")
+        self.assertFalse(self.errors)
+
+    def test_explicit_failure_restores_previous_picture_and_preferences(self):
+        self.connect()
+        original = dict(self.applied[-1])
+        self.host_media.validation_failure = ("encoder", "libx265")
+        self.viewer.configure({**original, "codec": "hevc", "encoder": "libx265", "decoder": "hevc"})
+        wait_until(lambda: len(self.applied) == 2 and self.host.phase == "active")
+        self.assertEqual(self.applied[-1], original)
+        self.assertEqual(self.host_media.starts[-1].encoder, "h264_nvenc")
+        self.assertEqual(self.viewer._viewer.codec_preferences["host"]["encoder"], "auto")
+        self.assertTrue(self.errors)
+
+    def test_local_preflight_rejection_keeps_existing_host_and_selection(self):
+        self.connect()
+        original = dict(self.viewer._selection)
+        self.viewer_media.validation_failure = ("decoder", "hevc")
+        picture = dict(self.applied[-1], width=1280)
+        self.viewer.configure({**picture, "codec": "hevc", "encoder": "libx265", "decoder": "hevc"})
+        wait_until(lambda: self.viewer.phase == "active")
+        self.assertEqual(len(self.host_media.starts), 1)
+        self.assertEqual(self.viewer._selection, original)
+        self.assertEqual(self.viewer._picture, self.applied[-1])
+
+    def test_new_viewer_connects_to_old_host_without_codec_extension(self):
+        self.host.close()
+        self.host.deleteLater()
+        self.host_media = Media()
+        self.host = DesktopConnection(self.host_media, "host", HostSettings())
+        self.assertTrue(self.host.start(0))
+        self.peer["session_port"] = self.host.server.serverPort()
+        self.connect()
+        self.assertFalse(self.viewer._codec_enabled)
+        self.assertEqual(self.viewer_media.starts[-1].decoder, "h264")
+
+    def test_disconnect_during_host_validation_and_stale_callback(self):
+        self.connect()
+        self.host_media.delay_validation = True
+        self.viewer.configure(dict(self.applied[-1], codec="hevc", encoder="libx265", decoder="hevc"))
+        wait_until(lambda: self.host.phase == "validating")
+        revision = self.host._revision
+        self.viewer.disconnect()
+        wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+        self.host_media.codec_validated.emit(revision, "")
+        self.assertEqual(len(self.host_media.starts), 1)
+
+    def test_refresh_stops_media_then_exchanges_capabilities_and_restarts(self):
+        self.connect()
+        self.viewer.refresh_codecs()
+        wait_until(lambda: len(self.applied) == 2 and self.host.phase == "active")
+        self.assertEqual(len(self.host_media.starts), 2)
+        self.assertFalse(self.errors)
+
+    def test_stale_revision_and_late_validation_after_disconnect_are_ignored(self):
+        self.connect()
+        self.viewer._message({"kind": "ready", "session": self.viewer._session_id,
+                              "revision": self.viewer._revision - 1})
+        self.assertEqual(self.viewer.phase, "active")
+        self.viewer_media.delay_validation = True
+        self.viewer.configure(self.applied[-1])
+        self.assertEqual(self.viewer.phase, "validating")
+        revision = self.viewer._revision
+        self.viewer.disconnect()
+        wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+        self.viewer_media.codec_validated.emit(revision, "")
+        self.assertEqual(self.viewer.phase, "idle")
+        self.assertEqual(len(self.host_media.starts), 1)
+
+    def test_unavailable_saved_choice_waits_for_user_without_overwriting_it(self):
+        options = {"codec": "hevc", "encoder": "hevc_amf", "decoder": "hevc"}
+        settings = ViewerSettings(codec_preferences={"host": options})
+        self.viewer.connect_peer(self.peer, settings, True)
+        wait_until(lambda: self.viewer.phase == self.host.phase == "selection")
+        self.assertEqual(settings.codec_preferences["host"], options)
+        self.assertFalse(self.host_media.starts)
+        self.viewer.configure({**self.viewer._picture, "codec": "auto", "encoder": "auto", "decoder": "auto"})
+        wait_until(lambda: self.viewer.phase == self.host.phase == "active")
+        self.assertEqual(self.host_media.starts[-1].encoder, "h264_nvenc")
+
+
 class MediaIntegrationTests(unittest.TestCase):
     def test_srt_picture_update_and_reconnect_with_real_encoder_decoder(self):
         from types import SimpleNamespace
@@ -304,15 +522,17 @@ class MediaIntegrationTests(unittest.TestCase):
         reports = set(error_dir().glob("*.txt"))
 
         class Capture:
-            config = SimpleNamespace(fps=30)
-
-            def __init__(self):
+            def __init__(self, config):
                 self.index = 0
+                self.config = config
+                self.cursor_mode = self.cursor_applied_mode = "smart"
+                self.cursor_visible = True
 
             def open(self):
                 pass
 
             def read(self):
+                self.cursor_applied_mode = self.cursor_mode
                 frame = _synthetic_frame(self.index)
                 self.index += 1
                 return frame
@@ -324,6 +544,9 @@ class MediaIntegrationTests(unittest.TestCase):
         host = DesktopConnection(host_media, "media-host", HostSettings())
         viewer = DesktopConnection(viewer_media, "media-viewer", HostSettings())
         errors, applied = [], []
+        cursors, frame_pts = [], []
+        viewer_media.cursor_changed.connect(cursors.append)
+        viewer_media.frame_ready.connect(lambda frame: frame_pts.append(frame.pts))
         host.error.connect(errors.append)
         viewer.error.connect(errors.append)
         viewer.picture_applied.connect(applied.append)
@@ -358,7 +581,7 @@ class MediaIntegrationTests(unittest.TestCase):
                            for service in (host_media, viewer_media)],
                 "errors": errors,
             }
-        with patch("backend.bootstrap.build_capture", side_effect=lambda _: Capture()), patch(
+        with patch("backend.bootstrap.build_capture", side_effect=lambda config: Capture(config.capture)), patch(
             "frontend.desktop.service._display_region", return_value=(0, 0, 320, 240)
         ), patch.object(host_media, "_inject_remote_input",
                         side_effect=lambda event: injected.append(event) or True), patch.object(
@@ -369,6 +592,13 @@ class MediaIntegrationTests(unittest.TestCase):
                 wait_until(lambda: viewer.phase == "active" or bool(errors), timeout=25)
                 self.assertFalse(errors)
                 self.assertEqual(len(applied), 1)
+                viewer_media.set_mouse_mode("local")
+                wait_until(lambda: cursors and cursors[-1]["mode"] == "local")
+                boundary = cursors[-1]["pts"]
+                wait_until(lambda: frame_pts and frame_pts[-1] >= boundary)
+                self.assertLess(frame_pts[-1] - boundary, 90000)
+                wait_until(lambda: "rtt_ms" in viewer_media.stats.extra)
+                self.assertGreaterEqual(viewer_media.stats.extra["rtt_ms"], 0)
                 from backend.control_channel.protocol import EventType, InputEvent
                 from backend.control_channel.base import ChannelState
                 wait_until(lambda: viewer_media._control is not None
@@ -399,6 +629,42 @@ class MediaIntegrationTests(unittest.TestCase):
                 self.assertFalse(viewer_media.running)
                 viewer.connect_peer(peer, settings, False)
                 wait_until(lambda: len(applied) == 3 or bool(errors), timeout=25)
+                self.assertFalse(errors)
+                for initiator in ("host", "both"):
+                    viewer.configure({"width": 320, "height": 240, "fps": 120, "bitrate_kbps": 1000})
+                    count = len(applied)
+                    wait_until(lambda: len(applied) > count or bool(errors), timeout=25, detail=state)
+                    self.assertFalse(errors)
+                    self.assertEqual(host_media._pipeline.capture.config.fps, 120)
+                    if initiator == "both":
+                        viewer.disconnect()
+                    host.disconnect()
+                    wait_until(lambda: host.phase == viewer.phase == "idle", timeout=15, detail=state)
+                    viewer.connect_peer(peer, settings, False)
+                    count = len(applied)
+                    wait_until(lambda: len(applied) > count or bool(errors), timeout=25, detail=state)
+                    self.assertFalse(errors)
+                for codec in ("h264", "hevc", "av1"):
+                    encoders = [n for n, v in host_media.codec_capabilities["encoders"].items()
+                                if v["codec"] == codec]
+                    decoders = [n for n, v in viewer_media.codec_capabilities["decoders"].items()
+                                if v["codec"] == codec]
+                    if not encoders or not decoders:
+                        print(f"No runtime pair for {codec}; transport fixture still covers this format.")
+                        continue
+                    count = len(applied)
+                    viewer.configure({
+                        "width": 320, "height": 240, "fps": 120, "bitrate_kbps": 1000,
+                        "codec": codec, "encoder": encoders[0], "decoder": decoders[0],
+                    })
+                    wait_until(lambda: len(applied) > count or bool(errors), timeout=25, detail=state)
+                    self.assertFalse(errors)
+                    self.assertEqual(host_media._pipeline.stream.codec.value, codec)
+                    self.assertEqual(viewer_media._pipeline.stream.codec.value, codec)
+                    self.assertEqual(viewer_media._pipeline.stats.extra["decoder"], decoders[0])
+                count = len(applied)
+                viewer.refresh_codecs()
+                wait_until(lambda: len(applied) > count or bool(errors), timeout=25, detail=state)
                 self.assertFalse(errors)
             finally:
                 viewer.close()

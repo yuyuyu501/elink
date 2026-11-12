@@ -1,4 +1,4 @@
-"""Linux VA-API 硬件解码（HEVC，``-c:v hevc_vaapi``）。
+"""Linux VA-API 硬件解码（HEVC 原生解码器配合 ``-hwaccel vaapi``）。
 
 显存帧需显式 ``hwdownload`` 才能进入 ``Frame``（内存域转换不隐式发生）。
 """
@@ -14,7 +14,7 @@ class HevcVaapiDecoder(FfmpegDecoderBase):
     codec = CodecId.H265.value
     hardware = True
 
-    ffmpeg_decoder = "hevc_vaapi"
+    ffmpeg_decoder = "hevc"
     input_format = "hevc"
     input_args = ("-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
     video_filters = ("hwdownload", "format=bgra")

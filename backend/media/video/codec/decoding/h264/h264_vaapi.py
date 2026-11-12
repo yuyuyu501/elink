@@ -1,4 +1,4 @@
-"""Linux VA-API 硬件解码（``-c:v h264_vaapi``）。
+"""Linux VA-API 硬件解码（原生解码器配合 ``-hwaccel vaapi``）。
 
 VA-API 解出的帧在显存里，必须显式 ``hwdownload`` 到 CPU 才能装进 ``Frame``；
 这一步不能隐式发生（见 PROJECT_STRUCTURE 的「硬件帧内存域」约定）。
@@ -15,7 +15,7 @@ class H264VaapiDecoder(FfmpegDecoderBase):
     codec = CodecId.H264.value
     hardware = True
 
-    ffmpeg_decoder = "h264_vaapi"
+    ffmpeg_decoder = "h264"
     input_format = "h264"
     input_args = ("-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
     video_filters = ("hwdownload", "format=bgra")

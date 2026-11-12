@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
 from .. import icons
 from ..service import HostSettings, SessionStats
 from .preview import PreviewFrame
+from .stream_window import fps_control
 from .widgets import (
     ActionTile,
     Card,
@@ -427,11 +429,9 @@ class HostPage(QWidget):
         self.resolution = QComboBox()
         self.resolution.addItems(RESOLUTIONS)
         self.resolution.setCurrentText("1920×1080")
-        self.fps = QDoubleSpinBox()
-        self.fps.setRange(5, 60)
-        self.fps.setSingleStep(5)
+        self.fps = QSlider(Qt.Orientation.Horizontal)
+        fps = fps_control(self.fps)
         self.fps.setValue(30)
-        self.fps.setSuffix(" fps")
         self.bitrate = QDoubleSpinBox()
         self.bitrate.setDecimals(3)
         self.bitrate.setRange(0.3, 20)
@@ -457,7 +457,7 @@ class HostPage(QWidget):
 
         grid.addWidget(self.display_field, 0, 0, 1, 2)
         grid.addWidget(FormField("输出分辨率", self.resolution), 1, 0)
-        grid.addWidget(FormField("帧率", self.fps), 1, 1)
+        grid.addWidget(FormField("帧率", fps), 1, 1)
         grid.addWidget(FormField("码率（Mbps）", self.bitrate), 2, 0)
         grid.addWidget(FormField("编码器", self.encoder), 2, 1)
         grid.addWidget(FormField("编码预设", self.preset), 3, 0)

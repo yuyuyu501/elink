@@ -18,7 +18,11 @@ class H264NvencEncoder(FfmpegEncoderBase):
     ffmpeg_encoder = "h264_nvenc"
     preset_supported = False
     #: NVENC 的低延迟开关；preset 走 p1~p7，这里用质量参数保持通用
-    private_params = (("-tune", "ll"), ("-rc", "cbr"))
+    private_params = (("-preset", "p1"), ("-tune", "ull"), ("-rc", "cbr"),
+                      ("-rc-lookahead", "0"), ("-zerolatency", "1"))
+
+    def video_args(self) -> list[str]:
+        return [*super().video_args(), "-bufsize", f"{max(1, self.config.bitrate_kbps // 10)}k"]
 
     @classmethod
     def available(cls, ffmpeg_path: str = "ffmpeg") -> bool:

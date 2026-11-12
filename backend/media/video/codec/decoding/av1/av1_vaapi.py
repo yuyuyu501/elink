@@ -1,4 +1,4 @@
-"""Linux VA-API 硬件解码（AV1，``-c:v av1_vaapi``）。"""
+"""Linux VA-API 硬件解码（AV1 原生解码器配合 ``-hwaccel vaapi``）。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ class Av1VaapiDecoder(FfmpegDecoderBase):
     codec = CodecId.AV1.value
     hardware = True
 
-    ffmpeg_decoder = "av1_vaapi"
+    ffmpeg_decoder = "av1"
     input_format = "obu"
     input_args = ("-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
     video_filters = ("hwdownload", "format=bgra")

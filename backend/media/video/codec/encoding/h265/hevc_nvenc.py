@@ -13,7 +13,8 @@ class HevcNvencEncoder(FfmpegEncoderBase):
 
     ffmpeg_encoder = "hevc_nvenc"
     preset_supported = False
-    private_params = (("-tune", "ll"), ("-rc", "cbr"))
+    private_params = (("-preset", "p1"), ("-tune", "ull"), ("-rc", "cbr"),
+                      ("-rc-lookahead", "0"), ("-zerolatency", "1"))
 
     @classmethod
     def available(cls, ffmpeg_path: str = "ffmpeg") -> bool:

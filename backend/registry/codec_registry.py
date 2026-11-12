@@ -6,7 +6,7 @@
 三条规则：
 
 1. **必须可探测**：每条登记带 ``available`` 回调，不可用的后端不参与选型；
-2. **可回退**：指定的后端不可用时退回同编码的软件后端，并记一条 warning；
+2. **明确选择**：指定后端不可用时报告错误，自动选择由能力协商统一处理；
 3. **只登记能导入的**：缺可选依赖的后端在构建注册表时跳过，而不是启动即崩。
 """
 
@@ -91,6 +91,12 @@ class CodecRegistry:
     def decoder_names(self, codec: str) -> list[str]:
         return [entry.name for entry in self._usable(self._decoders, codec)]
 
+    def candidates(self, kind: str):
+        table = self._encoders if kind == "encoders" else self._decoders
+        for codec, entries in table.items():
+            for entry in sorted(entries, key=lambda item: -item.priority):
+                yield codec, entry
+
     # ---- 创建 ----
     def create_encoder(
         self,
@@ -142,9 +148,7 @@ class CodecRegistry:
             if entry.name == name:
                 return entry
 
-        fallback = usable[0]
-        logger.warning("%s %s 不可用，回退到 %s", codec, name, fallback.name)
-        return fallback
+        raise CodecNotFoundError(f"{codec} {kind}不可用: {name}")
 
 
 def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
@@ -162,6 +166,11 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
         return lambda: probe.has_encoder(name)
 
     def decoder_availability(name: str) -> Availability:
+        if name.endswith("_vaapi"):
+            codec = name.removesuffix("_vaapi")
+            return lambda: probe.has_decoder(codec) and "vaapi" in probe.hwaccels
+        if name == "av1":
+            return lambda: any(probe.has_decoder(n) for n in ("libdav1d", "libaom-av1", "av1"))
         return lambda: probe.has_decoder(name)
 
     encoder_specs = [
@@ -233,15 +242,8 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
             codec,
             name,
             lambda stream, config, _cls=cls: _cls(stream, replace(config, ffmpeg_path=ffmpeg_path)),
-            available=decoder_availability(_decoder_probe_name(codec, name)),
+            available=decoder_availability(name),
             priority=_PRIORITY_HARDWARE if is_hardware else _PRIORITY_SOFTWARE,
         )
 
     return registry
-
-
-def _decoder_probe_name(codec: str, name: str) -> str:
-    """ffmpeg 的解码器名与文件名基本同名，HEVC 的解码器名映射为 ``hevc``。"""
-    if codec == CodecId.H265.value and name == "hevc":
-        return "hevc"
-    return name

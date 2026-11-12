@@ -22,13 +22,13 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Qt
 
 from backend import clipboard as clipboard_backend
 from backend.bootstrap import build_receive_resources, build_send_resources, prepare_environment
@@ -37,17 +37,20 @@ from backend.control_channel.protocol import ControlCommand, EventType, InputEve
 from backend.control_channel.base import ChannelState
 from backend.control_channel.tcp import TcpControlChannel
 from backend.input_injection.session import InputSession
+from backend.input_capture.mouse import mouse_mode
 from backend.errors.network import TransportClosedError
 from backend.media.device.display import DisplayInfo, list_displays
 from backend.media.device.enumerate import DeviceKind, enumerate_devices
 from backend.media.frame import Frame
+from backend.media.video.codec.probe import probe_video_codecs, public_capabilities, verify_backend
 from backend.media.video.filter.pixel_format import BaseVideoFilter
 from backend.media.video.filter.scaler import Scaler
+from backend.logging.logger import get_logger
 
 from .paths import resource_dir
 from .error_report import remember, save_error
 
-MAX_PREVIEW_FPS = 30.0
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -60,6 +63,7 @@ class HostSettings:
     fps: float = 30.0
     bitrate_kbps: int = 4000
     encoder: str = "libx264"
+    codec: str = "h264"
     preset: str = "veryfast"
     transport: str = "srt"  # srt / file
     srt_url: str = "srt://0.0.0.0:9000"
@@ -83,11 +87,16 @@ class ViewerSettings:
     control_host: str = "127.0.0.1"
     control_port: int = 7000
     control_enabled: bool = False
-    mouse_mode: str = "absolute"
+    mouse_mode: str = "smart"
+    mouse_sensitivity: float = 0.0
+    stats_visible: bool = False
     stream_width: int = 1920
     stream_height: int = 1080
     stream_fps: float = 30.0
     stream_bitrate_kbps: int = 4000
+    stream_codec: str = "h264"
+    decoder: str = "auto"
+    codec_preferences: dict = field(default_factory=dict)
     clipboard_enabled: bool = True
     gamepad_enabled: bool = True
     scale_percent: int = 100
@@ -114,22 +123,17 @@ class SessionStats:
 
 
 class _PreviewTap(BaseVideoFilter):
-    """把管线里的帧转交给界面（限速，避免信号队列堆积）。"""
+    """Forward to the latest-frame mailbox without a separate frame-rate cap."""
 
     name = "preview_tap"
 
-    def __init__(self, emit: Callable[[Frame], None], max_fps: float = MAX_PREVIEW_FPS) -> None:
+    def __init__(self, emit: Callable[[Frame], None]) -> None:
         self._emit = emit
-        self._interval = 1.0 / max(1.0, max_fps)
-        self._last = 0.0
         self.frames = 0
 
     def process(self, frame: Frame) -> Frame:
         self.frames += 1
-        now = time.monotonic()
-        if now - self._last >= self._interval:
-            self._last = now
-            self._emit(frame)
+        self._emit(frame)
         return frame
 
 
@@ -138,37 +142,66 @@ class _QtRenderer:
 
     name = "qt_preview"
 
-    def __init__(self, emit: Callable[[Frame], None], upscaler=None) -> None:
+    def __init__(self, emit: Callable[[Frame], None], upscaler=None, *, upscaler_factory=None) -> None:
         self._emit = emit
         self._upscaler = upscaler
+        self._upscaler_factory = upscaler_factory
         self.frames = 0
-        self._interval = 1.0 / MAX_PREVIEW_FPS
-        self._last = 0.0
+        self._condition = threading.Condition()
+        self._pending = None
+        self._closed = False
+        self._worker = None
 
     def open(self) -> None:
-        pass
+        self._worker = threading.Thread(target=self._loop, name="preview-prepare", daemon=True)
+        self._worker.start()
 
     def render(self, frame: Frame) -> bool:
         self.frames += 1
-        now = time.monotonic()
-        if now - self._last >= self._interval:
-            self._last = now
+        with self._condition:
+            if not self._closed:
+                self._pending = frame
+                self._condition.notify()
+        return True
+
+    def _loop(self) -> None:
+        try:
+            if self._upscaler_factory is not None:
+                self._upscaler = self._upscaler_factory()
+            self._prepare_frames()
+        finally:
+            self._close_upscaler()
+
+    def _close_upscaler(self) -> None:
+        upscaler, self._upscaler = self._upscaler, None
+        if upscaler is not None:
+            try:
+                upscaler.close()
+            except Exception as exc:
+                logger.warning("超分辨率资源释放失败: %s", exc)
+
+    def _prepare_frames(self) -> None:
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: self._closed or self._pending is not None)
+                if self._closed:
+                    return
+                frame, self._pending = self._pending, None
             if self._upscaler is not None:
                 try:
                     frame = self._upscaler.upscale(frame)
                 except Exception as exc:
                     logger.warning("FSR 超分辨率失败，回退原帧: %s", exc)
-                    self._upscaler = None
+                    self._close_upscaler()
             self._emit(frame)
-        return True
 
     def close(self) -> None:
-        if self._upscaler is not None:
-            try:
-                self._upscaler.close()
-            except Exception:
-                pass
-            self._upscaler = None
+        with self._condition:
+            self._closed = True
+            self._pending = None
+            self._condition.notify()
+        if self._worker is not None:
+            self._worker.join(timeout=5)
 
 
 class ClipboardBridge:
@@ -235,6 +268,10 @@ class SessionService(QObject):
     devices_changed = Signal(list)        # list[dict]
     host_prepared = Signal()
     input_available = Signal(bool)
+    cursor_changed = Signal(object)
+    _frame_pending = Signal(int)
+    capabilities_changed = Signal()
+    codec_validated = Signal(int, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -265,7 +302,107 @@ class SessionService(QObject):
         self.failure_id = ""
         self.failure_message = ""
         self.error_context: dict = {}
+        self._frame_lock = threading.Lock()
+        self._frame_generation = 0
+        self._latest_frame = None
+        self._frame_notified = False
+        self._presented = 0
+        self._frame_pending.connect(self._deliver_frame, Qt.ConnectionType.QueuedConnection)
         self.log.connect(lambda message, level: remember(f"{level}: {message}"))
+        self.codec_capabilities: dict | None = None
+        self._capability_worker = None
+        self._capability_cancel = threading.Event()
+        self._validation_cancel = threading.Event()
+
+    def refresh_codecs(self, ffmpeg_path="ffmpeg", *, refresh=False):
+        if self._capability_worker is not None and self._capability_worker.is_alive():
+            return
+        if self.running and refresh:
+            self.log.emit("正在传输画面，断开后可重新检测编解码能力", "info")
+            return
+        self.codec_capabilities = None
+        self._capability_cancel = threading.Event()
+        cancel = self._capability_cancel
+        self.capabilities_changed.emit()
+
+        def run():
+            try:
+                snapshot = probe_video_codecs(ffmpeg_path, refresh=refresh, cancel=cancel)
+                if not cancel.is_set():
+                    self.codec_capabilities = public_capabilities(snapshot)
+            except Exception as exc:
+                self.codec_capabilities = {"encoders": {}, "decoders": {}}
+                self.log.emit(f"编解码检测失败：{exc}", "warn")
+            finally:
+                if not cancel.is_set():
+                    self.capabilities_changed.emit()
+        self._capability_worker = threading.Thread(target=run, name="codec-capabilities", daemon=True)
+        self._capability_worker.start()
+
+    def validate_codec(self, revision, kind, selection, picture, ffmpeg_path="ffmpeg"):
+        self._validation_cancel.set()
+        cancel = self._validation_cancel = threading.Event()
+
+        def run():
+            from backend.registry.codec_registry import build_default_registry
+            from backend.media.stream import CodecId, StreamInfo
+            from backend.config.schema import VideoEncodeConfig
+            try:
+                registry = build_default_registry(ffmpeg_path)
+                width, height = ((picture["width"], picture["height"]) if kind == "encoder" else (320, 240))
+                config = VideoEncodeConfig(
+                    codec=selection["codec"], encoder=selection["encoder"], decoder=selection["decoder"],
+                    ffmpeg_path=ffmpeg_path, bitrate_kbps=picture["bitrate_kbps"],
+                    preset="ultrafast", realtime=True, gop=max(1, round(picture["fps"] * 2)))
+                stream = StreamInfo(codec=CodecId(selection["codec"]), width=width, height=height,
+                                    framerate=picture["fps"])
+                create = registry.create_encoder if kind == "encoder" else registry.create_decoder
+                adapter = create(selection["codec"], selection[kind], stream, config)
+                reason = verify_backend(adapter, width=width, height=height, cancel=cancel)
+            except Exception as exc:
+                reason = str(exc)
+            if not cancel.is_set():
+                self.codec_validated.emit(revision, reason or "")
+        threading.Thread(target=run, name="codec-preflight", daemon=True).start()
+
+    def cancel_codec_validation(self, *, include_probe=False):
+        self._validation_cancel.set()
+        if include_probe:
+            self._capability_cancel.set()
+
+    def _clear_frames(self) -> None:
+        with self._frame_lock:
+            self._frame_generation += 1
+            self._latest_frame = None
+            self._frame_notified = False
+
+    def _frame_sink(self):
+        generation = self._frame_generation
+
+        def submit(frame):
+            with self._frame_lock:
+                if generation != self._frame_generation or self._stop.is_set():
+                    return
+                self._latest_frame = (frame, time.perf_counter())
+                if self._frame_notified:
+                    return
+                self._frame_notified = True
+            self._frame_pending.emit(generation)
+        return submit
+
+    def _deliver_frame(self, generation: int) -> None:
+        with self._frame_lock:
+            if generation != self._frame_generation:
+                return
+            latest, self._latest_frame = self._latest_frame, None
+            self._frame_notified = False
+        if latest is not None:
+            frame, entered = latest
+            self._stats.extra["delivery_ms"] = (time.perf_counter() - entered) * 1000
+            self.frame_ready.emit(frame)
+
+    def frame_presented(self) -> None:
+        self._presented += 1
 
     # ---- 查询 ----
     @property
@@ -331,6 +468,9 @@ class SessionService(QObject):
         self._host_live = settings
         self._begin("host")
         config, filters = _host_config(settings)
+        settings = replace(settings, width=config.encode.width or settings.width,
+                           height=config.encode.height or settings.height)
+        self._host_live = settings
         self._worker = threading.Thread(
             target=self._run_host,
             args=(config, filters, settings),
@@ -355,14 +495,21 @@ class SessionService(QObject):
         )
         self._worker.start()
 
+    def expect_stop(self) -> None:
+        self.set_input_focus(False)
+        self._stop.set()
+        self._clear_frames()
+
     def stop(self) -> None:
         self.set_input_focus(False)
+        self._clear_frames()
         if not self.running:
             self._stop_control()
             return
         self._stop.set()
-        if self._transport is not None:
-            self._transport.abort()
+        transport = self._transport
+        if transport is not None:
+            threading.Thread(target=transport.abort, name="media-stop", daemon=True).start()
         self.state_changed.emit("stopping", "正在停止…")
         pipeline = self._pipeline
         if pipeline is not None and hasattr(pipeline, "stop"):
@@ -379,6 +526,8 @@ class SessionService(QObject):
         self._input_error_id = ""
         self._mode = mode
         self._stop.clear()
+        self._clear_frames()
+        self._presented = 0
         self._stats = SessionStats()
         self._started_at = time.monotonic()
         self.state_changed.emit("running", "正在启动…")
@@ -426,6 +575,8 @@ class SessionService(QObject):
 
     def _stats_loop(self, source, *, is_host: bool) -> None:
         """每秒把管线统计搬到界面（读取失败不影响主流程）。"""
+        previous_time = time.monotonic()
+        previous_frames = previous_bytes = 0
         while not self._stop.wait(1.0):
             try:
                 stats = getattr(source, "stats", None)
@@ -435,17 +586,31 @@ class SessionService(QObject):
                     self._stats.frames_in = getattr(stats, "frames_captured", self._stats.frames_in)
                     self._stats.frames_out = getattr(stats, "frames_encoded", self._stats.frames_out)
                     self._stats.bytes_out = getattr(stats, "bytes_written", self._stats.bytes_out)
-                    self._stats.key_frames = getattr(stats, "key_frames", self._stats.key_frames)
-                    self._stats.fps = round(getattr(stats, "encoding_fps", 0.0), 1)
-                    self._stats.bitrate_kbps = round(getattr(stats, "bitrate_kbps", 0.0), 0)
+                    self._stats.key_frames = stats.keyframes
                 else:
                     self._stats.frames_in = getattr(stats, "packets_read", self._stats.frames_in)
                     self._stats.frames_out = getattr(stats, "frames_decoded", self._stats.frames_out)
-                    self._stats.key_frames = getattr(stats, "key_frames", self._stats.key_frames)
-                    self._stats.fps = round(getattr(stats, "decode_fps", 0.0), 1)
+                    self._stats.key_frames = stats.keyframes
+                    self._stats.bytes_out = stats.bytes_read
+                now = time.monotonic()
+                interval = max(0.001, now - previous_time)
+                frames = self._stats.frames_out if is_host else self._presented
+                self._stats.fps = (frames - previous_frames) / interval
+                self._stats.bitrate_kbps = (self._stats.bytes_out - previous_bytes) * 8 / interval / 1000
+                previous_time, previous_frames, previous_bytes = now, frames, self._stats.bytes_out
+                self._stats.extra["sampled_at"] = now
+                self._stats.extra["encoder" if is_host else "decoder"] = stats.extra.get("encoder" if is_host else "decoder", "--")
+                self._stats.extra["codec"] = source.stream.codec.value if source.stream else "--"
+                values = list(stats.extra.get("decode_output_ms", []))
+                if values:
+                    self._stats.extra["decode_ms"] = sum(values[-120:]) / len(values[-120:])
+                if is_host and self._control is not None and self._control.state == ChannelState.OPEN:
+                    self._control.send_command(ControlCommand("host_stats", {
+                        "encoder": stats.extra.get("encoder", "--"),
+                    }))
                 self._stats.media_seconds = round(getattr(stats, "media_seconds", 0.0), 2)
                 self._stats.elapsed_s = round(time.monotonic() - self._started_at, 1)
-                self.stats_changed.emit(self._stats)
+                self.stats_changed.emit(replace(self._stats, extra=dict(self._stats.extra)))
             except Exception:
                 continue
 
@@ -462,7 +627,7 @@ class SessionService(QObject):
             if self._stop.is_set():
                 return
 
-            tap = _PreviewTap(self.frame_ready.emit)
+            tap = _PreviewTap(self._frame_sink())
             pipeline.filters.extend([*filters, tap])
 
             self._start_control_server(settings)
@@ -509,32 +674,8 @@ class SessionService(QObject):
             if self._stop.is_set():
                 return
 
-            # 换成把帧交给界面的渲染器（原来的写图渲染器不再使用）
-            upscaler = None
-            if settings.sr_enabled:
-                from .upscale import FSR_OUTPUTS, FsrUpscaler, RtxUpscaler
-
-                output = FSR_OUTPUTS.get(settings.sr_output, (1920, 1080))
-                if settings.sr_mode == "rtx":
-                    try:
-                        if RtxUpscaler.available():
-                            upscaler = RtxUpscaler(output)
-                            self.log.emit(
-                                f"RTX VSR 超分辨率已开启（输出 {output[0]}×{output[1]}）", "info"
-                            )
-                        else:
-                            self.log.emit("RTX VSR 不可用（需要 NVIDIA RTX），尝试 FSR 1", "warn")
-                    except Exception as exc:
-                        self.log.emit(f"RTX VSR 不可用，尝试 FSR 1：{exc}", "warn")
-                if upscaler is None:
-                    try:
-                        upscaler = FsrUpscaler(output)
-                        self.log.emit(
-                            f"FSR 1 超分辨率已开启（输出 {output[0]}×{output[1]}）", "info"
-                        )
-                    except Exception as exc:
-                        self.log.emit(f"超分辨率不可用，回退原帧：{exc}", "warn")
-            pipeline.renderer = _QtRenderer(self.frame_ready.emit, upscaler)
+            pipeline.renderer = _QtRenderer(
+                self._frame_sink(), upscaler_factory=lambda: self._create_upscaler(settings))
 
             self._start_control_client(settings)
             if settings.control_enabled and settings.clipboard_enabled:
@@ -563,6 +704,29 @@ class SessionService(QObject):
                 runtime.close()
             self._finish("接收已停止")
 
+    def _create_upscaler(self, settings: ViewerSettings):
+        if not settings.sr_enabled:
+            return None
+        from .upscale import FSR_OUTPUTS, FsrUpscaler, RtxUpscaler
+
+        output = FSR_OUTPUTS.get(settings.sr_output, (1920, 1080))
+        if settings.sr_mode == "rtx":
+            try:
+                if RtxUpscaler.available():
+                    upscaler = RtxUpscaler(output)
+                    self.log.emit(f"RTX VSR 超分辨率已开启（输出 {output[0]}×{output[1]}）", "info")
+                    return upscaler
+                self.log.emit("RTX VSR 不可用（需要 NVIDIA RTX），尝试 FSR 1", "warn")
+            except Exception as exc:
+                self.log.emit(f"RTX VSR 不可用，尝试 FSR 1：{exc}", "warn")
+        try:
+            upscaler = FsrUpscaler(output)
+            self.log.emit(f"FSR 1 超分辨率已开启（输出 {output[0]}×{output[1]}）", "info")
+            return upscaler
+        except Exception as exc:
+            self.log.emit(f"超分辨率不可用，回退原帧：{exc}", "warn")
+            return None
+
     # ---- 内部：控制通道 ----
     def _start_control_server(self, settings: HostSettings) -> None:
         def run() -> None:
@@ -577,8 +741,13 @@ class SessionService(QObject):
                 self.control_changed.emit(f"等待控制端连接 :{settings.control_port}")
                 channel.open()
                 self.control_changed.emit(f"控制端已接入 :{settings.control_port}")
-                while not self._stop.wait(0.2) and channel.state == ChannelState.OPEN:
+                while not self._stop.wait(0.05) and channel.state == ChannelState.OPEN:
                     try:
+                        capture = getattr(self._pipeline, "capture", None)
+                        channel.send_command(ControlCommand("cursor", getattr(capture, "cursor_state", {
+                            "mode": getattr(capture, "cursor_mode", "smart"),
+                            "visible": getattr(capture, "cursor_visible", None),
+                        })))
                         if self._input_session is not None:
                             self._input_session.watchdog()
                     except Exception as exc:
@@ -604,7 +773,8 @@ class SessionService(QObject):
                         settings.control_host, settings.control_port, timeout_s=2.0
                     )
                     self._control = channel
-                    channel.on_message(lambda message: self._on_remote_event(message, settings))
+                    channel.on_message(lambda message: self._on_remote_event(message, settings)
+                                       if self._control is channel and not self._stop.is_set() else None)
                     try:
                         channel.open()
                         break
@@ -617,6 +787,7 @@ class SessionService(QObject):
                     return
                 self.control_changed.emit(f"已连接控制通道 {settings.control_host}:{settings.control_port}")
                 self.input_available.emit(True)
+                channel.send_command(ControlCommand("mouse_mode", {"mode": mouse_mode(settings.mouse_mode)}))
                 while not self._stop.wait(0.5) and channel.state == ChannelState.OPEN:
                     with self._input_lock:
                         if self._input_captured:
@@ -717,6 +888,11 @@ class SessionService(QObject):
 
     def _on_remote_input(self, message, settings: HostSettings) -> None:
         if isinstance(message, ControlCommand):
+            if message.name == "mouse_mode":
+                capture = getattr(self._pipeline, "capture", None)
+                if capture is not None:
+                    capture.cursor_mode = mouse_mode(message.args.get("mode"))
+                return
             if (self._input_session is not None and isinstance(message.args, dict)
                     and (settings.allow_inject or not message.args.get("active"))):
                 try:
@@ -779,6 +955,13 @@ class SessionService(QObject):
             return
 
     def _on_remote_event(self, message, settings: ViewerSettings) -> None:
+        if isinstance(message, ControlCommand):
+            if message.name == "cursor":
+                self.cursor_changed.emit(message.args)
+            elif message.name == "host_stats":
+                self._stats.extra["encoder"] = str(message.args.get("encoder", "--"))
+                self._stats.extra["host_sampled_at"] = time.monotonic()
+            return
         if not isinstance(message, InputEvent):
             return
         if message.event_type is EventType.CLIPBOARD:
@@ -794,6 +977,12 @@ class SessionService(QObject):
                     pass
 
     # ---- 内部：手柄 ----
+    def set_mouse_mode(self, mode: str) -> None:
+        self.set_input_focus(False)
+        channel = self._control
+        if channel is not None and channel.state == ChannelState.OPEN:
+            channel.send_command(ControlCommand("mouse_mode", {"mode": mouse_mode(mode)}))
+
     def _start_gamepad_host(self) -> None:
         if not sys.platform.startswith("win") or self._pads is not None:
             return
@@ -897,7 +1086,7 @@ class SessionService(QObject):
         pipeline_stats = getattr(pipeline, "stats", None)
         extra = getattr(pipeline_stats, "extra", {}) if pipeline_stats is not None else {}
         stages = {}
-        for name in ("encode_ms", "decode_ms", "render_ms"):
+        for name in ("capture_ms", "queue_ms", "encode_ms", "decode_feed_ms", "decode_output_ms", "render_ms"):
             values = [float(value) for value in list(extra.get(name, [])) if value >= 0]
             if values:
                 stages[name.removesuffix("_ms")] = {
@@ -961,7 +1150,9 @@ def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
     config.capture.region = region
     config.capture.fps = settings.fps
     config.encode.encoder = settings.encoder
-    config.encode.preset = settings.preset
+    config.encode.codec = settings.codec
+    config.encode.preset = "ultrafast" if settings.transport == "srt" and settings.preset == "veryfast" else settings.preset
+    config.encode.realtime = settings.transport == "srt"
     config.encode.bitrate_kbps = settings.bitrate_kbps
     config.encode.ffmpeg_path = settings.ffmpeg_path
     config.encode.gop = max(1, int(settings.fps * 2))
@@ -975,6 +1166,7 @@ def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
     if region is not None:
         width = min(settings.width, region[2]) & ~1
         height = min(settings.height, region[3]) & ~1
+        config.encode.width, config.encode.height = width, height
         if (width, height) != (region[2], region[3]):
             filters.append(Scaler(width, height))
     return config, filters
@@ -987,6 +1179,14 @@ def _viewer_config(settings: ViewerSettings) -> AppConfig:
     config.transport.srt_mode = settings.srt_mode
     config.transport.path = settings.file_path
     config.encode.ffmpeg_path = settings.ffmpeg_path
+    config.encode.realtime = settings.transport == "srt"
+    config.encode.codec = settings.stream_codec
+    config.encode.decoder = settings.decoder
+    if settings.transport == "srt":
+        config.encode.width = settings.stream_width
+        config.encode.height = settings.stream_height
+        config.encode.framerate = settings.stream_fps
+    config.capture.fps = settings.stream_fps
     config.validate()
     return config
 

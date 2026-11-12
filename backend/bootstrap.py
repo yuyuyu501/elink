@@ -17,8 +17,9 @@ from backend.event.bus import EventBus
 from backend.logging.logger import get_logger
 from backend.media.container.demuxer import Demuxer
 from backend.media.container.mpegts import MpegTsDemuxer, MpegTsMuxer
-from backend.media.video.codec.probe import ProbeResult, probe_ffmpeg, resolve_encoder, resolve_ffmpeg_path
+from backend.media.video.codec.probe import ProbeResult, probe_ffmpeg, probe_video_codecs, resolve_ffmpeg_path
 from backend.media.video.render.image_sink import ImageSinkRenderer
+from backend.media.stream import CodecId
 from backend.pipeline.receive_pipeline import ReceivePipeline
 from backend.pipeline.video_pipeline import VideoPipeline
 from backend.registry.codec_registry import CodecRegistry, build_default_registry
@@ -67,12 +68,23 @@ def prepare_environment(config: AppConfig) -> tuple[ProbeResult, CodecRegistry]:
             detail=probe.error,
         )
 
-    encoder_name = resolve_encoder(config.encode.encoder, config.encode.ffmpeg_path)
-    if not probe.has_encoder(encoder_name):
+    encoder_name = config.encode.encoder
+    if config.mode != "receive" and encoder_name != "auto" and not probe.has_encoder(encoder_name):
         raise BootstrapError(
             f"ffmpeg 缺少编码器 {encoder_name}", detail=probe.describe()
         )
     config.encode.encoder = encoder_name
+    field = "decoder" if config.mode == "receive" else "encoder"
+    if getattr(config.encode, field) == "auto" and not (
+        config.mode == "receive" and config.transport.kind == "file"
+    ):
+        kind = "decoders" if field == "decoder" else "encoders"
+        snapshot = probe_video_codecs(config.encode.ffmpeg_path)
+        names = [name for name, item in snapshot[kind].items()
+                 if item["codec"] == config.encode.codec and item["state"] == "available"]
+        if not names:
+            raise BootstrapError(f"{config.encode.codec} 没有实际可用的{field}")
+        setattr(config.encode, field, names[0])
 
     return probe, build_default_registry(config.encode.ffmpeg_path)
 
@@ -137,6 +149,7 @@ def build_send_resources(
         ),
         muxer=muxer,
         encode_config=config.encode,
+        codec=CodecId(config.encode.codec),
         queue_size=config.pipeline.queue_size,
         bus=bus,
     )
@@ -191,11 +204,20 @@ def build_receive_resources(
     demuxer: Demuxer = MpegTsDemuxer(source)
     renderer = ImageSinkRenderer(config.frames_dir)
 
+    def decoder_factory(stream, encode_config):
+        name = config.encode.decoder
+        if name == "auto":
+            snapshot = probe_video_codecs(config.encode.ffmpeg_path)
+            names = [name for name, item in snapshot["decoders"].items()
+                     if item["codec"] == stream.codec.value and item["state"] == "available"]
+            if not names:
+                raise BootstrapError(f"{stream.codec.value} 没有实际可用的解码器")
+            name = names[0]
+        return registry.create_decoder(stream.codec.value, name, stream, encode_config)
+
     pipeline = ReceivePipeline(
         demuxer=demuxer,
-        decoder_factory=lambda stream, encode_config: registry.create_decoder(
-            stream.codec.value, stream.codec.value, stream, encode_config
-        ),
+        decoder_factory=decoder_factory,
         renderer=renderer,
         encode_config=config.encode,
         bus=bus,

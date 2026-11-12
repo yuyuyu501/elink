@@ -1,13 +1,5 @@
 """画面预览控件：把后端 ``Frame``（BGRA）画成等比缩放的视频区。
 
-要点：
-
-- ``Frame.data`` 是 BGRA，小端下正好对应 ``Format_ARGB32``，可以直接零转换构造
-  ``QImage``；但必须 ``copy()``，否则 Qt 会继续引用那块（可能已被复用的）内存；
-- 只在 resized/paint 时缩放，不做每帧双三次插值，30fps 下 CPU 占用可接受；
-- 没有画面时画一个带柔光的占位，而不是纯黑，避免让人以为程序卡住；
-- 左上角显示来源/状态，左下角显示分辨率与帧号。
-
 输入坐标与绘制共用画面矩形，会话收发通过回调交给服务层。
 """
 
@@ -31,6 +23,7 @@ from PySide6.QtWidgets import QApplication, QFrame, QSizePolicy, QVBoxLayout, QW
 
 from backend.control_channel.protocol import EventType, InputEvent
 from backend.input_capture.windows.raw_mouse import CursorConfinement, RawMouseInput
+from backend.input_capture.mouse import MouseSensitivity, mouse_mode, relative_mouse
 from backend.media.frame import Frame
 
 PLACEHOLDER_TITLE = "等待画面"
@@ -43,6 +36,7 @@ class PreviewWidget(QWidget):
 
     capture_changed = Signal(bool)
     input_error = Signal(object)
+    presented = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -53,7 +47,18 @@ class PreviewWidget(QWidget):
         self.setMouseTracking(True)
         self.captured = False
         self.control_enabled = False
-        self.mouse_mode = "absolute"
+        self.mouse_mode = "smart"
+        self._cursor_visible = None
+        self._relative = False
+        self._mouse_confirmed = True
+        self._sensitivity = MouseSensitivity()
+        self._absolute_last = self._absolute_position = None
+        self._software_position = None
+        self._warp_position = None
+        self._pixels = None
+        self._paint_pending = False
+        self._frame_pts = 0
+        self._cursor_boundary = None
         self._send_input = None
         self._set_input_focus = None
         self._keyboard_hook = None
@@ -84,8 +89,12 @@ class PreviewWidget(QWidget):
             frame.linesize or frame.width * 4,
             QImage.Format.Format_ARGB32,
         )
-        # QImage 不持有 payload 的所有权，必须深拷贝后再交给绘制线程
-        self._image = image.copy()
+        self._image = image
+        self._pixels = payload
+        self._frame_pts = frame.pts
+        if self._cursor_boundary is not None and frame.pts >= self._cursor_boundary:
+            self._cursor_boundary = None
+        self._paint_pending = True
         self._source_size = QSize(frame.width, frame.height)
         self._frames += 1
         self._info = f"{frame.width}×{frame.height} · 第 {self._frames} 帧"
@@ -94,6 +103,9 @@ class PreviewWidget(QWidget):
     def clear(self) -> None:
         self.release_input()
         self._image = None
+        self._pixels = None
+        self._paint_pending = False
+        self._cursor_boundary = None
         self._info = ""
         self._frames = 0
         self._source_size = QSize(0, 0)
@@ -146,8 +158,41 @@ class PreviewWidget(QWidget):
             self.release_input()
 
     def set_mouse_mode(self, mode: str) -> None:
+        mode = mouse_mode(mode)
+        if mode == self.mouse_mode:
+            return
         self.release_input()
-        self.mouse_mode = "relative" if mode == "relative" else "absolute"
+        self.mouse_mode = mode
+        self._relative = relative_mouse(mode, self._cursor_visible)
+
+    def set_sensitivity(self, value) -> None:
+        self._sensitivity = MouseSensitivity(value)
+        self._absolute_last = self._absolute_position = None
+
+    def request_mouse_mode(self) -> None:
+        self.release_input()
+        self._mouse_confirmed = False
+        self._cursor_boundary = None
+
+    def set_cursor_state(self, state: dict) -> None:
+        if state.get("mode") != self.mouse_mode:
+            return
+        visible = state.get("visible")
+        if isinstance(visible, bool):
+            self._cursor_visible = visible
+        if not self._mouse_confirmed:
+            boundary = state.get("pts")
+            if isinstance(boundary, int) and boundary > self._frame_pts:
+                self._cursor_boundary = boundary
+        self._mouse_confirmed = True
+        relative = relative_mouse(self.mouse_mode, self._cursor_visible)
+        if relative != self._relative:
+            captured = self.captured
+            self.release_input()
+            self._relative = relative
+            if captured:
+                self.capture_input()
+        self.update()
 
     def video_contains(self, position) -> bool:
         rect = self._target_rect()
@@ -165,7 +210,7 @@ class PreviewWidget(QWidget):
     def capture_input(self) -> bool:
         if self.captured:
             return True
-        if (not self.control_enabled or not self.has_frame or not self.window().isActiveWindow()
+        if (self._cursor_boundary is not None or not self._mouse_confirmed or not self.control_enabled or not self.has_frame or not self.window().isActiveWindow()
                 or QApplication.activeModalWidget() or QApplication.activePopupWidget()
                 or self._set_input_focus is None):
             return False
@@ -173,6 +218,10 @@ class PreviewWidget(QWidget):
         if not self._set_input_focus(True):
             return False
         self.captured = True
+        self._absolute_last = self._absolute_position = None
+        self._software_position = self.mapFromGlobal(QCursor.pos())
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self._input_timer.start()
         try:
             if sys.platform == "win32" and QApplication.platformName() == "windows":
                 from backend.input_capture.windows.send_input_hook import SendInputHookCapture
@@ -184,7 +233,7 @@ class PreviewWidget(QWidget):
                 except Exception as exc:
                     # Qt continues to supply ordinary keys if the shell hook is unavailable.
                     self.input_error.emit(exc)
-                if self.mouse_mode == "relative":
+                if self._relative:
                     self.grabMouse(QCursor(Qt.CursorShape.BlankCursor))
                     self._raw_mouse.start(int(self.winId()))
                     self._confine_cursor()
@@ -207,6 +256,10 @@ class PreviewWidget(QWidget):
         if QWidget.mouseGrabber() is self:
             self.releaseMouse()
         self.unsetCursor()
+        self._sensitivity.remainder = [0.0, 0.0]
+        self._absolute_last = self._absolute_position = None
+        self._software_position = self._warp_position = None
+        self.update()
         if was_captured:
             if self._set_input_focus is not None:
                 self._set_input_focus(False)
@@ -223,13 +276,29 @@ class PreviewWidget(QWidget):
                 self.release_input()
 
     def _absolute_motion(self, position) -> None:
+        position = QPointF(position)
+        if self._warp_position is not None and (position - self._warp_position).manhattanLength() < 1.5:
+            self._warp_position = None
+            return
+        if self._absolute_last is not None:
+            position = self._absolute_position + (position - self._absolute_last) * self._sensitivity.factor
+        rect = self._target_rect()
+        position = QPointF(max(rect.left(), min(rect.right(), position.x())),
+                          max(rect.top(), min(rect.bottom(), position.y())))
+        self._absolute_position = position
+        self._absolute_last = QPointF(position.toPoint()) if self._sensitivity.factor != 1 else position
+        self._software_position = position
+        if self._sensitivity.factor != 1 and QApplication.platformName() == "windows":
+            self._warp_position = QPointF(position.toPoint())
+            QCursor.setPos(self.mapToGlobal(position.toPoint()))
         point = self.normalized_position(position)
         if point is not None:
             self._send(InputEvent(EventType.MOUSE_MOVE, x=point[0], y=point[1],
                                   extra={"coordinates": "normalized"}))
+        self.update()
 
     def mouseMoveEvent(self, event) -> None:
-        if self.captured and self.mouse_mode == "absolute":
+        if self.captured and not self._relative:
             self._absolute_motion(event.position())
             if not self.video_contains(event.position()):
                 self.release_input()
@@ -249,14 +318,14 @@ class PreviewWidget(QWidget):
         button = {Qt.MouseButton.LeftButton: 1, Qt.MouseButton.RightButton: 2,
                   Qt.MouseButton.MiddleButton: 3}.get(event.button())
         if button is not None:
-            if self.mouse_mode == "absolute":
+            if not self._relative:
                 self._absolute_motion(event.position())
             self._send(InputEvent(EventType.MOUSE_BUTTON, button=button, pressed=pressed,
                                   extra={"positioned": True}))
 
     def wheelEvent(self, event) -> None:
         if self.captured and self.video_contains(event.position()):
-            if self.mouse_mode == "absolute":
+            if not self._relative:
                 self._absolute_motion(event.position())
             self._send(InputEvent(EventType.MOUSE_WHEEL, delta=event.angleDelta().y()))
         event.accept()
@@ -291,7 +360,7 @@ class PreviewWidget(QWidget):
         return super().event(event)
 
     def leaveEvent(self, event) -> None:
-        if self.mouse_mode == "absolute":
+        if not self._relative:
             self.release_input()
         super().leaveEvent(event)
 
@@ -300,7 +369,7 @@ class PreviewWidget(QWidget):
                                  (self.width(), self.height()))
 
     def resizeEvent(self, event) -> None:
-        if self.captured and self.mouse_mode == "relative":
+        if self.captured and self._relative:
             try:
                 self._confine_cursor()
             except Exception as exc:
@@ -309,12 +378,12 @@ class PreviewWidget(QWidget):
         super().resizeEvent(event)
 
     def nativeEvent(self, event_type, message):
-        if self.captured and self.mouse_mode == "relative":
+        if self.captured and self._relative:
             delta = self._raw_mouse.delta(message)
             if delta:
+                delta = self._sensitivity.relative(*delta)
                 self._send(InputEvent(EventType.MOUSE_MOVE,
-                                      x=max(-32767, min(32767, delta[0])),
-                                      y=max(-32767, min(32767, delta[1])),
+                                      x=delta[0], y=delta[1],
                                       extra={"coordinates": "relative"}))
         return super().nativeEvent(event_type, message)
 
@@ -354,6 +423,23 @@ class PreviewWidget(QWidget):
         painter.setClipPath(path)
         painter.drawImage(target, self._image)
         painter.restore()
+        if self._paint_pending:
+            self._paint_pending = False
+            self.presented.emit()
+        if self.captured and self.mouse_mode == "local" and not self._relative and self._software_position is not None:
+            pointer = QPainterPath()
+            point = self._software_position
+            pointer.moveTo(point)
+            pointer.lineTo(point + QPointF(0, 18))
+            pointer.lineTo(point + QPointF(5, 13))
+            pointer.lineTo(point + QPointF(10, 21))
+            pointer.lineTo(point + QPointF(13, 19))
+            pointer.lineTo(point + QPointF(8, 11))
+            pointer.lineTo(point + QPointF(15, 11))
+            pointer.closeSubpath()
+            painter.setPen(QPen(QColor("black"), 1))
+            painter.fillPath(pointer, QColor("white"))
+            painter.drawPath(pointer)
 
         self._paint_badges(painter, target, with_info=True)
         if self._stats_visible and self._stats_lines:

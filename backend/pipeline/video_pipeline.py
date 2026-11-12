@@ -39,6 +39,7 @@ class VideoPipelineStats:
     frames_dropped: int = 0
     frames_encoded: int = 0
     packets_written: int = 0
+    keyframes: int = 0
     bytes_written: int = 0
     encode_seconds: float = 0.0
     wall_seconds: float = 0.0
@@ -74,7 +75,7 @@ class VideoPipeline:
         self.muxer = muxer
         self.encode_config = encode_config or VideoEncodeConfig()
         self.codec = codec
-        self.queue_size = max(1, queue_size)
+        self.queue_size = 1 if self.encode_config.realtime else max(1, queue_size)
         self.filters = filters or []
         self.bus = bus
 
@@ -117,6 +118,7 @@ class VideoPipeline:
             self.stream = self._build_stream_info(frame)
             encoder = self.encoder_factory(self.stream, self.encode_config)
             encoder.open()
+            self.stats.extra["encoder"] = encoder.name
             self.muxer.open([self.stream])
 
             self._encode(encoder, frame)
@@ -131,6 +133,7 @@ class VideoPipeline:
             for packet in encoder.flush():
                 self.stats.bytes_written += self.muxer.write(packet)
                 self.stats.packets_written += 1
+                self.stats.keyframes += int(packet.keyframe)
         except Exception as exc:
             if encoder is not None and hasattr(encoder, "diagnostics"):
                 exc.process_diagnostics = encoder.diagnostics()
@@ -172,16 +175,26 @@ class VideoPipeline:
                 if max_frames and self.stats.frames_captured >= max_frames:
                     break
 
+                capture_begin = time.perf_counter()
                 frame = self.capture.read()
+                samples = self.stats.extra.setdefault("capture_ms", [])
+                samples.append((time.perf_counter() - capture_begin) * 1000)
+                if len(samples) > 4096:
+                    del samples[0]
                 # 采集节拍由本管线控制，因此按帧率栅格重新打时间戳：
                 # 把线程调度抖动写进 PTS 会让下游（封装/播放器）看到长短不一的
                 # 帧间隔，进而触发重复 DTS 之类的重排问题。
                 grid_pts = self._timebase.ticks(frame_index / fps)
                 frame = frame.with_data(bytes(frame.data), pts=grid_pts)
+                if hasattr(self.capture, "cursor_applied_mode"):
+                    self.capture.cursor_state = {
+                        "mode": self.capture.cursor_applied_mode,
+                        "visible": self.capture.cursor_visible, "pts": grid_pts,
+                    }
                 frame_index += 1
 
                 self.stats.frames_captured += 1
-                self._offer(frame)
+                self._offer((frame, time.perf_counter()))
 
                 next_deadline += interval
                 delay = next_deadline - time.perf_counter()
@@ -197,6 +210,13 @@ class VideoPipeline:
 
     def _offer(self, item: object) -> None:
         """入队；满队列时丢最旧的帧（保持时间戳单调递增）。"""
+        if not self.encode_config.realtime and item is _STOP:
+            while not self._stop_event.is_set():
+                try:
+                    self._queue.put(item, timeout=0.1)
+                    return
+                except queue.Full:
+                    pass
         while True:
             try:
                 self._queue.put_nowait(item)
@@ -222,8 +242,15 @@ class VideoPipeline:
         for packet in packets:
             self.stats.bytes_written += self.muxer.write(packet)
             self.stats.packets_written += 1
+            self.stats.keyframes += int(packet.keyframe)
 
     def _apply_filters(self, frame: Frame) -> Frame:
+        if isinstance(frame, tuple):
+            frame, entered = frame
+            samples = self.stats.extra.setdefault("queue_ms", [])
+            samples.append((time.perf_counter() - entered) * 1000)
+            if len(samples) > 4096:
+                del samples[0]
         for video_filter in self.filters:
             frame = video_filter.process(frame)
         return frame

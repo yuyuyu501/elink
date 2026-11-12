@@ -5,7 +5,7 @@ Python 侧不做 SRT 协议实现，而是借 ffmpeg 的 libsrt 收发字节流�
 - 发送：本项目封装的 TS 字节 -> ffmpeg stdin -> ``srt://``
 - 接收：``srt://`` -> ffmpeg stdout -> 本项目解封装
 
-关键是 ``-c copy``：ffmpeg 只搬字节、不重新编码，所以「封装/解封装/编解码」
+使用 ``-f data -map 0:0 -c copy`` 搬运原始字节，不识别或重新封装媒体，所以「封装/解封装/编解码」
 仍然全部在 ``media/`` 里，网络问题与抽象问题能分开定位——把
 ``TransportConfig.kind`` 从 ``file`` 换成 ``srt``，管线其余部分完全不变。
 """
@@ -17,6 +17,7 @@ import subprocess
 import threading
 from collections import deque
 from typing import BinaryIO
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from backend.errors.network import TransportError
 from backend.logging.logger import get_logger
@@ -30,8 +31,10 @@ def build_srt_url(url: str, *, mode: str, latency_ms: int) -> str:
     """在用户给的 URL 上补齐 SRT 选项（mode / latency）。"""
     if not url.startswith("srt://"):
         url = f"srt://{url}"
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}mode={mode}&latency={latency_ms}"
+    parts = urlsplit(url)
+    options = dict(parse_qsl(parts.query))
+    options.update(mode=mode, latency=str(latency_ms * 1000))
+    return urlunsplit(parts._replace(query=urlencode(options)))
 
 
 class SrtTransport:
@@ -70,25 +73,18 @@ class SrtTransport:
         self._diagnostics = {}
         self._stderr_tail.clear()
 
-        # ffmpeg 默认 probesize=5MB / analyzeduration=5s：短会话里它会先把整个
-        # 流攒齐才开始转发，表现为「结束时才收到数据」。我们的 TS 开头就有
-        # PAT/PMT，用最小探测窗口即可实时转发。
-        # 注意：不要用 -fflags nobuffer / -avioflags direct，实测会让 mpegts
-        # 解析拿不到完整数据（直接 0 输出）。
-        probe_flags = ["-probesize", "32768", "-analyzeduration", "100000"]
-
         if self.direction == "send":
             cmd = [
                 self.ffmpeg_path,
                 "-hide_banner",
                 "-loglevel", self.loglevel,
                 "-nostdin",
-                *probe_flags,
-                "-f", "mpegts",
+                "-f", "data",
                 "-i", "pipe:0",
+                "-map", "0:0",
                 "-c", "copy",
                 "-flush_packets", "1",
-                "-f", "mpegts",
+                "-f", "data",
                 self.url,
             ]
         else:
@@ -97,11 +93,12 @@ class SrtTransport:
                 "-hide_banner",
                 "-loglevel", self.loglevel,
                 "-nostdin",
-                *probe_flags,
+                "-f", "data",
                 "-i", self.url,
+                "-map", "0:0",
                 "-c", "copy",
                 "-flush_packets", "1",
-                "-f", "mpegts",
+                "-f", "data",
                 "pipe:1",
             ]
 

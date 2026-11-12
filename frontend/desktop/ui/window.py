@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         host_settings, viewer_settings = user_settings.load()
         self._host_settings = host_settings
         self._viewer_settings = viewer_settings
+        self._stats_overlay_enabled = viewer_settings.stats_visible
         self.connection = DesktopConnection(
             self.service, self.discovery.identity, host_settings, self
         )
@@ -291,6 +292,7 @@ class MainWindow(QMainWindow):
         self.connection.changed.connect(self._connection_changed)
         self.connection.connected.connect(self._session_connected)
         self.connection.picture_applied.connect(self._picture_applied)
+        self.connection.codec_selection_required.connect(self._edit_picture)
         self.connection.mode_applied.connect(self._mode_applied)
         self.connection.finished.connect(self._session_finished)
 
@@ -305,6 +307,7 @@ class MainWindow(QMainWindow):
             lambda: self._snapshot(self.host_page.preview_frame)
         )
         self.service.frame_ready.connect(self._on_frame)
+        self.service.cursor_changed.connect(self._on_cursor)
         self.service.state_changed.connect(self._on_state)
         self.service.log.connect(lambda message, level: self.log(
             message, level, fault_id=self.service.failure_id))
@@ -403,13 +406,11 @@ class MainWindow(QMainWindow):
                 state, "idle"
             )
             self._stream_window.set_status(text, stream_tone)
-        if state == "idle" and self.connection.phase not in {"updating", "preparing", "receiving"}:
+        if state == "idle" and self.connection.phase in {"idle", "stopping"}:
             if self.service.mode == "":
                 self.host_page.preview_frame.preview.set_info("")
             self._on_control("控制通道未连接")
             self._close_stream_window()
-            if self._stats_overlay_enabled:
-                self._toggle_stats_overlay(False)
         if state == "error":
             self.log(detail or "未知错误", "error",
                      fault_id=self.service.failure_id or self.connection.fault_id)
@@ -430,13 +431,22 @@ class MainWindow(QMainWindow):
         stats = stats if stats is not None else self._last_stats
         if stats is None:
             return ["等待会话统计…"]
-        return [
-            f"FPS   {stats.fps:5.1f}",
-            f"FRAME {stats.frames_in}/{stats.frames_out}",
-            f"KEY   {stats.key_frames}",
-            f"TIME  {stats.elapsed_s:.0f}s",
-            f"MEDIA {stats.media_seconds:.1f}s",
-        ]
+        now = time.monotonic()
+        extra = stats.extra
+        fresh = now - extra.get("sampled_at", 0) < 3
+        fps = f"{stats.fps:.1f}" if fresh else "--"
+        bitrate = f"{stats.bitrate_kbps / 1000:.2f}" if fresh else "--"
+        rtt = f"{extra['rtt_ms']:.1f}" if now - extra.get("rtt_sampled_at", 0) < 3 else "--"
+        decode = f"{extra['decode_ms']:.1f}" if fresh and "decode_ms" in extra else "--"
+        encoder = extra.get("encoder", "--") if now - extra.get("host_sampled_at", 0) < 3 else "--"
+        decoder = extra.get("decoder", "--") if fresh else "--"
+        codec = {"h264": "H.264", "hevc": "H.265", "av1": "AV1"}.get(extra.get("codec"), "--")
+        return [f"FPS {fps}   接收 {bitrate} Mbps", f"RTT {rtt} ms   解码 {decode} ms",
+                f"{codec} · 编码 {encoder}   解码 {decoder}", "丢包 --"]
+
+    def _on_cursor(self, state) -> None:
+        if self._stream_window is not None:
+            self._stream_window.preview.set_cursor_state(state)
 
     def _update_stats_overlay(self) -> None:
         lines = self._stats_lines()
@@ -461,6 +471,7 @@ class MainWindow(QMainWindow):
         window.preference_changed.connect(self._viewer_preference)
         window.preview.bind_input(self.service.send_input, self.service.set_input_focus)
         window.preview.input_error.connect(self.service._input_failure)
+        window.preview.presented.connect(self.service.frame_presented)
         window.apply_settings(self._viewer_settings)
         window.closed.connect(self._on_stream_closed)
         self._stream_window = window
@@ -483,6 +494,8 @@ class MainWindow(QMainWindow):
 
     def _toggle_stats_overlay(self, enabled: bool) -> None:
         self._stats_overlay_enabled = bool(enabled)
+        self._viewer_settings.stats_visible = self._stats_overlay_enabled
+        self._persist_ui()
         if self._stream_window is not None:
             self._stream_window.set_stats_visible(self._stats_overlay_enabled)
         if self._stats_overlay_enabled:
@@ -576,7 +589,7 @@ class MainWindow(QMainWindow):
         if self._stream_window:
             self._stream_window.set_session_active(phase == "active")
             self._stream_window.set_status(
-                "已连接" if phase == "active" else "调整中" if phase == "updating" else "连接中",
+                "已连接" if phase == "active" else "调整中" if phase in {"updating", "validating", "negotiating"} else "连接中",
                 "ok" if phase == "active" else "busy",
             )
             if phase == "updating":
@@ -585,6 +598,9 @@ class MainWindow(QMainWindow):
                 self._close_stream_window()
         if phase in {"connecting", "preparing", "receiving", "updating"}:
             self.notice_bar.show_message("正在调整画面…" if phase == "updating" else "正在建立桌面连接…", "info")
+        elif (phase in {"stopping", "idle"} and not self.connection.fault_id
+              and (phase == "stopping" or self.notice_bar._message in {"桌面已连接", "正在断开连接…"})):
+            self.notice_bar.show_message("正在断开连接…" if phase == "stopping" else "桌面已断开", "info")
         self._sync_discovery_hosting()
 
     def _session_connected(self, settings: ViewerSettings) -> None:
@@ -592,6 +608,7 @@ class MainWindow(QMainWindow):
         self._active_mode = "viewer"
         self._open_stream_window()
         self._stream_window.apply_settings(settings)
+        self._stream_window.preview.request_mouse_mode()
         self._show_page("devices")
 
     def _session_finished(self) -> None:
@@ -625,7 +642,7 @@ class MainWindow(QMainWindow):
     def _viewer_preference(self, name: str, value) -> None:
         if self._stream_window is not None:
             self._stream_window.release_input()
-        if name not in {"mouse_mode", "clipboard_enabled", "gamepad_enabled",
+        if name not in {"mouse_mode", "mouse_sensitivity", "clipboard_enabled", "gamepad_enabled",
                         "sr_enabled", "sr_mode", "sr_output"}:
             return
         setattr(self._viewer_settings, name, value)
@@ -640,6 +657,10 @@ class MainWindow(QMainWindow):
             self._stream_window.session_controls.setEnabled(False)
         if self._stream_window is not None:
             self._stream_window.apply_settings(self._viewer_settings)
+        if name == "mouse_mode":
+            if self._stream_window is not None:
+                self._stream_window.preview.request_mouse_mode()
+            self.service.set_mouse_mode(value)
         self._persist_ui()
 
     def _picture_applied(self, picture: dict) -> None:
@@ -649,13 +670,17 @@ class MainWindow(QMainWindow):
         self.notice_bar.show_message("桌面已连接", "info")
 
     def _edit_picture(self) -> None:
-        if self.connection.role != "viewer" or self.connection.phase != "active":
+        if self.connection.role != "viewer" or self.connection.phase not in {"active", "selection"}:
             return
         self._release_viewer_input()
-        dialog = PictureDialog(saved_picture(self._viewer_settings), self._stream_window or self)
+        dialog = PictureDialog(saved_picture(self._viewer_settings), self._stream_window or self,
+                               connection=self.connection)
         accepted = dialog.exec()
         if accepted:
             self.connection.configure(dialog.picture())
+        elif self.connection.phase == "selection":
+            self.connection.disconnect()
+        dialog.deleteLater()
 
     # ---- 设置 / 托盘 / 发现开关 ----
     def _apply_ui_settings(self) -> None:
@@ -854,7 +879,7 @@ class MainWindow(QMainWindow):
         target = f"{host.width}×{host.height}"
         if target in RESOLUTIONS:
             page.resolution.setCurrentText(target)
-        page.fps.setValue(host.fps)
+        page.fps.setValue(round(host.fps))
         page.bitrate.setValue(host.bitrate_kbps / 1000)
         if host.encoder in ENCODERS:
             page.encoder.setCurrentIndex(ENCODERS.index(host.encoder))
@@ -937,11 +962,10 @@ class MainWindow(QMainWindow):
                 )
             return
         self.connection.close()
-        if self.service.running:
-            self.service.stop()
-            deadline = time.monotonic() + 3.0
-            while self.service.running and time.monotonic() < deadline:
-                time.sleep(0.1)
+        deadline = time.monotonic() + 4.0
+        while self.connection.busy and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.01)
         self._close_stream_window()
         self.discovery.stop()
         if self._tray is not None:

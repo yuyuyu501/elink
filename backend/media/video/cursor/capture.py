@@ -36,6 +36,7 @@ class CursorState:
     hotspot_y: int = 0
     visible: bool = True
     image: bytes | None = None
+    background: bytes | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -49,6 +50,8 @@ class CursorCapture:
 
     def __init__(self, include_image: bool = True) -> None:
         self.include_image = include_image
+        self._handle = None
+        self._shape = None
 
     def read(self) -> CursorState:
         if not hasattr(ctypes, "WinDLL"):
@@ -58,7 +61,7 @@ class CursorCapture:
 
     def _read_win32(self) -> CursorState:
         from backend.media.video.capture.windows.dxgi_desktop_duplication import (
-            user32,
+            user32, gdi32, _BitmapInfo, _BitmapInfoHeader,
         )
 
         class CURSORINFO(ctypes.Structure):
@@ -78,6 +81,24 @@ class CursorCapture:
                 ("hbmColor", wintypes.HBITMAP),
             ]
 
+        class BITMAP(ctypes.Structure):
+            _fields_ = [("type", wintypes.LONG), ("width", wintypes.LONG),
+                        ("height", wintypes.LONG), ("stride", wintypes.LONG),
+                        ("planes", wintypes.WORD), ("bits", wintypes.WORD),
+                        ("data", ctypes.c_void_p)]
+
+        user32.GetCursorInfo.argtypes = [ctypes.POINTER(CURSORINFO)]
+        user32.GetCursorInfo.restype = wintypes.BOOL
+        user32.GetIconInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(ICONINFO)]
+        user32.GetIconInfo.restype = wintypes.BOOL
+        user32.GetPhysicalCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        user32.GetPhysicalCursorPos.restype = wintypes.BOOL
+        user32.DrawIconEx.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                                     wintypes.HANDLE, ctypes.c_int, ctypes.c_int,
+                                     wintypes.UINT, wintypes.HBRUSH, wintypes.UINT]
+        user32.DrawIconEx.restype = wintypes.BOOL
+        gdi32.GetObjectW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
+        gdi32.GetObjectW.restype = ctypes.c_int
         info = CURSORINFO()
         info.cbSize = ctypes.sizeof(CURSORINFO)
         if not user32.GetCursorInfo(ctypes.byref(info)):
@@ -87,20 +108,55 @@ class CursorCapture:
         if not info.flags & 0x00000001:
             return CursorState(x=0, y=0, visible=False)
 
+        user32.GetPhysicalCursorPos(ctypes.byref(info.ptScreenPos))
         x, y = info.ptScreenPos.x, info.ptScreenPos.y
         if not self.include_image:
             return CursorState(x=x, y=y)
 
-        icon_info = ICONINFO()
-        if not user32.GetIconInfo(info.hCursor, ctypes.byref(icon_info)):
-            return CursorState(x=x, y=y)
-
-        return CursorState(
-            x=x,
-            y=y,
-            hotspot_x=icon_info.xHotspot,
-            hotspot_y=icon_info.yHotspot,
-        )
+        if info.hCursor != self._handle or self._shape is None:
+            icon = ICONINFO()
+            if not user32.GetIconInfo(info.hCursor, ctypes.byref(icon)):
+                return CursorState(x=x, y=y)
+            dc = dib = previous = None
+            try:
+                bitmap = BITMAP()
+                if not gdi32.GetObjectW(icon.hbmColor or icon.hbmMask,
+                                       ctypes.sizeof(bitmap), ctypes.byref(bitmap)):
+                    return CursorState(x=x, y=y)
+                width, height = bitmap.width, bitmap.height // (1 if icon.hbmColor else 2)
+                if not (0 < width <= 1024 and 0 < height <= 1024):
+                    return CursorState(x=x, y=y)
+                dc = gdi32.CreateCompatibleDC(None)
+                header = _BitmapInfo()
+                header.bmiHeader = _BitmapInfoHeader(
+                    biSize=ctypes.sizeof(_BitmapInfoHeader), biWidth=width,
+                    biHeight=-height, biPlanes=1, biBitCount=32)
+                bits = ctypes.c_void_p()
+                dib = gdi32.CreateDIBSection(dc, ctypes.byref(header), 0,
+                                           ctypes.byref(bits), None, 0)
+                if not dc or not dib or not bits:
+                    raise CursorError("光标位图创建失败")
+                previous = gdi32.SelectObject(dc, dib)
+                images = []
+                # Rendering on black and white preserves alpha and AND/XOR cursors.
+                for fill in (0, 255):
+                    ctypes.memset(bits, fill, width * height * 4)
+                    if not user32.DrawIconEx(dc, 0, 0, info.hCursor, width, height, 0, None, 3):
+                        raise CursorError("光标绘制失败")
+                    gdi32.GdiFlush()
+                    images.append(ctypes.string_at(bits, width * height * 4))
+                self._shape = (width, height, icon.xHotspot, icon.yHotspot, *images)
+                self._handle = info.hCursor
+            finally:
+                if previous:
+                    gdi32.SelectObject(dc, previous)
+                for obj in (dib, icon.hbmColor, icon.hbmMask):
+                    if obj:
+                        gdi32.DeleteObject(obj)
+                if dc:
+                    gdi32.DeleteDC(dc)
+        width, height, hx, hy, image, background = self._shape
+        return CursorState(x, y, width, height, hx, hy, True, image, background)
 
     def close(self) -> None:
-        pass
+        self._shape = self._handle = None
