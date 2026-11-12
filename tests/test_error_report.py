@@ -60,7 +60,7 @@ class ErrorReportTests(unittest.TestCase):
         except EncodeError as exc:
             fault = error_report.save_error(exc, context={"role": "host"})
         entry, = self.entries()
-        self.assertEqual(error_dir(), Path(self.temp.name) / "error")
+        self.assertEqual(error_dir(), Path(self.temp.name).resolve() / "error")
         self.assertEqual(entry["fault_id"], fault)
         self.assertEqual(entry["code"], "codec")
         self.assertEqual(entry["message"], "编码失败")
@@ -121,7 +121,7 @@ class ErrorReportTests(unittest.TestCase):
             _configure_logging()
             _configure_logging()
             files = [handler for handler in root.handlers if isinstance(handler, logging.FileHandler)
-                     and Path(handler.baseFilename).parent.parent == Path(self.temp.name)]
+                     and Path(handler.baseFilename).parent.parent == Path(self.temp.name).resolve()]
             self.assertEqual(len(files), 1)
             get_logger("backend-test").error("backend file marker")
             files[0].flush()
