@@ -20,6 +20,27 @@ SESSION_PORT = 49321
 PROTOCOL = "elink-session-v1"
 TIMEOUT_S = 30.0
 MAX_MESSAGE = 16384
+PICTURE_KEYS = ("width", "height", "fps", "bitrate_kbps")
+
+
+def output_picture(picture):
+    result = {key: picture[key] for key in PICTURE_KEYS}
+    if "upscale" in picture:
+        result.update(width=picture["upscale"]["width"], height=picture["upscale"]["height"])
+    return result
+
+
+def stream_picture(picture, viewer):
+    result = picture_settings(picture)
+    if viewer.sr_enabled:
+        result["upscale"] = {
+            "width": result["width"], "height": result["height"],
+            "percent": viewer.sr_percent, "mode": viewer.sr_mode,
+            "sharpen": viewer.sr_sharpen, "sharpness": viewer.sr_sharpness,
+        }
+        for axis in ("width", "height"):
+            result[axis] = max(2, int(result[axis] * viewer.sr_percent / 100) & ~1)
+    return picture_settings(result)
 
 
 def picture_settings(values: dict) -> dict:
@@ -29,16 +50,32 @@ def picture_settings(values: dict) -> dict:
     result = {}
     for name, low, high, cast in (
         ("width", 320, 7680, int), ("height", 240, 4320, int),
-        ("fps", 5, 120, float), ("bitrate_kbps", 300, 20000, int),
+        ("fps", 5, 120, float), ("bitrate_kbps", 300, 50000, int),
     ):
         value = values.get(name)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"画面参数无效：{name}")
+        if name in {"width", "height"} and "upscale" in values:
+            low = 2
         if not low <= value <= high:
             raise ValueError(f"画面参数超出范围：{name}")
         result[name] = cast(value)
     if result["width"] % 2 or result["height"] % 2:
         raise ValueError("分辨率必须为偶数")
+    if "upscale" in values:
+        sr = values["upscale"]
+        if not isinstance(sr, dict) or set(sr) != {"width", "height", "percent", "mode", "sharpen", "sharpness"}:
+            raise ValueError("超分参数格式错误")
+        for key, low, high in (("width", 320, 7680), ("height", 240, 4320),
+                               ("percent", 33, 100), ("sharpness", 0, 100)):
+            if type(sr[key]) is not int or not low <= sr[key] <= high:
+                raise ValueError(f"超分参数无效：{key}")
+        if sr["mode"] not in {"fsr", "rtx"} or type(sr["sharpen"]) is not bool:
+            raise ValueError("超分算法或锐化参数无效")
+        for axis in ("width", "height"):
+            if sr[axis] % 2 or result[axis] > sr[axis]:
+                raise ValueError("超分尺寸无效")
+        result["upscale"] = dict(sr)
     return result
 
 
@@ -82,6 +119,7 @@ class DesktopConnection(QObject):
         self._ping_token = None
         self._closing = False
         self._codec_enabled = False
+        self._upscale_enabled = False
         self._peer_caps = None
         self._selection = None
         self._prior_selection = None
@@ -122,7 +160,7 @@ class DesktopConnection(QObject):
             return
         if self.role == "host" and self.phase == "negotiating" and not self._offer_sent:
             self._offer_sent = True
-            self._send("capabilities", capabilities=local)
+            self._send("capabilities", capabilities=local, upscale=True)
         elif self.role == "viewer" and self.phase == "negotiating" and self._peer_caps is not None:
             self._begin_choices()
 
@@ -261,6 +299,7 @@ class DesktopConnection(QObject):
         self._stop_deadline = 0.0
         self._ping_token = None
         self._codec_enabled = False
+        self._upscale_enabled = False
         self._peer_caps = None
         self._selection = self._prior_selection = None
         self._revision = 0
@@ -295,7 +334,7 @@ class DesktopConnection(QObject):
             self.error.emit(str(exc))
             return
         self._peer, self._viewer = dict(peer), replace(viewer)
-        self._picture, self._previous, self._control = picture, None, control
+        self._picture, self._previous, self._control = stream_picture(picture, viewer), None, control
         if hasattr(self.service, "refresh_codecs"):
             self.service.refresh_codecs(viewer.ffmpeg_path)
         try:
@@ -306,7 +345,8 @@ class DesktopConnection(QObject):
         self._attach(sock, "viewer")
         sock.connected.connect(lambda: self._send(
             "request", target=peer["id"], control=control, picture=picture,
-            codec_selection=hasattr(self.service, "refresh_codecs"))
+            codec_selection=hasattr(self.service, "refresh_codecs"),
+            upscale=True, upscale_picture=self._picture)
             if sock is self.socket and self.phase == "connecting" else None)
         sock.connectToHost(peer["ip"], port)
 
@@ -379,7 +419,9 @@ class DesktopConnection(QObject):
         elif self.role == "host" and kind == "request" and self.phase == "connecting":
             if message.get("target") != self.identity or not message.get("id"):
                 raise ValueError("目标设备不匹配")
-            self._picture = picture_settings(message["picture"])
+            self._upscale_enabled = message.get("upscale") is True
+            self._picture = picture_settings(message.get("upscale_picture", message["picture"])
+                                             if self._upscale_enabled else message["picture"])
             if not isinstance(message.get("control"), bool):
                 raise ValueError("会话模式无效")
             self._control = message["control"]
@@ -395,6 +437,10 @@ class DesktopConnection(QObject):
                 self._start_host()
         elif kind == "capabilities" and self.role == "viewer" and self.phase in {"connecting", "negotiating"}:
             self._codec_enabled = True
+            self._upscale_enabled = message.get("upscale") is True
+            if not self._upscale_enabled:
+                self._picture = output_picture(self._picture)
+                self._viewer = replace(self._viewer, sr_enabled=False)
             self._peer_caps = checked_capabilities(message["capabilities"])
             self.phase = "negotiating"
             self._capabilities_ready()
@@ -457,6 +503,7 @@ class DesktopConnection(QObject):
             if message.get("id") != self._peer["id"]:
                 raise ValueError("设备标识不匹配")
             self._picture = picture_settings(message["picture"])
+            self._upscale_enabled = message.get("upscale") is True
             if self._codec_enabled:
                 self._selection = codec_options(message["selection"])
                 if self._selection not in compatible_choices(self._peer_caps, self.service.codec_capabilities, self._selection):
@@ -468,12 +515,18 @@ class DesktopConnection(QObject):
             self.phase = "receiving"
             self._started = time.monotonic()
             self._update_error_context()
+            sr = self._picture.get("upscale")
             self._viewer = replace(
                 self._viewer, transport="srt", srt_mode="caller",
                 srt_url=f"srt://{self._peer['ip']}:{self._srt_port}",
                 control_host=self._peer["ip"], control_port=self._control_port,
                 control_enabled=self._control,
-                **{f"stream_{key}": value for key, value in self._picture.items()},
+                **{f"stream_{key}": self._picture[key] for key in PICTURE_KEYS},
+                output_width=sr["width"] if sr else self._picture["width"],
+                output_height=sr["height"] if sr else self._picture["height"],
+                sr_enabled=sr is not None,
+                **({"sr_percent": sr["percent"], "sr_mode": sr["mode"],
+                    "sr_sharpen": sr["sharpen"], "sr_sharpness": sr["sharpness"]} if sr else {}),
                 **({"stream_codec": self._selection["codec"], "decoder": self._selection["decoder"]}
                    if self._selection else {"decoder": "h264"}),
             )
@@ -529,6 +582,9 @@ class DesktopConnection(QObject):
             self._report(str(message.get("message", "画面设置失败")))
             self.error.emit(str(message.get("message", "画面设置失败")))
             self._clear_failure()
+            if kind == "rejected":
+                self.phase = "active"
+                self.changed.emit()
         else:
             raise ValueError("会话消息与当前状态不匹配")
 
@@ -542,7 +598,7 @@ class DesktopConnection(QObject):
             self._fail("会话端口超出范围")
             return
         settings = replace(
-            self.host, **self._picture, transport="srt", srt_mode="listener",
+            self.host, **{key: self._picture[key] for key in PICTURE_KEYS}, transport="srt", srt_mode="listener",
             srt_url=f"srt://0.0.0.0:{self._srt_port}",
             control_port=self._control_port, allow_inject=self._control,
             clipboard_enabled=self._control, gamepad_enabled=self._control,
@@ -563,7 +619,7 @@ class DesktopConnection(QObject):
             if actual is not None:
                 self._picture = {**self._picture, "width": actual.width, "height": actual.height}
             self._send("ready", srt_port=self._srt_port, control_port=self._control_port,
-                       picture=self._picture, **({
+                       picture=self._picture, upscale=True, **({
                            "selection": self._selection, "revision": self._revision, "rollback": self._rollback
                        } if self._codec_enabled else {}))
 
@@ -578,18 +634,21 @@ class DesktopConnection(QObject):
             self._clear_failure()
             self._send("active")
             self._viewer = replace(
-                self._viewer, **{f"stream_{key}": value for key, value in self._picture.items()}
+                self._viewer, **{f"stream_{key}": self._picture[key] for key in PICTURE_KEYS}
             )
-            self.picture_applied.emit(dict(self._picture))
+            self.picture_applied.emit(output_picture(self._picture))
             self.changed.emit()
 
-    def configure(self, picture: dict) -> None:
+    def configure(self, picture: dict, *, upscale=None) -> None:
         if self.role != "viewer" or self.phase not in {"active", "selection"}:
             return
         self._clear_failure()
         try:
             options = codec_options(picture) if "codec" in picture else self._applied_options
-            picture = picture_settings(picture)
+            settings = upscale if upscale is not None else self._viewer
+            if settings.sr_enabled and not self._upscale_enabled:
+                raise ValueError("对端版本不支持超分压缩比")
+            picture = stream_picture(picture, settings)
         except ValueError as exc:
             self._report(exc)
             self.error.emit(str(exc))
@@ -604,6 +663,9 @@ class DesktopConnection(QObject):
             self._begin_choices()
         else:
             self._send("configure", picture=picture)
+            self.phase = "updating"
+            self._started = time.monotonic()
+            self.changed.emit()
 
     def set_control(self, enabled: bool) -> None:
         if self.role == "viewer" and self.phase == "active":

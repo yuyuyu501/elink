@@ -32,6 +32,10 @@ def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = F
     dist = (ROOT / (dist_dir or "dist")).resolve()
     resources = ROOT / "frontend" / "desktop" / "resources"
     ffmpeg_dir = _ffmpeg_source() if os.name == "nt" else None
+    video_library = None
+    if os.name == "nt":
+        from scripts.build_video import build as build_video
+        video_library = build_video()
 
     args = [
         _venv_python(),
@@ -76,6 +80,8 @@ def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = F
 
     output = dist / APP_NAME
     _copy_extras(output)
+    if video_library is not None:
+        shutil.copy2(video_library, output / "_internal/frontend/desktop/resources/elink_video.dll")
     if ffmpeg_dir is not None:
         _copy_ffmpeg(ffmpeg_dir, output)
     _write_build_info(output)

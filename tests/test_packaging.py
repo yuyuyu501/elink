@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.media.video.codec.probe import resolve_ffmpeg_path
-from scripts.build import _copy_ffmpeg, _ffmpeg_source
+from scripts.build import _copy_ffmpeg, _ffmpeg_source, build
 from scripts.package_windows import run_self_test
 
 
@@ -100,6 +100,15 @@ class PackagingTests(unittest.TestCase):
     def test_bundle_requires_license(self):
         with self.assertRaisesRegex(RuntimeError, "license"):
             _copy_ffmpeg(self.ffmpeg.parent, self.root / "output")
+
+    @unittest.skipUnless(os.name == "nt", "Windows native bridge")
+    def test_native_compile_failure_prevents_packaging_old_library(self):
+        with patch("scripts.build._ffmpeg_source", return_value=self.ffmpeg.parent), patch(
+            "scripts.build_video.build", side_effect=RuntimeError("native compile failed")
+        ), patch("scripts.build.subprocess.run") as pyinstaller:
+            with self.assertRaisesRegex(RuntimeError, "native compile failed"):
+                build(self.root / "dist")
+            pyinstaller.assert_not_called()
 
 
 if __name__ == "__main__":

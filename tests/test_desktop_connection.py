@@ -153,6 +153,49 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(self.viewer.phase, "active")
         self.assertEqual(len(self.host_media.starts), 1)
 
+    def test_upscale_transmits_half_resolution_and_preserves_output(self):
+        self.viewer.connect_peer(self.peer, ViewerSettings(
+            stream_width=2560, stream_height=1440, sr_enabled=True, sr_percent=50), True)
+        wait_until(lambda: self.viewer.phase == self.host.phase == "active")
+        self.assertEqual((self.host_media.starts[-1].width, self.host_media.starts[-1].height),
+                         (1280, 720))
+        self.assertEqual((self.viewer_media.starts[-1].output_width,
+                          self.viewer_media.starts[-1].output_height), (2560, 1440))
+        self.assertEqual((self.applied[-1]["width"], self.applied[-1]["height"]), (2560, 1440))
+        self.viewer.configure(self.applied[-1], upscale=ViewerSettings(sr_enabled=False))
+        wait_until(lambda: len(self.applied) == 2)
+        self.assertEqual((self.host_media.starts[-1].width, self.host_media.starts[-1].height),
+                         (2560, 1440))
+        self.assertFalse(self.viewer_media.starts[-1].sr_enabled)
+
+    def test_failed_upscale_switch_restores_previous_preferences(self):
+        self.connect()
+        self.host_media.fail_next = True
+        original = dict(self.applied[-1])
+        self.viewer.configure(original, upscale=ViewerSettings(sr_enabled=True, sr_percent=50))
+        wait_until(lambda: len(self.applied) == 2)
+        self.assertEqual(self.applied[-1], original)
+        self.assertFalse(self.viewer._viewer.sr_enabled)
+        self.assertNotIn("upscale", self.host._picture)
+
+    def test_old_peer_rejects_ratio_without_stopping_media(self):
+        self.connect()
+        self.viewer._upscale_enabled = False
+        self.viewer.configure(self.applied[-1], upscale=ViewerSettings(sr_enabled=True, sr_percent=50))
+        self.assertTrue(self.errors)
+        self.assertEqual(self.viewer.phase, "active")
+        self.assertEqual(len(self.host_media.starts), 1)
+
+    def test_picture_applies_50_mbps_to_both_sides(self):
+        self.connect()
+        picture = {"width": 1920, "height": 1080, "fps": 90, "bitrate_kbps": 50000}
+        self.viewer.configure(picture)
+        wait_until(lambda: len(self.applied) == 2)
+        self.assertEqual(self.applied[-1], picture)
+        self.assertEqual(self.host_media.starts[-1].bitrate_kbps, 50000)
+        self.assertEqual(self.viewer_media.starts[-1].stream_bitrate_kbps, 50000)
+        self.assertFalse(self.errors)
+
     def test_delayed_idle_from_previous_pipeline_does_not_stop_current_media(self):
         self.connect()
         self.viewer._service_state("idle", "previous pipeline stopped")
@@ -324,6 +367,16 @@ class SettingsAndTransportTests(unittest.TestCase):
         for value in (4, 121, float("inf")):
             with self.assertRaises(ValueError):
                 picture_settings({**picture, "fps": value})
+
+    def test_picture_bitrate_range_preserves_legacy_minimum(self):
+        picture = {"width": 1920, "height": 1080, "fps": 30, "bitrate_kbps": 50000}
+        for value in (300, 1000, 50000):
+            self.assertEqual(picture_settings({**picture, "bitrate_kbps": value})["bitrate_kbps"],
+                             value)
+        for value in (299, 50001, float("inf")):
+            with self.assertRaises(ValueError):
+                picture_settings({**picture, "bitrate_kbps": value})
+
     def test_srt_direction_is_independent_of_connection_mode(self):
         with patch("backend.transport.srt.subprocess.Popen") as process:
             sender = SrtTransport("srt://0.0.0.0:9000", mode="listener", direction="send")

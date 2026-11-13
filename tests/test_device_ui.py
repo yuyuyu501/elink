@@ -321,13 +321,36 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertEqual(saved.stream_width, 1280)
         self.assertEqual(saved.stream_bitrate_kbps, 6500)
 
-    def test_fps_slider_stages_120_until_apply(self):
+    def test_picture_controls_stage_values_until_apply(self):
         dialog = PictureDialog({"width": 1920, "height": 1080, "fps": 30, "bitrate_kbps": 4000})
-        self.assertEqual((dialog.fps.minimum(), dialog.fps.maximum(), dialog.fps.singleStep()), (5, 120, 1))
-        dialog.fps.setValue(120)
+        self.assertEqual([dialog.fps.itemData(i) for i in range(dialog.fps.count())],
+                         [30, 60, 90, 120])
+        self.assertEqual(dialog.fps.currentData(), 30)
+        self.assertEqual((dialog.bitrate.minimum(), dialog.bitrate.maximum(),
+                          dialog.bitrate.singleStep()), (1, 50, 1))
+        dialog.fps.setCurrentIndex(dialog.fps.findData(120))
+        dialog.bitrate.setValue(50)
         self.assertEqual(dialog.picture()["fps"], 120)
+        self.assertEqual(dialog.picture()["bitrate_kbps"], 50000)
+        self.assertEqual(dialog.bitrate_value.text(), "50")
         self.assertEqual(self.window._viewer_settings.stream_fps, 30)
+        self.assertEqual(self.window._viewer_settings.stream_bitrate_kbps, 4000)
+        self.assertEqual(dialog.result(), 0)
+        dialog.apply_button.click()
+        self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
         dialog.close()
+
+    def test_picture_controls_map_legacy_values(self):
+        for fps, bitrate, expected_fps, expected_bitrate in (
+            (5, 300, 30, 1000), (45, 6500, 30, 6000),
+            (80, 20000, 90, 20000), (120, 51000, 120, 50000),
+        ):
+            with self.subTest(fps=fps, bitrate=bitrate):
+                dialog = PictureDialog({"width": 1920, "height": 1080,
+                                        "fps": fps, "bitrate_kbps": bitrate})
+                self.assertEqual(dialog.picture()["fps"], expected_fps)
+                self.assertEqual(dialog.picture()["bitrate_kbps"], expected_bitrate)
+                dialog.close()
 
     def test_codec_choices_follow_format_and_apply_state(self):
         connection = self.window.connection
@@ -355,6 +378,31 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertFalse(dialog.apply_button.isEnabled())
         dialog.close()
         dialog.deleteLater()
+
+    def test_upscale_controls_only_commit_slider_on_release_and_follow_enable(self):
+        self.window._session_connected(ViewerSettings())
+        stream = self.window._stream_window
+        stream.set_session_active(True)
+        events = []
+        stream.preference_changed.connect(lambda *v: events.append(v))
+        stream.apply_settings(ViewerSettings(sr_enabled=False))
+        self.assertFalse(stream.sr_percent.isEnabled())
+        self.assertFalse(stream.sr_sharpen.isEnabled())
+        stream.apply_settings(ViewerSettings(sr_enabled=True, sr_percent=50, sr_sharpen=True))
+        self.assertEqual((stream.sr_percent.minimum(), stream.sr_percent.maximum()), (33, 100))
+        self.assertEqual(stream.sr_percent.value(), 50)
+        self.assertTrue(stream.sr_sharpness.isEnabled())
+        self.assertFalse(events)
+        stream.preference_changed.disconnect(self.window._viewer_preference)
+        stream.sr_percent.setSliderDown(True)
+        stream.sr_percent.setValue(40)
+        self.assertFalse(events)
+        stream.sr_percent.setSliderDown(False)
+        self.assertEqual(events, [("sr_percent", 40)])
+        stream.set_upscale_capabilities({"fsr": {"state": "available", "message": "ok"},
+                                        "rtx": {"state": "unobserved", "message": "not observed"}})
+        self.assertTrue(stream.sr_mode.model().item(1).isEnabled())
+        self.assertIn("not observed", stream.sr_status.text())
 
     def test_overlay_uses_measured_units_expiry_and_shared_persisted_toggle(self):
         from frontend.desktop.service import SessionStats

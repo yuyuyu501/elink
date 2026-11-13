@@ -121,6 +121,27 @@ class StreamLatencyTests(unittest.TestCase):
         self.assertEqual(len(threads), 3)
         self.assertEqual(len(set(threads)), 1)
         self.assertNotEqual(threads[0], threading.get_ident())
+
+    def test_upscale_failure_is_reported_without_emitting_unprocessed_frame(self):
+        failed = threading.Event()
+        received, errors = [], []
+        class Upscale:
+            def upscale(self, item):
+                raise RuntimeError("GPU removed")
+            def close(self):
+                pass
+        def failure(exc):
+            errors.append(str(exc))
+            failed.set()
+        renderer = _QtRenderer(received.append, Upscale(), failure=failure)
+        renderer.open()
+        try:
+            renderer.render(frame())
+            self.assertTrue(failed.wait(2))
+            self.assertEqual(errors, ["GPU removed"])
+            self.assertFalse(received)
+        finally:
+            renderer.close()
     def test_capture_pacing_and_pts_support_30_60_120_fps(self):
         for fps in (30, 60, 120):
             capture = SimpleNamespace(config=SimpleNamespace(fps=fps), read=lambda: frame())

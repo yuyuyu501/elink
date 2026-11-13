@@ -50,6 +50,12 @@ def load() -> tuple[HostSettings, ViewerSettings]:
     viewer.mouse_mode = mouse_mode(viewer.mouse_mode)
     viewer.mouse_sensitivity = sensitivity_value(viewer.mouse_sensitivity)
     viewer.stats_visible = viewer.stats_visible is True
+    viewer.sr_enabled = viewer.sr_enabled is True
+    viewer.sr_sharpen = viewer.sr_sharpen is True
+    viewer.sr_mode = viewer.sr_mode if viewer.sr_mode in {"fsr", "rtx"} else "fsr"
+    for name, default, low, high in (("sr_percent", 100, 33, 100), ("sr_sharpness", 50, 0, 100)):
+        value = getattr(viewer, name)
+        setattr(viewer, name, max(low, min(high, value)) if type(value) is int else default)
     preferences = viewer.codec_preferences if isinstance(viewer.codec_preferences, dict) else {}
     viewer.codec_preferences = {}
     for peer, options in preferences.items():

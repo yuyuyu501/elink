@@ -446,30 +446,30 @@ class PreviewWidget(QWidget):
             self._paint_stats(painter, target)
 
     def _paint_stats(self, painter: QPainter, target: QRect) -> None:
+        target = target.adjusted(0, max(0, getattr(self, "stats_top", 0) - target.top()),
+                                 -getattr(self, "stats_right", 0), 0)
         font = QFont("Cascadia Mono")
         font.setPointSizeF(9)
         painter.setFont(font)
         metrics = painter.fontMetrics()
-        line_height = metrics.height() + 2
-        text_width = max(metrics.horizontalAdvance(line) for line in self._stats_lines)
-        width = text_width + 22
-        height = line_height * len(self._stats_lines) + 12
-        box = QRect(target.left() + HUD_MARGIN, target.top() + HUD_MARGIN, min(width, target.width() - 24), height)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(8, 13, 24, 205))
-        painter.drawRoundedRect(box, 8, 8)
-        painter.setPen(QPen(QColor(58, 78, 108, 160), 1))
-        painter.drawRoundedRect(box, 8, 8)
-        painter.setPen(QPen(QColor("#C7D5E8")))
-        y = box.top() + 6
-        for index, line in enumerate(self._stats_lines):
-            painter.setPen(QPen(QColor("#7FD8FF") if index == 0 else QColor("#C7D5E8")))
-            painter.drawText(
-                QRect(box.left() + 10, y, box.width() - 20, line_height),
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                line,
-            )
-            y += line_height
+        available = max(0, target.width() - 24)
+        parts = []
+        for part in self._stats_lines:
+            if len(part) > 28:
+                part = metrics.elidedText(part, Qt.TextElideMode.ElideRight, 180)
+            text = " | ".join([*parts, part])
+            if metrics.horizontalAdvance(text) + 16 > available:
+                break
+            parts.append(part)
+        if not parts:
+            return
+        text = " | ".join(parts)
+        box = QRect(target.left() + 4, target.top() + 4,
+                    metrics.horizontalAdvance(text) + 16, metrics.height() + 12)
+        painter.fillRect(box, QColor(0, 0, 0, 105))
+        painter.setPen(QColor("#FFFFFF"))
+        painter.drawText(box.adjusted(8, 0, -8, 0),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
 
     def _paint_placeholder(self, painter: QPainter) -> None:
         rect = QRectF(self.rect())

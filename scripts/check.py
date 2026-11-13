@@ -21,6 +21,7 @@ SUITES = (
     "tests/test_desktop_connection.py",
     "tests/test_remote_input.py",
     "tests/test_stream_latency.py",
+    "tests/test_upscale.py",
     "tests/test_codec_selection.py",
     "tests/test_error_report.py",
     "tests/test_packaging.py",

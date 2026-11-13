@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QFrame,
+    QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
     QHBoxLayout, QPushButton, QScrollArea, QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -54,16 +54,27 @@ class PictureDialog(QDialog):
         if self.resolution.findText(current) < 0:
             self.resolution.addItem(current)
         self.resolution.setCurrentText(current)
-        self.fps = QSlider(Qt.Orientation.Horizontal)
-        fps = fps_control(self.fps)
-        self.fps.setValue(round(picture["fps"]))
-        self.bitrate = QDoubleSpinBox()
-        self.bitrate.setDecimals(3)
-        self.bitrate.setRange(0.3, 20)
-        self.bitrate.setValue(picture["bitrate_kbps"] / 1000)
+        self.fps = QComboBox()
+        for rate in (30, 60, 90, 120):
+            self.fps.addItem(f"{rate} FPS", rate)
+        nearest = min(range(self.fps.count()),
+                      key=lambda index: abs(self.fps.itemData(index) - picture["fps"]))
+        self.fps.setCurrentIndex(nearest)
+        self.bitrate = QSlider(Qt.Orientation.Horizontal)
+        self.bitrate.setRange(1, 50)
+        self.bitrate.setSingleStep(1)
+        self.bitrate.setValue(round(picture["bitrate_kbps"] / 1000))
+        self.bitrate_value = label(str(self.bitrate.value()))
+        self.bitrate_value.setFixedWidth(24)
+        self.bitrate.valueChanged.connect(lambda value: self.bitrate_value.setText(str(value)))
+        bitrate = QWidget()
+        bitrate_row = QHBoxLayout(bitrate)
+        bitrate_row.setContentsMargins(0, 0, 0, 0)
+        bitrate_row.addWidget(self.bitrate, 1)
+        bitrate_row.addWidget(self.bitrate_value)
         form.addRow("分辨率", self.resolution)
-        form.addRow("帧率", fps)
-        form.addRow("码率（Mbps）", self.bitrate)
+        form.addRow("帧率", self.fps)
+        form.addRow("码率（Mbps）", bitrate)
         self.connection = connection
         self.codec = QComboBox()
         self.encoder = QComboBox()
@@ -171,8 +182,8 @@ class PictureDialog(QDialog):
 
     def picture(self) -> dict:
         width, height = map(int, self.resolution.currentText().split("×"))
-        result = {"width": width, "height": height, "fps": self.fps.value(),
-                  "bitrate_kbps": round(self.bitrate.value() * 1000)}
+        result = {"width": width, "height": height, "fps": self.fps.currentData(),
+                  "bitrate_kbps": self.bitrate.value() * 1000}
         if self.connection is not None and self.connection._codec_enabled:
             result.update({name: getattr(self, name).currentData() for name in ("codec", "encoder", "decoder")})
         return result
@@ -251,6 +262,8 @@ class StreamWindow(QWidget):
     snapshot_requested = Signal()
     report_requested = Signal()
     preference_changed = Signal(str, object)
+    upscale_refresh = Signal(bool)
+    upscale_cancel = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(None)
@@ -327,16 +340,58 @@ class StreamWindow(QWidget):
             controls.addWidget(check)
         sr = QHBoxLayout()
         self.sr_mode = QComboBox()
-        self.sr_mode.addItems(["FSR", "RTX"])
-        self.sr_output = QComboBox()
-        self.sr_output.addItems(["1080p", "1440p", "4K"])
+        self.sr_mode.addItem("FSR", "fsr")
+        self.sr_mode.addItem("RTX", "rtx")
+        self.sr_refresh = QToolButton()
+        self.sr_refresh.setIcon(icons.icon("refresh-cw"))
+        self.sr_refresh.setToolTip("重新检测本机超分能力")
+        self.sr_refresh.clicked.connect(lambda: self.upscale_refresh.emit(True))
         sr.addWidget(self.sr_mode, 1)
-        sr.addWidget(self.sr_output, 1)
+        sr.addWidget(self.sr_refresh)
         controls.addLayout(sr)
-        self.sr_mode.currentTextChanged.connect(
-            lambda text: self.preference_changed.emit("sr_mode", text.lower()))
-        self.sr_output.currentTextChanged.connect(
-            lambda text: self.preference_changed.emit("sr_output", text))
+        self.sr_mode.currentIndexChanged.connect(
+            lambda _: self.preference_changed.emit("sr_mode", self.sr_mode.currentData()))
+        self.sr_percent = QSlider(Qt.Orientation.Horizontal)
+        self.sr_percent.setRange(33, 100)
+        self.sr_percent.setValue(100)
+        self.sr_percent_value = label("100%")
+        self.sr_percent_value.setFixedWidth(40)
+        self.sr_percent.valueChanged.connect(lambda value: self.sr_percent_value.setText(f"{value}%"))
+        self.sr_percent.valueChanged.connect(
+            lambda value: self.preference_changed.emit("sr_percent", value)
+            if not self.sr_percent.isSliderDown() else None)
+        self.sr_percent.sliderReleased.connect(
+            lambda: self.preference_changed.emit("sr_percent", self.sr_percent.value()))
+        ratio = QHBoxLayout()
+        ratio.addWidget(label("压缩比"))
+        ratio.addWidget(self.sr_percent, 1)
+        ratio.addWidget(self.sr_percent_value)
+        controls.addLayout(ratio)
+        self.sr_sharpen = QCheckBox("锐化")
+        self.sr_sharpen.toggled.connect(lambda value: self.preference_changed.emit("sr_sharpen", value))
+        self.sr_sharpness = QSlider(Qt.Orientation.Horizontal)
+        self.sr_sharpness.setRange(0, 100)
+        self.sr_sharpness_value = label("50")
+        self.sr_sharpness_value.setFixedWidth(28)
+        self.sr_sharpness.valueChanged.connect(lambda value: self.sr_sharpness_value.setText(str(value)))
+        self.sr_sharpness.valueChanged.connect(
+            lambda value: self.preference_changed.emit("sr_sharpness", value)
+            if not self.sr_sharpness.isSliderDown() else None)
+        self.sr_sharpness.sliderReleased.connect(
+            lambda: self.preference_changed.emit("sr_sharpness", self.sr_sharpness.value()))
+        sharp = QHBoxLayout()
+        sharp.addWidget(self.sr_sharpen)
+        sharp.addWidget(self.sr_sharpness, 1)
+        sharp.addWidget(self.sr_sharpness_value)
+        controls.addLayout(sharp)
+        self.sr_status = label("")
+        self.sr_status.setWordWrap(True)
+        controls.addWidget(self.sr_status)
+        self._sr_timer = QTimer(self)
+        self._sr_timer.setInterval(30000)
+        self._sr_timer.timeout.connect(
+            lambda: self.upscale_refresh.emit(False) if self.panel.isVisible() else None)
+        self._sr_timer.start()
         rows.addWidget(self.session_controls)
         self.stats_button = QCheckBox("性能叠加")
         self.stats_button.toggled.connect(self.stats_toggled.emit)
@@ -376,7 +431,8 @@ class StreamWindow(QWidget):
         return button
 
     def apply_settings(self, settings) -> None:
-        widgets = [self.watch_button, self.mouse_mode, self.sensitivity, self.sr_mode, self.sr_output,
+        widgets = [self.watch_button, self.mouse_mode, self.sensitivity, self.sr_mode,
+                   self.sr_percent, self.sr_sharpen, self.sr_sharpness,
                    *self.preferences.values()]
         for widget in widgets:
             widget.blockSignals(True)
@@ -389,17 +445,37 @@ class StreamWindow(QWidget):
         self.preview.set_sensitivity(settings.mouse_sensitivity)
         for name, check in self.preferences.items():
             check.setChecked(getattr(settings, name))
-        self.sr_mode.setCurrentText(settings.sr_mode.upper())
-        self.sr_output.setCurrentText(settings.sr_output)
+        self.sr_mode.setCurrentIndex(max(0, self.sr_mode.findData(settings.sr_mode)))
+        self.sr_percent.setValue(settings.sr_percent)
+        self.sr_percent_value.setText(f"{settings.sr_percent}%")
+        self.sr_sharpen.setChecked(settings.sr_sharpen)
+        self.sr_sharpness.setValue(settings.sr_sharpness)
+        self.sr_sharpness_value.setText(str(settings.sr_sharpness))
         self.sr_mode.setEnabled(settings.sr_enabled)
-        self.sr_output.setEnabled(settings.sr_enabled)
+        self.sr_percent.setEnabled(settings.sr_enabled)
+        self.sr_sharpen.setEnabled(settings.sr_enabled)
+        self.sr_sharpness.setEnabled(settings.sr_enabled and settings.sr_sharpen)
+        self.sr_refresh.setEnabled(not (settings.sr_enabled and self._active))
         for widget in widgets:
             widget.blockSignals(False)
         self._sync_input()
 
+    def set_upscale_capabilities(self, capabilities, status=""):
+        details = []
+        for index in range(self.sr_mode.count()):
+            name = self.sr_mode.itemData(index)
+            item = (capabilities or {}).get(name, {})
+            state = item.get("state")
+            self.sr_mode.model().item(index).setEnabled(state in {"available", "unobserved"})
+            message = item.get("message", "待检测")
+            self.sr_mode.setItemData(index, message, Qt.ItemDataRole.ToolTipRole)
+            details.append(f"{name.upper()}：{message}")
+        self.sr_status.setText(status or "\n".join(details))
+
     def set_session_active(self, active: bool) -> None:
         self._active = active
         self.session_controls.setEnabled(active)
+        self.sr_refresh.setEnabled(not (active and self.preferences["sr_enabled"].isChecked()))
         self._sync_input()
 
     def set_input_available(self, available: bool) -> None:
@@ -431,16 +507,22 @@ class StreamWindow(QWidget):
     def _capture_changed(self, captured: bool) -> None:
         if captured:
             self.panel.hide()
+            self.upscale_cancel.emit()
         self._layout()
 
     def toggle_controls(self) -> None:
         self.release_input()
         self.panel.setVisible(not self.panel.isVisible())
+        if self.panel.isVisible():
+            self.upscale_refresh.emit(False)
+        else:
+            self.upscale_cancel.emit()
         self._layout()
 
     def toggle_fullscreen(self) -> None:
         self.release_input()
         self.panel.hide()
+        self.upscale_cancel.emit()
         if self.isFullScreen():
             self.showMaximized() if self._was_maximized else self.showNormal()
         else:
@@ -470,6 +552,9 @@ class StreamWindow(QWidget):
         top = TITLE_HEIGHT if show_title else 0
         video_top = 0 if self.isFullScreen() else TITLE_HEIGHT
         self.preview.setGeometry(0, video_top, self.width(), max(0, self.height() - video_top))
+        self.preview.stats_top = TITLE_HEIGHT if self.isFullScreen() and show_title else 0
+        self.preview.stats_right = 324 if self.panel.isVisible() else 0
+        self.preview.update()
         self.panel.setGeometry(max(0, self.width() - 324), top + 8, 312,
                                max(0, min(self.panel.widget().sizeHint().height() + 2,
                                           self.height() - top - 20)))
@@ -501,6 +586,8 @@ class StreamWindow(QWidget):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
+        self._sr_timer.stop()
+        self.upscale_cancel.emit()
         if not self._closed:
             self._closed = True
             self.release_input()

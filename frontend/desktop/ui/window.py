@@ -16,6 +16,7 @@ import socket
 import sys
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
@@ -68,6 +69,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.root = root or user_settings.data_dir()
         self.service = SessionService(self)
+        self.service.upscale_changed.connect(self._upscale_capabilities)
         self._auto_refresh = auto_refresh
         self._native_frame_patched = False
         self._active_mode = ""  # 最近一次启动的模式：帧/统计可能晚于 mode 清零到达
@@ -441,8 +443,8 @@ class MainWindow(QMainWindow):
         encoder = extra.get("encoder", "--") if now - extra.get("host_sampled_at", 0) < 3 else "--"
         decoder = extra.get("decoder", "--") if fresh else "--"
         codec = {"h264": "H.264", "hevc": "H.265", "av1": "AV1"}.get(extra.get("codec"), "--")
-        return [f"FPS {fps}   接收 {bitrate} Mbps", f"RTT {rtt} ms   解码 {decode} ms",
-                f"{codec} · 编码 {encoder}   解码 {decoder}", "丢包 --"]
+        return [f"{fps} FPS", f"{bitrate} Mbps", f"RTT {rtt} ms", f"解码 {decode} ms",
+                codec, f"编码 {encoder}", f"解码 {decoder}", "丢包 --"]
 
     def _on_cursor(self, state) -> None:
         if self._stream_window is not None:
@@ -469,6 +471,9 @@ class MainWindow(QMainWindow):
         window.snapshot_requested.connect(self._snapshot_current)
         window.report_requested.connect(lambda: self._export_report("viewer"))
         window.preference_changed.connect(self._viewer_preference)
+        window.upscale_refresh.connect(self.service.refresh_upscale)
+        window.upscale_cancel.connect(self.service.cancel_upscale_probe)
+        window.set_upscale_capabilities(self.service.upscale_capabilities, self.service.upscale_status)
         window.preview.bind_input(self.service.send_input, self.service.set_input_focus)
         window.preview.input_error.connect(self.service._input_failure)
         window.preview.presented.connect(self.service.frame_presented)
@@ -477,6 +482,11 @@ class MainWindow(QMainWindow):
         self._stream_window = window
         window.show()
         window.activateWindow()
+
+    def _upscale_capabilities(self):
+        if self._stream_window is not None:
+            self._stream_window.set_upscale_capabilities(
+                self.service.upscale_capabilities, self.service.upscale_status)
 
     def _on_stream_closed(self) -> None:
         if self._stream_window is None:
@@ -585,6 +595,11 @@ class MainWindow(QMainWindow):
 
     def _connection_changed(self) -> None:
         phase = self.connection.phase
+        if phase == "active" and self.connection.role == "viewer":
+            for name in ("sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness"):
+                setattr(self._viewer_settings, name, getattr(self.connection._viewer, name))
+            if self._stream_window is not None:
+                self._stream_window.apply_settings(self._viewer_settings)
         self._on_peers(self.discovery.peers())
         if self._stream_window:
             self._stream_window.set_session_active(phase == "active")
@@ -604,10 +619,11 @@ class MainWindow(QMainWindow):
         self._sync_discovery_hosting()
 
     def _session_connected(self, settings: ViewerSettings) -> None:
-        self._viewer_settings = settings
+        self._viewer_settings = replace(settings, stream_width=settings.output_width,
+                                        stream_height=settings.output_height) if settings.sr_enabled else replace(settings)
         self._active_mode = "viewer"
         self._open_stream_window()
-        self._stream_window.apply_settings(settings)
+        self._stream_window.apply_settings(self._viewer_settings)
         self._stream_window.preview.request_mouse_mode()
         self._show_page("devices")
 
@@ -643,27 +659,40 @@ class MainWindow(QMainWindow):
         if self._stream_window is not None:
             self._stream_window.release_input()
         if name not in {"mouse_mode", "mouse_sensitivity", "clipboard_enabled", "gamepad_enabled",
-                        "sr_enabled", "sr_mode", "sr_output"}:
+                        "sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness"}:
             return
+        previous = replace(self._viewer_settings)
         setattr(self._viewer_settings, name, value)
-        setattr(self.connection._viewer, name, value)
+        if name.startswith("sr_") and not self._viewer_settings.sr_enabled and name != "sr_enabled":
+            setattr(self.connection._viewer, name, value)
+            self._persist_ui()
+            if self._stream_window is not None:
+                self._stream_window.apply_settings(self._viewer_settings)
+            return
+        if not name.startswith("sr_"):
+            setattr(self.connection._viewer, name, value)
         if name == "clipboard_enabled":
             self.service.set_clipboard_enabled(value and self._viewer_settings.control_enabled)
         elif name == "gamepad_enabled":
             self.service.set_gamepad_enabled(value and self._viewer_settings.control_enabled,
                                             self._viewer_settings)
         elif name.startswith("sr_") and self.connection.phase == "active":
-            self.connection.configure(saved_picture(self._viewer_settings))
-            self._stream_window.session_controls.setEnabled(False)
+            self.connection.configure(saved_picture(self._viewer_settings), upscale=self._viewer_settings)
+            if self.connection.phase == "active":
+                self._viewer_settings = previous
         if self._stream_window is not None:
             self._stream_window.apply_settings(self._viewer_settings)
+            self._stream_window.set_session_active(self.connection.phase == "active")
         if name == "mouse_mode":
             if self._stream_window is not None:
                 self._stream_window.preview.request_mouse_mode()
             self.service.set_mouse_mode(value)
-        self._persist_ui()
+        if not name.startswith("sr_") or self.connection.phase == "idle":
+            self._persist_ui()
 
     def _picture_applied(self, picture: dict) -> None:
+        for name in ("sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness"):
+            setattr(self._viewer_settings, name, getattr(self.connection._viewer, name))
         for name, value in picture.items():
             setattr(self._viewer_settings, f"stream_{name}", value)
         self._persist_ui()

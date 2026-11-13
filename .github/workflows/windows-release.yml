@@ -44,6 +44,8 @@ jobs:
       - name: Install package and build dependencies
         run: python -m pip install -e ".[dev]"
       - name: Build portable ZIP and verified installer
+        env:
+          VSLANG: "1033"
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null

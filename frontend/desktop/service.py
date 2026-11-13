@@ -102,7 +102,11 @@ class ViewerSettings:
     scale_percent: int = 100
     sr_enabled: bool = False
     sr_mode: str = "fsr"  # fsr / rtx
-    sr_output: str = "1080p"  # 1080p / 1440p / 4K
+    sr_percent: int = 100
+    sr_sharpen: bool = False
+    sr_sharpness: int = 50
+    output_width: int = 1920
+    output_height: int = 1080
     ffmpeg_path: str = "ffmpeg"
 
 
@@ -142,10 +146,12 @@ class _QtRenderer:
 
     name = "qt_preview"
 
-    def __init__(self, emit: Callable[[Frame], None], upscaler=None, *, upscaler_factory=None) -> None:
+    def __init__(self, emit: Callable[[Frame], None], upscaler=None, *, upscaler_factory=None,
+                 failure=None) -> None:
         self._emit = emit
         self._upscaler = upscaler
         self._upscaler_factory = upscaler_factory
+        self._failure = failure
         self.frames = 0
         self._condition = threading.Condition()
         self._pending = None
@@ -169,6 +175,11 @@ class _QtRenderer:
             if self._upscaler_factory is not None:
                 self._upscaler = self._upscaler_factory()
             self._prepare_frames()
+        except Exception as exc:
+            if self._failure is not None:
+                self._failure(exc)
+            else:
+                logger.exception("画面处理失败")
         finally:
             self._close_upscaler()
 
@@ -191,6 +202,8 @@ class _QtRenderer:
                 try:
                     frame = self._upscaler.upscale(frame)
                 except Exception as exc:
+                    if self._failure is not None:
+                        raise
                     logger.warning("FSR 超分辨率失败，回退原帧: %s", exc)
                     self._close_upscaler()
             self._emit(frame)
@@ -272,6 +285,7 @@ class SessionService(QObject):
     _frame_pending = Signal(int)
     capabilities_changed = Signal()
     codec_validated = Signal(int, str)
+    upscale_changed = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -313,6 +327,50 @@ class SessionService(QObject):
         self._capability_worker = None
         self._capability_cancel = threading.Event()
         self._validation_cancel = threading.Event()
+        self.upscale_capabilities = None
+        self.upscale_status = ""
+        self._upscale_worker = None
+        self._upscale_cancel = threading.Event()
+        self._upscale_checked = 0.0
+
+    def refresh_upscale(self, force=False):
+        if self._upscale_worker is not None and self._upscale_worker.is_alive():
+            return
+        if self.running and self._viewer_live is not None and self._viewer_live.sr_enabled:
+            return
+        if not force and time.monotonic() - self._upscale_checked < 30:
+            return
+        from .upscale import probe_native
+        cancel = self._upscale_cancel = threading.Event()
+        self.upscale_status = "正在检测超分能力…"
+        self.upscale_changed.emit()
+
+        def run():
+            try:
+                snapshot = probe_native(cancel)
+                if not cancel.is_set():
+                    self.upscale_capabilities = snapshot
+                    self._upscale_checked = time.monotonic()
+                    self.upscale_status = ""
+            except Exception as exc:
+                if not cancel.is_set():
+                    self.upscale_status = str(exc)
+            finally:
+                if not cancel.is_set():
+                    self.upscale_changed.emit()
+        self._upscale_worker = threading.Thread(target=run, name="upscale-probe", daemon=True)
+        self._upscale_worker.start()
+
+    def cancel_upscale_probe(self):
+        self._upscale_cancel.set()
+
+    def _upscale_actual(self, mode, state):
+        detail = {"unobserved": "未观察到增强", "bypass": "原尺寸，未放大"}.get(state, "处理中")
+        text = mode.upper() + "：" + detail
+        self._stats.extra["upscale"] = mode
+        if self.upscale_status != text:
+            self.upscale_status = text
+            self.upscale_changed.emit()
 
     def refresh_codecs(self, ffmpeg_path="ffmpeg", *, refresh=False):
         if self._capability_worker is not None and self._capability_worker.is_alive():
@@ -675,7 +733,8 @@ class SessionService(QObject):
                 return
 
             pipeline.renderer = _QtRenderer(
-                self._frame_sink(), upscaler_factory=lambda: self._create_upscaler(settings))
+                self._frame_sink(), upscaler_factory=lambda: self._create_upscaler(settings),
+                failure=self._upscale_failure)
 
             self._start_control_client(settings)
             if settings.control_enabled and settings.clipboard_enabled:
@@ -707,25 +766,23 @@ class SessionService(QObject):
     def _create_upscaler(self, settings: ViewerSettings):
         if not settings.sr_enabled:
             return None
-        from .upscale import FSR_OUTPUTS, FsrUpscaler, RtxUpscaler
+        self.cancel_upscale_probe()
+        if self._upscale_worker is not None:
+            self._upscale_worker.join(timeout=3)
+            if self._upscale_worker.is_alive():
+                raise RuntimeError("超分检测尚未结束")
+        from .upscale import UpscaleProcessor
+        return UpscaleProcessor(
+            settings.sr_mode, (settings.output_width, settings.output_height),
+            settings.sr_sharpness if settings.sr_sharpen else 0, self._upscale_actual)
 
-        output = FSR_OUTPUTS.get(settings.sr_output, (1920, 1080))
-        if settings.sr_mode == "rtx":
-            try:
-                if RtxUpscaler.available():
-                    upscaler = RtxUpscaler(output)
-                    self.log.emit(f"RTX VSR 超分辨率已开启（输出 {output[0]}×{output[1]}）", "info")
-                    return upscaler
-                self.log.emit("RTX VSR 不可用（需要 NVIDIA RTX），尝试 FSR 1", "warn")
-            except Exception as exc:
-                self.log.emit(f"RTX VSR 不可用，尝试 FSR 1：{exc}", "warn")
-        try:
-            upscaler = FsrUpscaler(output)
-            self.log.emit(f"FSR 1 超分辨率已开启（输出 {output[0]}×{output[1]}）", "info")
-            return upscaler
-        except Exception as exc:
-            self.log.emit(f"超分辨率不可用，回退原帧：{exc}", "warn")
-            return None
+    def _upscale_failure(self, exc):
+        self.record_failure(exc)
+        self._upscale_checked = 0.0
+        self.upscale_capabilities = None
+        self.upscale_status = f"超分处理失败：{exc}"
+        self.upscale_changed.emit()
+        self.state_changed.emit("error", self.upscale_status)
 
     # ---- 内部：控制通道 ----
     def _start_control_server(self, settings: HostSettings) -> None:

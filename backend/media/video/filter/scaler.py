@@ -1,11 +1,12 @@
 """缩放（最近邻 / 双线性）。
 
 窗口缩放这种「下行链路」场景用最近邻就够（快、无振铃）；需要保真时用双线性。
-两种实现都按行处理 BGRA，逐像素计算落在 Python 层，因此不适合 4K 实时——
-4K 场景应改走 GPU 缩放或 ffmpeg 的 ``scale`` 滤镜。
+最近邻使用 NumPy 批量索引；双线性保留按行处理。
 """
 
 from __future__ import annotations
+
+import numpy as np
 
 from backend.media.frame import Frame, PixelFormat
 from backend.media.video.filter.pixel_format import BaseVideoFilter
@@ -48,21 +49,15 @@ class Scaler(BaseVideoFilter):
 
         source = bytes(frame.data)
         source_stride = frame.width * 4
-        out = bytearray(target_width * target_height * 4)
-
         if not self.bilinear:
-            x_ratio = frame.width / target_width
-            y_ratio = frame.height / target_height
-            for y in range(target_height):
-                source_y = min(frame.height - 1, int(y * y_ratio))
-                source_row = source_y * source_stride
-                target_row = y * target_width * 4
-                for x in range(target_width):
-                    source_x = min(frame.width - 1, int(x * x_ratio)) * 4
-                    out[target_row + x * 4 : target_row + x * 4 + 4] = source[
-                        source_row + source_x : source_row + source_x + 4
-                    ]
+            pixels = np.frombuffer(source, dtype=np.uint8).reshape(frame.height, frame.width, 4)
+            xs = np.minimum((np.arange(target_width) * (frame.width / target_width)).astype(int),
+                            frame.width - 1)
+            ys = np.minimum((np.arange(target_height) * (frame.height / target_height)).astype(int),
+                            frame.height - 1)
+            out = pixels[ys[:, None], xs].tobytes()
         else:
+            out = bytearray(target_width * target_height * 4)
             for y in range(target_height):
                 y_ratio = (y + 0.5) * frame.height / target_height - 0.5
                 y0 = max(0, int(y_ratio))

@@ -242,8 +242,9 @@ class WindowInputTests(unittest.TestCase):
 
     def test_picture_label_uses_mbps_outside_input(self):
         dialog = PictureDialog({"width": 1920, "height": 1080, "fps": 30, "bitrate_kbps": 4000})
-        self.assertEqual(dialog.layout().labelForField(dialog.bitrate).text(), "码率（Mbps）")
-        self.assertEqual(dialog.bitrate.suffix(), "")
+        self.assertEqual(dialog.layout().labelForField(dialog.bitrate.parentWidget()).text(),
+                         "码率（Mbps）")
+        self.assertEqual(dialog.bitrate_value.text(), "4")
         self.assertEqual(dialog.picture()["bitrate_kbps"], 4000)
         dialog.close()
 

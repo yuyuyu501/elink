@@ -19,6 +19,14 @@ import sys
 
 def main() -> int:
     argv = sys.argv[1:]
+    if len(argv) == 2 and argv[0] == "--upscale-probe":
+        import json
+        from pathlib import Path
+        from PySide6.QtGui import QGuiApplication
+        from frontend.desktop.upscale import probe_report
+        app = QGuiApplication([sys.argv[0]])
+        Path(argv[1]).write_text(json.dumps(probe_report(), ensure_ascii=False), encoding="utf-8")
+        return 0
 
     if argv and argv[0] in {"--version", "-V"}:
         from frontend.desktop import __version__

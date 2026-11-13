@@ -1,13 +1,4 @@
-"""FSR 1 EASU/RCAS 超分辨率（离屏 OpenGL，CPU 回读）。
-
-E:\\elink 在 QOpenGLWidget 上直接显示 GPU 纹理；本项目的预览是 CPU QImage，
-所以这里用离屏 QOpenGLContext 跑同样的 FSR 1 shader，再把结果读回 BGRA。
-这样不用重写预览控件，也不会把 GPU 纹理和 UI 生命周期绑死。
-
-限制：
-- 需要 OpenGL 4.2（Windows + 独显/核显一般满足）；不满足时服务端回退到原帧。
-- 这是 FSR 1，不是 NVIDIA RTX VSR；RTX VSR 需要 E:\\elink 的 D3D11 原生管线。
-"""
+"""FSR 1 / RCAS and NVIDIA D3D11 VSR with bounded native capability probing."""
 
 from __future__ import annotations
 
@@ -15,6 +6,12 @@ import ctypes
 import logging
 import struct
 import sys
+import time
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 from functools import lru_cache
 
 import numpy as np
@@ -36,12 +33,6 @@ from backend.media.frame import Frame, PixelFormat
 from .paths import resource_dir
 
 logger = logging.getLogger(__name__)
-
-FSR_OUTPUTS = {
-    "1080p": (1920, 1080),
-    "1440p": (2560, 1440),
-    "4K": (3840, 2160),
-}
 
 VERTEX = """#version 420 compatibility
 in vec2 position;
@@ -78,7 +69,7 @@ void main() {
 }
 """
     elif stage == "rcas":
-        common += "#define FSR_RCAS_F 1\n#define FSR_RCAS_DENOISE 1\n"
+        common += "#define FSR_RCAS_F 1\n#define FSR_RCAS_DENOISE 1\nuniform float sharpness;\n"
         common += (root / "ffx_fsr1.h").read_text(encoding="utf-8")
         common += """
 vec4 FsrRcasLoadF(ivec2 p) {
@@ -87,7 +78,7 @@ vec4 FsrRcasLoadF(ivec2 p) {
 void FsrRcasInputF(inout float r, inout float g, inout float b) {}
 void main() {
     uvec4 con;
-    FsrRcasCon(con, 1.0);
+    FsrRcasCon(con, sharpness);
     vec3 color;
     uvec2 p = uvec2(gl_FragCoord.xy);
     FsrRcasF(color.r, color.g, color.b, p, con);
@@ -107,8 +98,6 @@ class RtxUpscaler:
     复用为了 ``elink_video.dll``。
     """
 
-    _probe: bool | None = None
-
     def __init__(self, output_size: tuple[int, int] = (1920, 1080)) -> None:
         if not sys.platform.startswith("win"):
             raise RuntimeError("RTX VSR 仅支持 Windows")
@@ -122,6 +111,10 @@ class RtxUpscaler:
     @staticmethod
     def _load():
         path = resource_dir() / "elink_video.dll"
+        if not getattr(sys, "frozen", False):
+            built = Path(__file__).resolve().parents[2] / "out/video-build/Release/elink_video.dll"
+            if built.is_file():
+                path = built
         if not path.is_file():
             raise RuntimeError("缺少 elink_video.dll")
         library = ctypes.CDLL(str(path))
@@ -148,26 +141,26 @@ class RtxUpscaler:
         library.elink_video_effect.restype = ctypes.c_double
         library.elink_video_download.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
         library.elink_video_download.restype = ctypes.c_int
+        if hasattr(library, "elink_video_adapter"):
+            library.elink_video_adapter.argtypes = [ctypes.c_void_p]
+            library.elink_video_adapter.restype = ctypes.c_char_p
         return library
 
     @classmethod
     def available(cls) -> bool:
-        if cls._probe is not None:
-            return cls._probe
         processor = None
         try:
             processor = cls((1280, 720))
-            probe = np.full((360, 640, 4), 128, dtype=np.uint8)
+            probe = probe_pixels(640, 360)
             frame = Frame(data=probe.tobytes(), width=640, height=360, pixel_format=PixelFormat.BGRA)
             processor.upscale(frame)
-            cls._probe = processor.effect >= 0.01
+            return True
         except Exception as exc:
             logger.info("RTX VSR 不可用: %s", exc)
-            cls._probe = False
+            return False
         finally:
             if processor is not None:
                 processor.close()
-        return cls._probe
 
     @property
     def effect(self) -> float:
@@ -175,14 +168,21 @@ class RtxUpscaler:
             return 0.0
         return float(self._library.elink_video_effect(self._handle))
 
+    @property
+    def adapter(self):
+        if self._handle is not None and hasattr(self._library, "elink_video_adapter"):
+            return self._library.elink_video_adapter(self._handle).decode("utf-8")
+        return ""
+
     def _error(self) -> str:
         value = self._library.elink_video_error()
         return (value or b"").decode("utf-8", errors="replace")
 
     def _ensure(self, width: int, height: int, output: tuple[int, int]) -> None:
-        if self._handle is not None and self._input_size == (width, height):
+        if self._handle is not None and self._input_size == (width, height) and self.output_size == output:
             return
         self.close()
+        self.output_size = output
         self._input_size = (width, height)
         handle = self._library.elink_video_create(width, height, output[0], output[1], 0, 1)
         if not handle:
@@ -260,11 +260,12 @@ class RtxUpscaler:
 class FsrUpscaler:
     """One offscreen GL context per session; all calls must happen on its thread."""
 
-    def __init__(self, output_size: tuple[int, int] = (1920, 1080)) -> None:
+    def __init__(self, output_size: tuple[int, int] = (1920, 1080), *, sharpness: int = 0) -> None:
         width, height = int(output_size[0]), int(output_size[1])
         if width < 2 or height < 2:
             raise ValueError("FSR output size is invalid")
         self.output_size = (width, height)
+        self.sharpness = max(0, min(100, sharpness))
         self._context: QOpenGLContext | None = None
         self._surface: QOffscreenSurface | None = None
         self._programs: list[QOpenGLShaderProgram] = []
@@ -405,7 +406,7 @@ class FsrUpscaler:
 
     def upscale(self, frame: Frame, output_size: tuple[int, int] | None = None) -> Frame:
         target_w, target_h = output_size or self.output_size
-        if frame.width >= target_w and frame.height >= target_h:
+        if frame.width >= target_w and frame.height >= target_h and not self.sharpness:
             return frame
         target_w, target_h = int(target_w), int(target_h)
         self._make_current()
@@ -414,23 +415,30 @@ class FsrUpscaler:
             self._upload(frame)
             self._ensure_fbos(target_w, target_h)
             assert self._fbo_easu is not None and self._fbo_rcas is not None
-            self._fbo_easu.bind()
             gl.glViewport(0, 0, target_w, target_h)
-            self._pass(self._programs[0], self._texture, (frame.width, frame.height), (target_w, target_h))
-            self._fbo_rcas.bind()
-            gl.glViewport(0, 0, target_w, target_h)
-            # FBO texture isn't a QOpenGLTexture object; bind it directly.
-            program = self._programs[1]
-            program.bind()
-            gl.glActiveTexture(0x84C0)
-            gl.glBindTexture(0x0DE1, self._fbo_easu.texture())
-            gl.glUniform1i(program.uniformLocation("sourceTex"), 0)
-            gl.glUniform2f(program.uniformLocation("sourceSize"), float(target_w), float(target_h))
-            gl.glUniform2f(program.uniformLocation("targetSize"), float(target_w), float(target_h))
-            self._draw_quad(program)
-            program.release()
-            self._fbo_rcas.release()
-            image = self._fbo_rcas.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+            resize = (frame.width, frame.height) != (target_w, target_h)
+            if resize:
+                self._fbo_easu.bind()
+                self._pass(self._programs[0], self._texture, (frame.width, frame.height), (target_w, target_h))
+                self._fbo_easu.release()
+            if self.sharpness:
+                self._fbo_rcas.bind()
+                program = self._programs[1]
+                program.bind()
+                gl.glActiveTexture(0x84C0)
+                if resize:
+                    gl.glBindTexture(0x0DE1, self._fbo_easu.texture())
+                else:
+                    self._texture.bind(0)
+                gl.glUniform1i(program.uniformLocation("sourceTex"), 0)
+                gl.glUniform2f(program.uniformLocation("sourceSize"), float(target_w), float(target_h))
+                gl.glUniform2f(program.uniformLocation("targetSize"), float(target_w), float(target_h))
+                gl.glUniform1f(program.uniformLocation("sharpness"), 2.0 * (1 - self.sharpness / 100))
+                self._draw_quad(program)
+                program.release()
+                self._fbo_rcas.release()
+            output = self._fbo_rcas if self.sharpness else self._fbo_easu
+            image = output.toImage().convertToFormat(QImage.Format.Format_ARGB32)
             if image.isNull():
                 raise RuntimeError("FSR readback failed")
             # FBO 的像素原点在左下角；界面 QImage 以左上角为原点。
@@ -478,3 +486,102 @@ class FsrUpscaler:
             self._context.deleteLater()
             self._context = None
             self._surface = None
+
+
+def probe_pixels(width, height, index=0):
+    y, x = np.indices((height, width))
+    pixels = np.empty((height, width, 4), dtype=np.uint8)
+    pixels[..., 0] = (x + index * 7) % 256
+    pixels[..., 1] = (y * 3 + index * 11) % 256
+    pixels[..., 2] = ((x // 7 + y // 5 + index) % 2) * 255
+    pixels[..., 3] = 255
+    return pixels
+
+
+def probe_native(cancel=None):
+    """Run potentially blocking graphics drivers in a disposable helper process."""
+    with tempfile.TemporaryDirectory(prefix="elink-upscale-") as folder:
+        target = Path(folder) / "capabilities.json"
+        args = [sys.executable]
+        if not getattr(sys, "frozen", False):
+            args.append(str(Path(__file__).resolve().parents[2] / "main.py"))
+        env = dict(os.environ, QT_QPA_PLATFORM="windows" if sys.platform == "win32" else "offscreen")
+        with subprocess.Popen(
+            [*args, "--upscale-probe", str(target)], env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ) as process:
+            deadline = time.monotonic() + 25
+            while process.poll() is None:
+                if (cancel is not None and cancel.is_set()) or time.monotonic() > deadline:
+                    process.kill()
+                    process.wait()
+                    raise RuntimeError("超分检测已取消或超时")
+                time.sleep(0.05)
+            if process.returncode or not target.is_file():
+                raise RuntimeError(f"超分检测进程退出：{process.returncode}")
+        return json.loads(target.read_text(encoding="utf-8"))
+
+
+def probe_report():
+    result = {}
+    for name, factory in (("fsr", FsrUpscaler), ("rtx", RtxUpscaler)):
+        trials = []
+        try:
+            for width, height in ((640, 360), (1280, 720)):
+                processor = factory((width * 2, height * 2))
+                try:
+                    started = time.perf_counter()
+                    for index in range(10):
+                        pixels = probe_pixels(width, height, index)
+                        output = processor.upscale(Frame(
+                            data=pixels.tobytes(), width=width, height=height, pixel_format=PixelFormat.BGRA))
+                        if (output.width, output.height) != (width * 2, height * 2):
+                            raise RuntimeError("超分输出尺寸错误")
+                        if np.frombuffer(output.data, dtype=np.uint8).reshape(-1, 4)[:, :3].std() < 1:
+                            raise RuntimeError("超分输出为空白")
+                    trials.append({"input": [width, height], "output": [output.width, output.height],
+                                   "frames": 10, "effect": getattr(processor, "effect", None),
+                                   "adapter": getattr(processor, "adapter", ""),
+                                   "elapsed_ms": (time.perf_counter() - started) * 1000})
+                finally:
+                    processor.close()
+            observed = name == "fsr" or any(t["effect"] >= .01 for t in trials)
+            result[name] = {"state": "available" if observed else "unobserved",
+                            "message": "处理可用" if observed else "处理路径可用，未观察到 RTX 增强",
+                            "trials": trials}
+        except Exception as exc:
+            result[name] = {"state": "failed", "message": str(exc), "trials": trials}
+    return result
+
+
+class UpscaleProcessor:
+    """Own all processing resources on the preview worker."""
+
+    def __init__(self, mode, output_size, sharpness=0, notify=lambda *_: None):
+        self.mode, self.output_size = mode, output_size
+        self.notify = notify
+        self.processor = RtxUpscaler(output_size) if mode == "rtx" else FsrUpscaler(
+            output_size, sharpness=sharpness)
+        self.sharpen = None
+        try:
+            if mode == "rtx" and sharpness:
+                self.sharpen = FsrUpscaler(output_size, sharpness=sharpness)
+        except Exception:
+            self.processor.close()
+            raise
+
+    def upscale(self, frame):
+        output = self.processor.upscale(frame)
+        if self.sharpen is not None:
+            output = self.sharpen.upscale(output)
+        effect = getattr(self.processor, "effect", None)
+        same_size = (frame.width, frame.height) == self.output_size
+        self.notify(self.mode, "bypass" if same_size else
+                    "unobserved" if effect is not None and effect < .01 else "available")
+        return output
+
+    def close(self):
+        self.processor.close()
+        if self.sharpen is not None:
+            self.sharpen.close()
