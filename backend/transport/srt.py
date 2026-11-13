@@ -152,6 +152,9 @@ class SrtTransport:
             return
         if not self._aborted:
             self._diagnostics = self.diagnostics()
+        # A receiver may still be blocked in stdout.read; release it before closing pipes.
+        if self.direction == "receive":
+            self.abort()
         for stream in (proc.stdin, proc.stdout):
             try:
                 if stream and not stream.closed:

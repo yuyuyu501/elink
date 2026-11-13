@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elink"
-version = "0.6.8"
+version = "0.6.9"
 description = "低延迟远程控制与串流：屏幕采集、H.264 编码、MPEG-TS/SRT 传输、PySide6 桌面端"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -12,6 +12,7 @@ license = { text = "Proprietary" }
 dependencies = [
     "PySide6>=6.7",
     "numpy>=1.26",
+    "av==16.1.0",
 ]
 
 [project.optional-dependencies]

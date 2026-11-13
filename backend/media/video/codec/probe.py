@@ -141,6 +141,8 @@ VIDEO_ENCODERS: dict[str, str] = {
 }
 
 VIDEO_DECODERS: dict[str, str] = {
+    **{f"{codec}_pyav{suffix}": codec for codec in ("h264", "hevc", "av1")
+       for suffix in ("", "_d3d11va")},
     "h264": "h264",
     "h264_cuvid": "h264",
     "h264_amf": "h264",
@@ -202,6 +204,45 @@ def detect_video_dimensions(annexb: bytes, codec) -> tuple[int, int] | None:
     return None
 
 
+class RecoveryPoint:
+    """Retain sequence parameters and resume only at independently decodable frames."""
+
+    def __init__(self):
+        self.codec = None
+        self.parameters = {}
+
+    def observe(self, packet):
+        from backend.media.packet import split_annexb
+        from .framing import sized_av1_obus
+        codec = packet.codec.value
+        if codec != self.codec:
+            self.codec, self.parameters = codec, {}
+        if codec == "av1":
+            for kind, _, raw in sized_av1_obus(packet.data):
+                if kind == 1:
+                    self.parameters[kind] = raw
+        else:
+            required = (32, 33, 34) if codec == "hevc" else (7, 8)
+            for nal in split_annexb(packet.data):
+                kind = (nal[0] >> 1) & 63 if codec == "hevc" else nal[0] & 31
+                if kind in required:
+                    self.parameters[kind] = b"\0\0\0\1" + nal
+
+    def recover(self, packet):
+        from dataclasses import replace
+        from backend.media.packet import is_keyframe, split_annexb
+        required = {"h264": (7, 8), "hevc": (32, 33, 34), "av1": (1,)}[self.codec]
+        if not all(kind in self.parameters for kind in required):
+            return None
+        data = b"".join(self.parameters[kind] for kind in required) + packet.data
+        if self.codec == "hevc":
+            # CRA can depend on leading RASL pictures; resume on BLA/IDR only.
+            ready = any(16 <= ((nal[0] >> 1) & 63) <= 20 for nal in split_annexb(packet.data))
+        else:
+            ready = is_keyframe(data, codec=packet.codec)
+        return replace(packet, data=data, keyframe=True) if ready else None
+
+
 # Three red 320x240 frames, above hardware minimum dimensions.
 PROBE_SAMPLES = {
     "h264": "AAAAAQkQAAAAAWdCwA3aBQfsBEAAAAMAQAAADyPFCqgAAAABaM4PyAAAAAFliIQ6EYoAAhjxwABA9jgACHlJycnJycnJycnJycnJycnJycnJ111111111111111111111111111111111111111111111111111111111111111111111111111111114AAAAAFlAyiIQ6EYoAAhjxwABA9jgACHlJycnJycnJycnJycnJycnJycnJ111111111111111111111111111111111111111111111111111111111111111111111111111111114AAAABZQGSIhDoRigACGPHAAED2OAAIeUnJycnJycnJycnJycnJycnJycnJycnXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXgAAAAAEJMAAAAAFBmiAmgMsAAAABQQMpogJoDLAAAAABQQGSaICaAywAAAABCTAAAAABQZpAKoDLAAAAAUEDKaQCqAywAAAAAUEBkmkAqgMs",
@@ -243,7 +284,8 @@ def _device_signature():
 def codec_label(name: str) -> str:
     vendor = next((label for suffix, label in (
         ("nvenc", "NVIDIA"), ("cuvid", "NVIDIA"), ("amf", "AMD"),
-        ("qsv", "Intel"), ("vaapi", "VAAPI"), ("mediacodec", "MediaCodec")
+        ("qsv", "Intel"), ("vaapi", "VAAPI"), ("mediacodec", "MediaCodec"),
+        ("d3d11va", "D3D11VA"), ("pyav", "PyAV 软件")
     ) if name.endswith("_" + suffix)), "软件")
     return f"{vendor} · {name}"
 
@@ -368,8 +410,8 @@ def verify_backend(adapter, *, width=320, height=240, cancel=None, timeout=8.0) 
                 adapter.output_callback = frames.append
                 for packet in _sample_packets(adapter.codec):
                     check_cancel()
-                    adapter.decode(packet)
-                adapter.flush()
+                    frames.extend(adapter.decode(packet))
+                frames.extend(adapter.flush())
                 if len(frames) != 3 or any(
                     f.width != 320 or f.height != 240 or len(f.data) != 320 * 240 * 4
                     or f.data[2] < 200 or f.data[0] > 40 or f.data[1] > 40 for f in frames
@@ -441,9 +483,19 @@ def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, prog
                     adapter = entry.factory(StreamInfo(codec=CodecId(codec), width=320, height=240,
                                                        framerate=30), cfg)
                     reason = verify_backend(adapter, cancel=cancel)
+                    if not reason and hasattr(adapter, "decode_ms"):
+                        # Exclude the cold-start call and EOS flush from the steady-state comparison.
+                        decode = list(adapter.decode_ms)[1:-1]
+                        convert = list(adapter.convert_ms)[1:]
+                        if decode and convert:
+                            item["latency_ms"] = sum(decode) / len(decode) + sum(convert) / len(convert)
                 item.update(state="unavailable" if reason else "available", reason=reason or "")
                 if progress:
                     progress(snapshot)
+        snapshot["decoders"] = dict(sorted(
+            snapshot["decoders"].items(),
+            key=lambda pair: (pair[1]["codec"], pair[1].get("latency_ms", float("inf"))),
+        ))
         _video_cache.clear()
         _video_cache[key] = snapshot
         return snapshot

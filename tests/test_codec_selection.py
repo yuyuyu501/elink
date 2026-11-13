@@ -24,6 +24,7 @@ from backend.media.video.codec.framing import VideoFramer
 from backend.media.video.codec.probe import (
     PROBE_SAMPLES, _sample_packets, checked_capabilities, codec_options,
     compatible_choices, probe_video_codecs, public_capabilities, verify_backend,
+    RecoveryPoint,
 )
 from backend.registry.codec_registry import CodecRegistry, build_default_registry
 from backend.errors.codec import CodecNotFoundError
@@ -42,6 +43,81 @@ def available(codec):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_inprocess_names_are_valid_and_describe_actual_backend(self):
+        from backend.media.video.codec.probe import codec_label
+        for codec in PROBE_SAMPLES:
+            for suffix in ("_pyav", "_pyav_d3d11va"):
+                name = codec + suffix
+                self.assertEqual(codec_options({"codec": codec, "decoder": name})["decoder"], name)
+                self.assertNotIn("NVIDIA", codec_label(name))
+        self.assertIn("D3D11VA", codec_label("h264_pyav_d3d11va"))
+
+    def test_inprocess_software_decodes_all_formats_with_separate_timing(self):
+        from backend.media.video.codec.inprocess import InprocessDecoder
+        for codec in PROBE_SAMPLES:
+            stream = StreamInfo(codec=CodecId(codec), width=320, height=240)
+            adapter = InprocessDecoder(stream, VideoEncodeConfig(realtime=True))
+            self.assertIsNone(verify_backend(adapter), codec)
+            self.assertEqual(len(adapter.convert_ms), 3)
+            self.assertTrue(adapter.decode_ms)
+            self.assertIsNone(adapter._context)
+
+    def test_recovery_reuses_context_and_keeps_frame_buffers_alive(self):
+        from backend.media.video.codec.inprocess import InprocessDecoder
+        for codec in PROBE_SAMPLES:
+            decoder = InprocessDecoder(StreamInfo(codec=CodecId(codec), width=320, height=240),
+                                       VideoEncodeConfig(realtime=True))
+            decoder.open()
+            try:
+                context = decoder._context
+                packet = _sample_packets(codec)[0]
+                original, = decoder.decode(packet)
+                pixels = bytes(original.data)
+                decoder.reset(packet)
+                self.assertIs(decoder._context, context)
+                restored, = decoder.decode(packet)
+                self.assertEqual(bytes(restored.data), pixels)
+            finally:
+                decoder.close()
+            self.assertEqual(bytes(original.data), pixels)
+
+    def test_recovery_reuses_parameters_and_preserves_pts_for_all_formats(self):
+        from backend.media.packet import split_annexb
+        from backend.media.video.codec.framing import sized_av1_obus
+        for codec in PROBE_SAMPLES:
+            first, delta, _ = _sample_packets(codec)
+            recovery = RecoveryPoint()
+            self.assertIsNone(self._recover_without_parameters(codec, first))
+            recovery.observe(first)
+            recovery.observe(delta)
+            self.assertIsNone(recovery.recover(delta), codec)
+            if codec == "av1":
+                data = b"".join(raw for kind, _, raw in sized_av1_obus(first.data) if kind != 1)
+            else:
+                excluded = (32, 33, 34) if codec == "hevc" else (7, 8)
+                data = b"".join(b"\0\0\0\1" + nal for nal in split_annexb(first.data)
+                                if ((nal[0] >> 1) & 63 if codec == "hevc" else nal[0] & 31) not in excluded)
+            key = Packet(data=data, codec=CodecId(codec), pts=9000)
+            recovery.observe(key)
+            restored = recovery.recover(key)
+            self.assertIsNotNone(restored, codec)
+            self.assertEqual(restored.pts, 9000)
+            self.assertTrue(restored.keyframe)
+            from backend.media.video.codec.inprocess import InprocessDecoder
+            decoder = InprocessDecoder(StreamInfo(codec=CodecId(codec), width=320, height=240),
+                                       VideoEncodeConfig(realtime=True))
+            decoder.open()
+            try:
+                self.assertEqual(len(decoder.decode(restored)), 1, codec)
+            finally:
+                decoder.close()
+
+    @staticmethod
+    def _recover_without_parameters(codec, packet):
+        recovery = RecoveryPoint()
+        recovery.codec = codec
+        return recovery.recover(packet)
+
     def test_cross_vendor_negotiation_and_explicit_format(self):
         remote = caps("encoders", {"h264_nvenc": available("h264"), "libx265": available("hevc")})
         local = caps("decoders", {"h264_qsv": available("h264"), "hevc": available("hevc")})
@@ -215,6 +291,15 @@ class RuntimeTests(unittest.TestCase):
             name = codec
             item = self.capabilities["decoders"].get(name, {})
             self.assertEqual(item.get("state"), "available", item.get("reason"))
+
+    def test_automatic_choices_prioritize_measured_inprocess_latency(self):
+        for codec in PROBE_SAMPLES:
+            measured = {name: item["latency_ms"] for name, item in self.capabilities["decoders"].items()
+                        if item["codec"] == codec and item["state"] == "available" and "latency_ms" in item}
+            choices = [name for name, item in self.capabilities["decoders"].items()
+                       if item["codec"] == codec and item["state"] == "available"]
+            self.assertTrue(measured, codec)
+            self.assertEqual(choices[0], min(measured, key=measured.get))
 
     def test_real_available_encoders_produce_decodable_ts(self):
         for name, item in self.capabilities["encoders"].items():

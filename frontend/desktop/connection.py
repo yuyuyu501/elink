@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from .service import HostSettings, SessionService, ViewerSettings
-from .error_report import save_error
+from .error_report import remote_details, save_error
 from backend.media.video.codec.probe import (
     checked_capabilities, codec_options, compatible_choices,
 )
@@ -356,6 +356,11 @@ class DesktopConnection(QObject):
 
     def _send(self, kind: str, **values) -> None:
         if self.socket is not None:
+            if (kind in {"error", "media_failed", "candidate_failed", "rollback"}
+                    and self.fault_id and self.fault_id == getattr(self.service, "failure_id", "")):
+                values.setdefault("diagnostic", remote_details(getattr(self.service, "failure_details", {})))
+                values.setdefault("fault_id", self.fault_id)
+                values.setdefault("source", self.identity)
             if self._codec_enabled:
                 values.setdefault("revision", self._revision)
             self.socket.write(self._encode(kind, id=self.identity, session=self._session_id, **values))
@@ -469,6 +474,7 @@ class DesktopConnection(QObject):
             self._started = time.monotonic()
             self.service.validate_codec(revision, "encoder", selection, picture, self.host.ffmpeg_path)
         elif kind == "candidate_failed" and self.role == "viewer" and self._codec_enabled:
+            self._remote_failure(message)
             reason = str(message.get("message", "编解码器不可用"))
             axis = message.get("backend", "encoder")
             if axis not in {"encoder", "decoder", "pair"}:
@@ -768,6 +774,9 @@ class DesktopConnection(QObject):
         self.changed.emit()
 
     def _complete_disconnect(self) -> None:
+        expect_stop = getattr(self.service, "expect_stop", None)
+        if expect_stop is not None:
+            expect_stop()
         sock, self.socket = self.socket, None
         if sock is not None:
             sock.disconnectFromHost()
@@ -820,6 +829,12 @@ class DesktopConnection(QObject):
         if isinstance(fault_id, str) and 0 < len(fault_id) <= 64:
             self.fault_id = fault_id
         self._fault_source = f"remote:{str(message.get('source', 'peer'))[:128]}"
+        diagnostic = message.get("diagnostic")
+        if isinstance(diagnostic, dict):
+            self._update_error_context()
+            self.fault_id = save_error(
+                str(message.get("message", "远端会话错误")), fault_id=self.fault_id,
+                source=self._fault_source, context=self.service.error_context, remote=diagnostic)
 
     def _report(self, error: BaseException | str) -> None:
         self._update_error_context()

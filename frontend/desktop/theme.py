@@ -236,11 +236,16 @@ QToolTip {
 QFrame#computerRow {
     background: #FFFFFF; border: 1px solid #DEE5ED; border-radius: 4px;
 }
-QFrame#computerRow:hover { background: #F2F7FF; border-color: #B1C9EF; }
+QFrame#computerRow:hover, QFrame#computerRow[focused="true"] {
+    background: #F2F7FF; border-color: #B1C9EF;
+}
 QPushButton#openComputer {
     background: transparent; border: 1px solid transparent; border-radius: 3px; padding: 0;
 }
-QPushButton#openComputer:focus { border-color: #2468E8; }
+QFrame#computerRow QPushButton:hover, QFrame#computerRow QPushButton:focus,
+QFrame#computerRow QPushButton:pressed {
+    background: transparent; border: 1px solid transparent;
+}
 QLabel#computerName { color: #202C3C; font-size: 14px; }
 QLabel#computerSymbol { background: #2C76F5; border-radius: 5px; }
 QLabel#computerLocal {

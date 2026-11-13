@@ -11,6 +11,9 @@
 from __future__ import annotations
 
 import time
+import queue
+import threading
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -24,7 +27,7 @@ from backend.media.frame import Frame
 from backend.media.packet import Packet
 from backend.media.stream import StreamInfo
 from backend.media.video.codec.base import BaseDecoder
-from backend.media.video.codec.probe import detect_video_dimensions
+from backend.media.video.codec.probe import RecoveryPoint, detect_video_dimensions
 
 logger = get_logger(__name__)
 
@@ -77,6 +80,89 @@ class ReceivePipeline:
         self.stats = ReceivePipelineStats()
         self.stream: StreamInfo | None = None
         self.process_diagnostics: dict = {}
+        self.abort_source = None
+        self._stop = threading.Event()
+        self._received = threading.Event()
+        self._packets = queue.Queue(maxsize=4)
+        self._receive_error = None
+        self._receiver = None
+        self._decoder = None
+        self._stop_lock = threading.Lock()
+        self._abort_thread = None
+
+    def stop(self):
+        self._stop.set()
+        with self._stop_lock:
+            if self.abort_source is not None and self._abort_thread is None:
+                self._abort_thread = threading.Thread(
+                    target=self.abort_source, name="receive-stop", daemon=True)
+                self._abort_thread.start()
+        decoder = self._decoder
+        if decoder is not None and hasattr(decoder, "abort"):
+            decoder.abort()
+
+    def _receive(self):
+        recovery = RecoveryPoint()
+        recovering = False
+        try:
+            while not self._stop.is_set():
+                packet = self.demuxer.read()
+                if packet is None:
+                    break
+                if packet.codec.value != self.encode_config.codec:
+                    raise DecodeError("视频格式与协商结果不一致")
+                recovery.observe(packet)
+                self.stats.packets_read += 1
+                self.stats.bytes_read += len(packet.data)
+                self.stats.keyframes += int(packet.keyframe)
+                if self.stats.first_pts is None:
+                    self.stats.first_pts = packet.pts
+                if packet.pts is not None:
+                    self.stats.last_pts = packet.pts
+                if self._packets.full():
+                    while True:
+                        try:
+                            self._packets.get_nowait()
+                            self.stats.extra["packets_dropped"] = self.stats.extra.get("packets_dropped", 0) + 1
+                        except queue.Empty:
+                            break
+                    recovering = True
+                reset = recovering
+                if recovering:
+                    restored = recovery.recover(packet)
+                    if restored is None:
+                        self.stats.extra["packets_dropped"] = self.stats.extra.get("packets_dropped", 0) + 1
+                        continue
+                    packet = restored
+                    recovering = False
+                self._packets.put_nowait((packet, time.perf_counter(), reset))
+        except Exception as exc:
+            if not self._stop.is_set():
+                self._receive_error = exc
+        finally:
+            self._received.set()
+
+    def _packet_stream(self):
+        if not self.encode_config.realtime:
+            while (packet := self.demuxer.read()) is not None:
+                yield packet, False
+            return
+        self._receiver = threading.Thread(target=self._receive, name="video-receive", daemon=True)
+        self._receiver.start()
+        samples = self.stats.extra.setdefault("decode_queue_ms", deque(maxlen=4096))
+        while not self._stop.is_set():
+            if self._receive_error is not None:
+                raise self._receive_error
+            try:
+                packet, entered, reset = self._packets.get(timeout=0.05)
+            except queue.Empty:
+                if self._received.is_set():
+                    break
+                continue
+            samples.append((time.perf_counter() - entered) * 1000)
+            yield packet, reset
+        if self._receive_error is not None:
+            raise self._receive_error
 
     def run(self) -> ReceivePipelineStats:
         started_at = time.perf_counter()
@@ -89,20 +175,28 @@ class ReceivePipeline:
         try:
             self.demuxer.open()
             self.renderer.open()
+            if hasattr(self.renderer, "prepare_ms"):
+                self.stats.extra["display_prepare_ms"] = self.renderer.prepare_ms
 
-            while True:
-                packet = self.demuxer.read()
-                if packet is None:
-                    break
-
-                self.stats.packets_read += 1
-                self.stats.bytes_read += len(packet.data)
-                if packet.keyframe:
-                    self.stats.keyframes += 1
-                if self.stats.first_pts is None:
-                    self.stats.first_pts = packet.pts
-                if packet.pts is not None:
-                    self.stats.last_pts = packet.pts
+            for packet, reset in self._packet_stream():
+                if not self.encode_config.realtime:
+                    self.stats.packets_read += 1
+                    self.stats.bytes_read += len(packet.data)
+                    self.stats.keyframes += int(packet.keyframe)
+                    if self.stats.first_pts is None:
+                        self.stats.first_pts = packet.pts
+                    if packet.pts is not None:
+                        self.stats.last_pts = packet.pts
+                if reset:
+                    pending.clear()
+                    if decoder is not None:
+                        if hasattr(decoder, "reset"):
+                            decoder.reset(packet)
+                        else:
+                            decoder.close()
+                            decoder = None
+                            self._decoder = None
+                    self.stats.extra["decoder_resets"] = self.stats.extra.get("decoder_resets", 0) + 1
 
                 if decoder is None:
                     pending.append(packet)
@@ -110,6 +204,7 @@ class ReceivePipeline:
                             or time.perf_counter() - started_at > 10):
                         raise DecodeError("等待视频初始化参数超时")
                     decoder = self._open_decoder(pending)
+                    self._decoder = decoder
                     if decoder is None:
                         continue
                     for buffered in pending:
@@ -128,17 +223,24 @@ class ReceivePipeline:
                 logger.warning("流中没有任何可解码的包")
                 return self.stats
 
-            for frame in decoder.flush():
-                self._render(frame)
+            if not self._stop.is_set():
+                for frame in decoder.flush():
+                    self._render(frame)
         except Exception as exc:
             if decoder is not None and hasattr(decoder, "diagnostics"):
                 exc.process_diagnostics = decoder.diagnostics()
             raise
         finally:
+            self.stop()
+            if self._abort_thread is not None:
+                self._abort_thread.join(timeout=6)
+            if self._receiver is not None:
+                self._receiver.join(timeout=5)
             if decoder is not None and hasattr(decoder, "diagnostics"):
                 self.process_diagnostics = decoder.diagnostics()
             if decoder is not None:
                 decoder.close()
+            self._decoder = None
             self.renderer.close()
             self.demuxer.close()
             self.stats.wall_seconds = time.perf_counter() - started_at
@@ -180,7 +282,11 @@ class ReceivePipeline:
         self.stats.extra["decoder"] = decoder.name
         if self.encode_config.realtime and hasattr(decoder, "output_callback"):
             decoder.output_callback = self._render
-            self.stats.extra["decode_output_ms"] = decoder.output_wait_ms
+            if hasattr(decoder, "output_wait_ms"):
+                self.stats.extra["decode_output_ms"] = decoder.output_wait_ms
+            if hasattr(decoder, "decode_ms"):
+                self.stats.extra["decode_call_ms"] = decoder.decode_ms
+                self.stats.extra["pixel_convert_ms"] = decoder.convert_ms
         try:
             decoder.open()
         except Exception as exc:

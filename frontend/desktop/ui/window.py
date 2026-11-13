@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self._loading_settings = False
         self._recent_logs: deque[tuple[str, str, str]] = deque(maxlen=20)
         self._stream_window: StreamWindow | None = None
+        self._picture_dialog: PictureDialog | None = None
         self.ui_settings = user_settings.load_ui()
         self.discovery = DiscoveryService(self)
         self.discovery.peers_changed.connect(self._on_peers)
@@ -443,7 +444,8 @@ class MainWindow(QMainWindow):
         encoder = extra.get("encoder", "--") if now - extra.get("host_sampled_at", 0) < 3 else "--"
         decoder = extra.get("decoder", "--") if fresh else "--"
         codec = {"h264": "H.264", "hevc": "H.265", "av1": "AV1"}.get(extra.get("codec"), "--")
-        return [f"{fps} FPS", f"{bitrate} Mbps", f"RTT {rtt} ms", f"解码 {decode} ms",
+        decode_label = extra.get("decode_label", "解码")
+        return [f"{fps} FPS", f"{bitrate} Mbps", f"RTT {rtt} ms", f"{decode_label} {decode} ms",
                 codec, f"编码 {encoder}", f"解码 {decoder}", "丢包 --"]
 
     def _on_cursor(self, state) -> None:
@@ -467,7 +469,6 @@ class MainWindow(QMainWindow):
         window.set_status(self.status_label.text(), self.status_dot.property("tone") or "ok")
         window.stats_toggled.connect(self._toggle_stats_overlay)
         window.picture_requested.connect(self._edit_picture)
-        window.watch_toggled.connect(lambda watching: self._toggle_control(not watching))
         window.snapshot_requested.connect(self._snapshot_current)
         window.report_requested.connect(lambda: self._export_report("viewer"))
         window.preference_changed.connect(self._viewer_preference)
@@ -489,6 +490,7 @@ class MainWindow(QMainWindow):
                 self.service.upscale_capabilities, self.service.upscale_status)
 
     def _on_stream_closed(self) -> None:
+        self._close_picture_dialog()
         if self._stream_window is None:
             return
         self._stream_window = None
@@ -498,6 +500,7 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _close_stream_window(self) -> None:
+        self._close_picture_dialog()
         window, self._stream_window = self._stream_window, None
         if window is not None:
             window.close()
@@ -701,15 +704,35 @@ class MainWindow(QMainWindow):
     def _edit_picture(self) -> None:
         if self.connection.role != "viewer" or self.connection.phase not in {"active", "selection"}:
             return
+        if self._picture_dialog is not None:
+            self._picture_dialog.raise_()
+            self._picture_dialog.activateWindow()
+            return
         self._release_viewer_input()
         dialog = PictureDialog(saved_picture(self._viewer_settings), self._stream_window or self,
                                connection=self.connection)
-        accepted = dialog.exec()
-        if accepted:
-            self.connection.configure(dialog.picture())
+        self._picture_dialog = dialog
+        dialog.finished.connect(lambda result: self._picture_finished(dialog, result))
+        dialog.open()
+
+    def _picture_finished(self, dialog: PictureDialog, result: int) -> None:
+        if self._picture_dialog is not dialog:
+            return
+        self._picture_dialog = None
+        picture = dialog.picture() if result == PictureDialog.DialogCode.Accepted else None
+        dialog.deleteLater()
+        if self.connection.role != "viewer" or self.connection.phase not in {"active", "selection"}:
+            return
+        if picture is not None:
+            self.connection.configure(picture)
         elif self.connection.phase == "selection":
             self.connection.disconnect()
-        dialog.deleteLater()
+
+    def _close_picture_dialog(self) -> None:
+        dialog, self._picture_dialog = self._picture_dialog, None
+        if dialog is not None:
+            dialog.reject()
+            dialog.deleteLater()
 
     # ---- 设置 / 托盘 / 发现开关 ----
     def _apply_ui_settings(self) -> None:

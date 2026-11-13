@@ -124,6 +124,17 @@ def _media_roundtrip(frames: int = 12) -> dict:
     decoded.extend(decoder.flush())
     decoder.close()
 
+    from backend.media.video.codec.inprocess import InprocessDecoder
+    from backend.media.video.codec.probe import verify_backend
+    inprocess = {}
+    for codec in ("h264", "hevc", "av1"):
+        adapter = InprocessDecoder(StreamInfo(codec=CodecId(codec), width=320, height=240),
+                                   VideoEncodeConfig(realtime=True))
+        reason = verify_backend(adapter)
+        if reason:
+            raise RuntimeError(f"{adapter.name}: {reason}")
+        inprocess[adapter.name] = "ok"
+
     return {
         "encoded_packets": len(packets),
         "ts_bytes": len(payload),
@@ -131,6 +142,7 @@ def _media_roundtrip(frames: int = 12) -> dict:
         "decoded_frames": len(decoded),
         "frames": len(decoded),
         "lossless": [a.data for a in packets] == [b.data for b in restored],
+        "inprocess_decoders": inprocess,
     }
 
 
@@ -143,7 +155,7 @@ def _ui_report(window, app, pixmap_path: Path) -> dict:
     saved = pixmap.save(str(pixmap_path), "PNG")
     required_icons = (
         "monitor", "log-out", "ellipsis-vertical", "info", "search",
-        "arrow-right", "eye", "folder-up", "terminal", "cable", "layout-grid",
+        "arrow-right", "eye", "folder-up", "layout-grid",
     )
     families = QFontDatabase.families()
     return {
@@ -247,7 +259,7 @@ def _ffmpeg_report() -> dict:
 def _package_versions() -> dict:
     import importlib.metadata
 
-    wanted = ("PySide6", "pyinstaller")
+    wanted = ("PySide6", "pyinstaller", "av")
     versions = {}
     for name in wanted:
         try:

@@ -101,6 +101,19 @@ class PackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "license"):
             _copy_ffmpeg(self.ffmpeg.parent, self.root / "output")
 
+    def test_build_collects_pyav_native_dependencies(self):
+        native = self.root / "elink_video.dll"
+        native.touch()
+        with patch("scripts.build._ffmpeg_source", return_value=self.ffmpeg.parent), patch(
+            "scripts.build_video.build", return_value=native
+        ), patch("scripts.build.subprocess.run") as run, patch("scripts.build.shutil.copy2"), patch(
+            "scripts.build._copy_extras"
+        ), patch("scripts.build._copy_ffmpeg"), patch("scripts.build._write_build_info"):
+            build(self.root / "dist")
+        args = run.call_args.args[0]
+        self.assertIn("av", args)
+        self.assertEqual(args[args.index("--collect-all") + 1], "av")
+
     @unittest.skipUnless(os.name == "nt", "Windows native bridge")
     def test_native_compile_failure_prevents_packaging_old_library(self):
         with patch("scripts.build._ffmpeg_source", return_value=self.ffmpeg.parent), patch(

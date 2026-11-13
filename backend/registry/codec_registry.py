@@ -161,6 +161,22 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
     ffmpeg_path = resolve_ffmpeg_path(ffmpeg_path)
     probe = probe_ffmpeg(ffmpeg_path)
     registry = CodecRegistry()
+    try:
+        from backend.media.video.codec.inprocess import InprocessDecoder
+    except ImportError:
+        logger.debug("PyAV is unavailable", exc_info=True)
+    else:
+        import sys
+        for codec in ("h264", "hevc", "av1"):
+            for hardware in (True, False):
+                if hardware and sys.platform != "win32":
+                    continue
+                name = f"{codec}_pyav" + ("_d3d11va" if hardware else "")
+                registry.register_decoder(
+                    codec, name,
+                    lambda stream, config, hw=hardware: InprocessDecoder(stream, config, hardware=hw),
+                    priority=30 if hardware else 20,
+                )
 
     def availability(name: str) -> Availability:
         return lambda: probe.has_encoder(name)

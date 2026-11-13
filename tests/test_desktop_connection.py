@@ -226,6 +226,25 @@ class ConnectionTests(unittest.TestCase):
         self.assertTrue(self.host.server.isListening())
         self.connect(False)
 
+    def test_remote_failure_transmits_original_diagnostic_under_same_fault_id(self):
+        from frontend.desktop import error_report
+        from frontend.desktop.paths import error_dir
+        self.connect()
+        try:
+            raise OSError(22, "host source failure")
+        except OSError as exc:
+            exc.process_diagnostics = {"exit_code": 22, "stderr": "host stderr"}
+            self.host_media.failure_id = error_report.save_error(exc)
+            self.host_media.failure_message = str(exc)
+            self.host_media.failure_details = error_report.error_details(exc)
+        self.host_media.state_changed.emit("error", self.host_media.failure_message)
+        wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+        self.assertEqual(self.viewer.fault_id, self.host_media.failure_id)
+        reports = "\n".join(path.read_text(encoding="utf-8") for path in error_dir().glob("*.txt"))
+        self.assertIn('"remote"', reports)
+        self.assertIn("host source failure", reports)
+        self.assertIn("host stderr", reports)
+
     def test_either_side_and_simultaneous_close_are_normal_and_reconnectable(self):
         from frontend.desktop.paths import error_dir
         reports = set(error_dir().glob("*.txt"))

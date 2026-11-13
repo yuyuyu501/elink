@@ -21,6 +21,7 @@ import platform
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -48,7 +49,7 @@ from backend.media.video.filter.scaler import Scaler
 from backend.logging.logger import get_logger
 
 from .paths import resource_dir
-from .error_report import remember, save_error
+from .error_report import error_details, remember, save_error
 
 logger = get_logger(__name__)
 
@@ -157,6 +158,7 @@ class _QtRenderer:
         self._pending = None
         self._closed = False
         self._worker = None
+        self.prepare_ms = deque(maxlen=4096)
 
     def open(self) -> None:
         self._worker = threading.Thread(target=self._loop, name="preview-prepare", daemon=True)
@@ -198,6 +200,7 @@ class _QtRenderer:
                 if self._closed:
                     return
                 frame, self._pending = self._pending, None
+            started = time.perf_counter()
             if self._upscaler is not None:
                 try:
                     frame = self._upscaler.upscale(frame)
@@ -206,6 +209,7 @@ class _QtRenderer:
                         raise
                     logger.warning("FSR 超分辨率失败，回退原帧: %s", exc)
                     self._close_upscaler()
+            self.prepare_ms.append((time.perf_counter() - started) * 1000)
             self._emit(frame)
 
     def close(self) -> None:
@@ -315,6 +319,7 @@ class SessionService(QObject):
         self._control_worker: threading.Thread | None = None
         self.failure_id = ""
         self.failure_message = ""
+        self.failure_details = {}
         self.error_context: dict = {}
         self._frame_lock = threading.Lock()
         self._frame_generation = 0
@@ -566,10 +571,10 @@ class SessionService(QObject):
             return
         self._stop.set()
         transport = self._transport
-        if transport is not None:
+        pipeline = self._pipeline
+        if transport is not None and not getattr(pipeline, "abort_source", None):
             threading.Thread(target=transport.abort, name="media-stop", daemon=True).start()
         self.state_changed.emit("stopping", "正在停止…")
-        pipeline = self._pipeline
         if pipeline is not None and hasattr(pipeline, "stop"):
             try:
                 pipeline.stop()
@@ -581,6 +586,7 @@ class SessionService(QObject):
     def _begin(self, mode: str) -> None:
         self.failure_id = ""
         self.failure_message = ""
+        self.failure_details = {}
         self._input_error_id = ""
         self._mode = mode
         self._stop.clear()
@@ -626,6 +632,7 @@ class SessionService(QObject):
         self.failure_id = save_error(error, fault_id=self.failure_id, context=context)
         if not self.failure_message:
             self.failure_message = str(error)
+            self.failure_details = error_details(error)
 
     def _check_media_end(self) -> None:
         if not self._stop.is_set() and self._transport is not None:
@@ -659,7 +666,9 @@ class SessionService(QObject):
                 self._stats.extra["sampled_at"] = now
                 self._stats.extra["encoder" if is_host else "decoder"] = stats.extra.get("encoder" if is_host else "decoder", "--")
                 self._stats.extra["codec"] = source.stream.codec.value if source.stream else "--"
-                values = list(stats.extra.get("decode_output_ms", []))
+                inprocess = "decode_call_ms" in stats.extra
+                values = list(stats.extra.get("decode_call_ms" if inprocess else "decode_output_ms", []))
+                self._stats.extra["decode_label"] = "解码" if inprocess else "输出等待"
                 if values:
                     self._stats.extra["decode_ms"] = sum(values[-120:]) / len(values[-120:])
                 if is_host and self._control is not None and self._control.state == ChannelState.OPEN:
@@ -1143,7 +1152,8 @@ class SessionService(QObject):
         pipeline_stats = getattr(pipeline, "stats", None)
         extra = getattr(pipeline_stats, "extra", {}) if pipeline_stats is not None else {}
         stages = {}
-        for name in ("capture_ms", "queue_ms", "encode_ms", "decode_feed_ms", "decode_output_ms", "render_ms"):
+        for name in ("capture_ms", "queue_ms", "encode_ms", "decode_feed_ms", "decode_output_ms",
+                     "decode_queue_ms", "decode_call_ms", "pixel_convert_ms", "display_prepare_ms", "render_ms"):
             values = [float(value) for value in list(extra.get(name, [])) if value >= 0]
             if values:
                 stages[name.removesuffix("_ms")] = {

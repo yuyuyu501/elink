@@ -87,6 +87,29 @@ class ErrorReportTests(unittest.TestCase):
         self.assertEqual(entries[2]["type"], "ValueError")
         self.assertEqual(entries[2]["code"], "unknown")
 
+    def test_remote_diagnostics_keep_original_traceback_and_process(self):
+        try:
+            raise OSError(22, "source failure")
+        except OSError as exc:
+            exc.process_diagnostics = {"exit_code": 22, "stderr": "original stderr"}
+            details = error_report.error_details(exc)
+            payload = error_report.remote_details(details)
+        fault = error_report.save_error("remote failure", source="remote:host", remote=payload)
+        entry, = self.entries()
+        self.assertEqual(entry["fault_id"], fault)
+        self.assertIn("OSError", entry["remote"]["traceback"])
+        self.assertIn("22", entry["remote"]["process"])
+        self.assertIn("original stderr", entry["remote"]["process"])
+        self.assertLessEqual(len(json.dumps(payload)), 9000)
+
+    def test_diagnostic_message_budget_handles_large_unicode_errors(self):
+        payload = error_report.remote_details({
+            "message": "错误" * 10000, "traceback": "堆栈" * 20000,
+            "process": {"exit_code": 22, "stderr": "输出" * 10000},
+        })
+        self.assertLessEqual(len(json.dumps(payload)), 9000)
+        self.assertTrue(payload["traceback"])
+
     def test_concurrent_writes_and_bounded_caches(self):
         for index in range(120):
             error_report.remember(f"{index}:" + "x" * 5000)

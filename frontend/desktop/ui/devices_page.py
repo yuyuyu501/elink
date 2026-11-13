@@ -5,7 +5,7 @@ from __future__ import annotations
 import platform
 import socket
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QFrame,
@@ -170,6 +170,16 @@ class ComputerRow(QFrame):
             self.arrow_button = _icon_button("chevron-right", f"进入 {name}")
             self.arrow_button.clicked.connect(on_open)
             row.addWidget(self.arrow_button)
+        for button in self.findChildren(QPushButton):
+            button.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self.setProperty("focused", any(button.hasFocus() for button in self.findChildren(QPushButton)))
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.update()
+        return super().eventFilter(watched, event)
 
 
 class DevicesPage(QWidget):
@@ -288,7 +298,6 @@ class DevicesPage(QWidget):
         self.watch_button = None
         for index, (name, text) in enumerate((
             ("folder-up", "文件传输"), ("eye", "观看模式"),
-            ("terminal", "终端"), ("cable", "端口映射"),
         )):
             if index:
                 toolbar.addWidget(divider(vertical=True, length=20))

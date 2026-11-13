@@ -223,5 +223,7 @@ def build_receive_resources(
         bus=bus,
     )
 
+    if "srt" in resources:
+        pipeline.abort_source = resources["srt"].abort
     resources.update({"pipeline": pipeline, "demuxer": demuxer, "renderer": renderer})
     return Runtime(**resources)

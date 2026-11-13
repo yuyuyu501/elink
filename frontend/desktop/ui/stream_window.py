@@ -258,7 +258,6 @@ class StreamWindow(QWidget):
     closed = Signal()
     stats_toggled = Signal(bool)
     picture_requested = Signal()
-    watch_toggled = Signal(bool)
     snapshot_requested = Signal()
     report_requested = Signal()
     preference_changed = Signal(str, object)
@@ -300,9 +299,6 @@ class StreamWindow(QWidget):
         controls.setSpacing(8)
         self.picture_button = self._command("画面设置", "settings", self.picture_requested.emit)
         controls.addWidget(self.picture_button)
-        self.watch_button = QCheckBox("观看模式")
-        self.watch_button.toggled.connect(self.watch_toggled.emit)
-        controls.addWidget(self.watch_button)
         form = QFormLayout()
         self.mouse_mode = QComboBox()
         for text, mode in MOUSE_MODES:
@@ -431,13 +427,12 @@ class StreamWindow(QWidget):
         return button
 
     def apply_settings(self, settings) -> None:
-        widgets = [self.watch_button, self.mouse_mode, self.sensitivity, self.sr_mode,
+        widgets = [self.mouse_mode, self.sensitivity, self.sr_mode,
                    self.sr_percent, self.sr_sharpen, self.sr_sharpness,
                    *self.preferences.values()]
         for widget in widgets:
             widget.blockSignals(True)
         self._control_enabled = settings.control_enabled
-        self.watch_button.setChecked(not settings.control_enabled)
         self.mouse_mode.setCurrentIndex(max(0, self.mouse_mode.findData(settings.mouse_mode)))
         self.preview.set_mouse_mode(self.mouse_mode.currentData())
         self.sensitivity.setValue(round(settings.mouse_sensitivity * 10))

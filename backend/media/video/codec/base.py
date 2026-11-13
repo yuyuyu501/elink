@@ -550,6 +550,9 @@ class FfmpegDecoderBase(BaseDecoder):
         self._frames: "queue.Queue[Frame]" = queue.Queue(maxsize=1 if self.config.realtime else 0)
         self._pts_lock = threading.Lock()
         self._pending_pts: deque[tuple[int, float]] = deque()
+        self._output_ready = threading.Condition(self._pts_lock)
+        self._aborted = False
+        self._max_pending_frames = 4
         self._reader: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=40)
@@ -558,6 +561,7 @@ class FfmpegDecoderBase(BaseDecoder):
         self._timebase = Timebase.mpegts()
         self.output_callback = None
         self.output_wait_ms: deque[float] = deque(maxlen=4096)
+        self._discard_before_pts = None
 
     def open(self) -> None:
         width, height = self.stream.width, self.stream.height
@@ -575,7 +579,8 @@ class FfmpegDecoderBase(BaseDecoder):
         )
         realtime_args = (
             ["-probesize", "32", "-analyzeduration", "100000", "-fpsprobesize", "0",
-             "-flags", "low_delay", "-threads", "1"]
+             "-flags", "low_delay",
+             *([] if self.hardware else ["-threads", "4", "-thread_type", "slice"])]
             if self.config.realtime else []
         )
         cmd = [
@@ -629,7 +634,14 @@ class FfmpegDecoderBase(BaseDecoder):
         if self._reader_error:
             raise DecodeError(self._reader_error, detail=self._stderr_text())
 
-        with self._pts_lock:
+        with self._output_ready:
+            if self.config.realtime and len(self._pending_pts) >= self._max_pending_frames:
+                ready = self._output_ready.wait_for(
+                    lambda: len(self._pending_pts) < self._max_pending_frames or self._aborted or self._reader_error,
+                    timeout=5,
+                )
+                if not ready or self._aborted or self._reader_error:
+                    raise DecodeError("解码输出停滞或已停止", detail=self._stderr_text())
             self._pending_pts.append((packet.pts or 0, time.perf_counter()))
 
         try:
@@ -657,6 +669,22 @@ class FfmpegDecoderBase(BaseDecoder):
         if self._reader_error:
             raise DecodeError(self._reader_error, detail=self._stderr_text())
         return frames
+
+    def abort(self) -> None:
+        with self._output_ready:
+            self._aborted = True
+            self._output_ready.notify_all()
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+    def reset(self, packet: Packet) -> None:
+        # The supplied SPS/PPS + IDR (or sequence header + keyframe) resets the
+        # codec's reference state in-band. Keep the process and its startup cost.
+        self._discard_before_pts = packet.pts
 
     def diagnostics(self) -> dict:
         return _process_diagnostics(self)
@@ -699,8 +727,9 @@ class FfmpegDecoderBase(BaseDecoder):
         return frames
 
     def _build_frame(self, data: bytes) -> Frame:
-        with self._pts_lock:
+        with self._output_ready:
             pts, entered = self._pending_pts.popleft() if self._pending_pts else (0, time.perf_counter())
+            self._output_ready.notify_all()
         self.output_wait_ms.append((time.perf_counter() - entered) * 1000)
         return Frame(
             data=data,
@@ -716,16 +745,19 @@ class FfmpegDecoderBase(BaseDecoder):
     def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
         stdout = self._proc.stdout
-        buf = bytearray()
+        buf = bytearray(self._frame_size)
+        offset = 0
         try:
             while True:
-                chunk = stdout.read(READ_CHUNK)
-                if not chunk:
+                size = stdout.readinto(memoryview(buf)[offset:])
+                if not size:
                     break
-                buf += chunk
-                while len(buf) >= self._frame_size:
-                    frame = self._build_frame(bytes(buf[: self._frame_size]))
-                    del buf[: self._frame_size]
+                offset += size
+                if offset == self._frame_size:
+                    frame = self._build_frame(bytes(buf))
+                    offset = 0
+                    if self._discard_before_pts is not None and frame.pts < self._discard_before_pts:
+                        continue
                     if self.output_callback is not None:
                         self.output_callback(frame)
                     else:
@@ -741,6 +773,8 @@ class FfmpegDecoderBase(BaseDecoder):
         except Exception as exc:
             self._reader_error = f"读取解码输出失败: {exc}"
             logger.exception("%s 解码输出读取失败", self.name)
+            with self._output_ready:
+                self._output_ready.notify_all()
 
     def _stderr_loop(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None

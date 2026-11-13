@@ -13,8 +13,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from frontend.desktop import icons
 from frontend.desktop.discovery import DiscoveryService
@@ -67,6 +67,22 @@ class DevicePageTests(unittest.TestCase):
         self.page.enter_button.click()
         self.page.watch_button.click()
         self.assertEqual([control for _, control in self.requests], [True, False])
+
+    def test_detail_toolbar_keeps_only_file_and_watch_actions(self):
+        buttons = self.page.findChildren(QPushButton, "deviceTool")
+        self.assertEqual([button.text().strip() for button in buttons], ["文件传输", "观看模式"])
+
+    def test_keyboard_focus_highlights_entire_row(self):
+        self.page.show()
+        row = self.page.rows[1]
+        for button in (row.open_button, row.info_button, row.arrow_button):
+            button.setFocus()
+            APP.processEvents()
+            self.assertTrue(row.property("focused"))
+            self.assertEqual(button.palette().button().color().alpha(), 0)
+        self.page.search.setFocus()
+        APP.processEvents()
+        self.assertFalse(row.property("focused"))
 
     def test_offline_device_cannot_connect_and_reappearance_recovers(self):
         self.page.open_peer(PEER["id"])
@@ -217,7 +233,8 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertFalse(self.request.call_args.args[2])
         self.window._session_connected(ViewerSettings(control_enabled=False))
         self.assertEqual(self.window.stack.currentIndex(), PAGE_INDEX["devices"])
-        self.assertTrue(self.window._stream_window.watch_button.isChecked())
+        self.assertFalse(hasattr(self.window._stream_window, "watch_button"))
+        self.assertFalse(self.window._stream_window._control_enabled)
         self.assertTrue(self.window._stream_window.isWindow())
         self.assertFalse(self.window._stream_window.isFullScreen())
         self.assertFalse(hasattr(self.window, "viewer_page"))
@@ -274,7 +291,8 @@ class WindowConnectionTests(unittest.TestCase):
         ), patch.object(self.window.service, "set_gamepad_enabled"):
             self.window._mode_applied(False)
             control.assert_called_once()
-        self.assertTrue(stream.watch_button.isChecked())
+        self.assertFalse(hasattr(stream, "watch_toggled"))
+        self.assertFalse(stream._control_enabled)
         self.assertFalse(stream.preview.control_enabled)
         stream.mouse_mode.setCurrentIndex(1)
         self.assertEqual(self.window._viewer_settings.mouse_mode, "remote")
@@ -339,6 +357,46 @@ class WindowConnectionTests(unittest.TestCase):
         dialog.apply_button.click()
         self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
         dialog.close()
+
+    def test_picture_dialog_is_async_unique_and_closes_before_remote_window(self):
+        self.window._session_connected(ViewerSettings())
+        self.window.connection.role, self.window.connection.phase = "viewer", "active"
+        with patch.object(PictureDialog, "exec", side_effect=AssertionError("nested event loop")):
+            self.window._edit_picture()
+            dialog = self.window._picture_dialog
+            self.assertTrue(dialog.isVisible())
+            self.window._edit_picture()
+            self.assertIs(self.window._picture_dialog, dialog)
+            with patch.object(self.window.connection, "disconnect") as disconnect:
+                self.window._stream_window.close()
+                disconnect.assert_called_once()
+        self.assertIsNone(self.window._picture_dialog)
+        APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_picture_accept_clears_owner_before_reentrant_disconnect(self):
+        self.window._session_connected(ViewerSettings())
+        self.window.connection.role, self.window.connection.phase = "viewer", "active"
+        self.window._edit_picture()
+        dialog = self.window._picture_dialog
+        with patch.object(self.window.connection, "configure",
+                          side_effect=lambda _: self.window._close_stream_window()) as configure:
+            dialog.accept()
+            configure.assert_called_once()
+        self.assertIsNone(self.window._picture_dialog)
+        self.assertIsNone(self.window._stream_window)
+        APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_connection_loss_with_picture_dialog_never_applies_settings(self):
+        self.window._session_connected(ViewerSettings())
+        self.window.connection.role, self.window.connection.phase = "viewer", "active"
+        self.window._edit_picture()
+        with patch.object(self.window.connection, "configure") as configure:
+            self.window.connection.phase = "stopping"
+            self.window._connection_changed()
+            self.assertIsNone(self.window._picture_dialog)
+            self.assertIsNone(self.window._stream_window)
+            configure.assert_not_called()
+        APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_picture_controls_map_legacy_values(self):
         for fps, bitrate, expected_fps, expected_bitrate in (
@@ -419,6 +477,8 @@ class WindowConnectionTests(unittest.TestCase):
         text = "\n".join(self.window._stats_lines(stats))
         for value in ("119.5", "8.00 Mbps", "12.0 ms", "3.0 ms", "libx264", "丢包 --"):
             self.assertIn(value, text)
+        stats.extra["decode_label"] = "输出等待"
+        self.assertIn("输出等待 3.0 ms", "\n".join(self.window._stats_lines(stats)))
         stats.extra = {}
         self.assertNotIn("119.5", "\n".join(self.window._stats_lines(stats)))
         self.window._toggle_stats_overlay(False)

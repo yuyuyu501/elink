@@ -25,6 +25,8 @@ from backend.media.stream import StreamInfo
 from backend.media.video.codec.decoding.h264.h264 import H264Decoder
 from backend.media.video.codec.encoding.h264.libx264 import Libx264Encoder
 from backend.pipeline.video_pipeline import VideoPipeline
+from backend.pipeline.receive_pipeline import ReceivePipeline
+from backend.media.video.codec.probe import _sample_packets
 from backend.transport.srt import build_srt_url
 from frontend.desktop.service import SessionService, _QtRenderer
 
@@ -37,6 +39,141 @@ def frame(index=0):
 
 
 class StreamLatencyTests(unittest.TestCase):
+    def test_stop_never_blocks_gui_on_source_termination_and_runs_once(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        pipeline = ReceivePipeline(None, None, None, VideoEncodeConfig(realtime=True))
+        def abort():
+            calls.append(True)
+            entered.set()
+            release.wait(2)
+        pipeline.abort_source = abort
+        try:
+            start = time.perf_counter()
+            pipeline.stop()
+            pipeline.stop()
+            self.assertLess(time.perf_counter() - start, 0.5)
+            self.assertTrue(entered.wait(1))
+            self.assertEqual(len(calls), 1)
+        finally:
+            release.set()
+            pipeline._abort_thread.join(2)
+
+    def test_pipe_decoder_bounds_inflight_frames_and_abort_releases_feeder(self):
+        from unittest.mock import Mock
+        decoder = H264Decoder(StreamInfo(width=1, height=1), VideoEncodeConfig(realtime=True))
+        decoder._proc = Mock(stdin=io.BytesIO())
+        decoder._proc.poll.return_value = None
+        for index in range(4):
+            decoder._pending_pts.append((index, time.perf_counter()))
+        errors, done = [], threading.Event()
+        def feed():
+            try:
+                decoder.decode(Packet(data=b"extra", pts=4))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+        thread = threading.Thread(target=feed)
+        thread.start()
+        try:
+            self.assertFalse(done.wait(0.05))
+            self.assertEqual(len(decoder._pending_pts), 4)
+            decoder.abort()
+            self.assertTrue(done.wait(1))
+            self.assertEqual(len(errors), 1)
+        finally:
+            decoder.abort()
+            thread.join(2)
+
+    def test_receiving_continues_while_decoder_blocks_and_recovers_at_keyframe(self):
+        from dataclasses import replace
+        entered, received = threading.Event(), threading.Event()
+        first, delta, _ = _sample_packets("h264")
+        packets = [replace(first, pts=0)]
+        packets += [replace(delta, pts=index * 3000) for index in range(1, 9)]
+        packets += [replace(first, pts=27000), replace(delta, pts=30000)]
+        decoded, decoders = [], []
+
+        class Demux:
+            streams = [StreamInfo(width=320, height=240)]
+            index = 0
+            def open(self):
+                pass
+            def read(self):
+                if self.index == 1:
+                    if not entered.wait(2):
+                        raise RuntimeError("decoder did not start")
+                if self.index == len(packets):
+                    received.set()
+                    return None
+                packet = packets[self.index]
+                self.index += 1
+                return packet
+            def close(self):
+                pass
+
+        class Decoder:
+            name = "test"
+            def open(self):
+                pass
+            def decode(self, packet):
+                if packet.pts == 0:
+                    entered.set()
+                    if not received.wait(2):
+                        raise RuntimeError("receiving blocked on decoding")
+                decoded.append(packet.pts)
+                return []
+            def flush(self):
+                return []
+            def close(self):
+                pass
+
+        def factory(*_):
+            decoder = Decoder()
+            decoders.append(decoder)
+            return decoder
+        renderer = SimpleNamespace(open=lambda: None, close=lambda: None)
+        pipeline = ReceivePipeline(Demux(), factory, renderer, VideoEncodeConfig(realtime=True))
+        pipeline.run()
+        self.assertEqual(decoded, [0, 27000, 30000])
+        self.assertEqual(len(decoders), 2)
+        self.assertEqual(pipeline._packets.maxsize, 4)
+        self.assertEqual(pipeline.stats.extra["packets_dropped"], 8)
+        self.assertEqual(pipeline.stats.extra["decoder_resets"], 1)
+        self.assertFalse(pipeline._receiver.is_alive())
+        self.assertTrue(pipeline.stats.extra["decode_queue_ms"])
+
+    def test_decoder_failure_unblocks_receiver_and_keeps_original_exception(self):
+        from unittest.mock import Mock
+        original = OSError(22, "original decoding failure")
+        release = threading.Event()
+        packet = _sample_packets("h264")[0]
+        class Demux:
+            streams = [StreamInfo(width=320, height=240)]
+            index = 0
+            def open(self):
+                pass
+            def read(self):
+                self.index += 1
+                if self.index == 1:
+                    return packet
+                release.wait(2)
+                return None
+            def close(self):
+                pass
+        decoder = Mock(name="decoder")
+        decoder.decode.side_effect = original
+        decoder.diagnostics.return_value = {"exit_code": 22}
+        pipeline = ReceivePipeline(Demux(), lambda *_: decoder, Mock(),
+                                   VideoEncodeConfig(realtime=True))
+        pipeline.abort_source = release.set
+        with self.assertRaises(OSError) as caught:
+            pipeline.run()
+        self.assertIs(caught.exception, original)
+        self.assertEqual(original.process_diagnostics["exit_code"], 22)
+        self.assertFalse(pipeline._receiver.is_alive())
+
     def test_expected_shutdown_marks_media_end_before_transport_is_aborted(self):
         service = SessionService()
         service._transport = SimpleNamespace(diagnostics=lambda: {})

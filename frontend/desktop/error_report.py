@@ -41,8 +41,35 @@ def install_recent_logs() -> None:
         root.addHandler(handler)
 
 
+def error_details(error: BaseException | str) -> dict:
+    project_error = isinstance(error, ElinkError)
+    return {
+        "type": type(error).__name__ if isinstance(error, BaseException) else "SessionError",
+        "code": error.code.value if project_error else ErrorCode.UNKNOWN.value,
+        "message": error.message if project_error else str(error),
+        "detail": error.detail if project_error else None,
+        "traceback": (
+            "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            if isinstance(error, BaseException) and error.__traceback__ is not None
+            else "No local traceback available"
+        ),
+        "process": getattr(error, "process_diagnostics", None),
+    }
+
+
+def remote_details(details: dict) -> dict:
+    """Keep original diagnostics within the session protocol's message budget."""
+    result = {key: value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+              for key, value in details.items() if key in {
+                  "type", "code", "message", "detail", "traceback", "process"}}
+    while len(json.dumps(result)) > 9000:
+        key = max(result, key=lambda item: len(json.dumps(result[item])))
+        result[key] = result[key][:len(result[key]) // 2]
+    return result
+
+
 def save_error(error: BaseException | str, *, fault_id: str = "", source: str = "local",
-               context: dict | None = None) -> str:
+               context: dict | None = None, remote: dict | None = None) -> str:
     """Return a fault ID even if storage fails; never raise while reporting errors."""
     fault_id = fault_id or uuid.uuid4().hex
     if getattr(_writing, "active", False):
@@ -50,22 +77,14 @@ def save_error(error: BaseException | str, *, fault_id: str = "", source: str = 
     _writing.active = True
     try:
         now = datetime.now().astimezone()
-        project_error = isinstance(error, ElinkError)
         entry = {
             "time": now.isoformat(timespec="seconds"),
             "version": __version__, "fault_id": fault_id, "source": source,
-            "type": type(error).__name__ if isinstance(error, BaseException) else "SessionError",
-            "code": error.code.value if project_error else ErrorCode.UNKNOWN.value,
-            "message": error.message if project_error else str(error),
-            "detail": error.detail if project_error else None,
-            "traceback": (
-                "".join(traceback.format_exception(type(error), error, error.__traceback__))
-                if isinstance(error, BaseException) and error.__traceback__ is not None
-                else "No local traceback available"
-            ),
-            "process": getattr(error, "process_diagnostics", None),
+            **error_details(error),
             "context": context or {},
         }
+        if remote is not None:
+            entry["remote"] = remote
         with _lock:
             directory = error_dir()
             directory.mkdir(parents=True, exist_ok=True)
