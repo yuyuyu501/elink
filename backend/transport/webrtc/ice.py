@@ -114,3 +114,22 @@ def host_candidate_media(media: SdpMedia, candidate: Candidate) -> None:
     if candidate.type is not CandidateType.HOST:
         logger.debug("非 host 候选写入媒体段: %s", candidate.describe() if hasattr(candidate, "describe") else candidate)
     media.add_candidate(candidate)
+
+
+def describe_runtime_ice(pc) -> list[dict]:
+    """Read the routes nominated by the pinned aiortc/aioice stack."""
+    routes = []
+    seen = set()
+    for transceiver in pc.getTransceivers():
+        transport = transceiver.sender.transport.transport
+        if id(transport) in seen:
+            continue
+        seen.add(id(transport))
+        for pair in transport._connection._nominated.values():
+            routes.append({
+                "state": transport.state,
+                "local": [pair.local_candidate.host, pair.local_candidate.port],
+                "remote": [pair.remote_candidate.host, pair.remote_candidate.port],
+                "protocol": pair.local_candidate.transport,
+            })
+    return routes

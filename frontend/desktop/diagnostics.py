@@ -174,6 +174,47 @@ def _ui_report(window, app, pixmap_path: Path) -> dict:
     }
 
 
+def _native_preview_report(app, output: Path) -> dict:
+    import av
+    import numpy as np
+    from .ui.preview import PreviewWidget
+
+    preview = PreviewWidget()
+    preview.set_edge_padding(0)
+    preview.set_stats_visible(True)
+    pixels = np.zeros((240, 320, 3), dtype=np.uint8)
+    pixels[:, :160] = [220, 40, 30]
+    pixels[:, 160:] = [30, 190, 70]
+    image = av.VideoFrame.from_ndarray(pixels, format="rgb24").reformat(format="yuv420p")
+    image.colorspace, image.color_range = 5, 1
+    results = []
+    try:
+        for width, height in ((640, 480), (1280, 720), (1920, 1080)):
+            preview.resize(width, height)
+            preview.show()
+            preview.set_frame(Frame.from_av(image, native=True))
+            for _ in range(8):
+                app.processEvents()
+                time.sleep(.01)
+            shot = preview.grab().toImage()
+            rect = preview._target_rect()
+            colors = [shot.pixelColor(rect.left() + rect.width() * n // 4, rect.center().y())
+                      for n in (1, 3)]
+            valid = all(abs(actual - expected) <= 6
+                        for color, expected_rgb in zip(colors, ((220, 40, 30), (30, 190, 70)))
+                        for actual, expected in zip(color.getRgb()[:3], expected_rgb))
+            if preview._gpu_failed or not valid:
+                raise RuntimeError(f"原生 YUV 画面渲染失败：{[c.name() for c in colors]}")
+            results.append({"size": [width, height], "colors": [c.name() for c in colors]})
+        preview.grab().save(str(output), "PNG")
+        return {"gpu": preview._surface is not None, "samples": results}
+    finally:
+        preview.clear()
+        preview.close()
+        preview.deleteLater()
+        app.processEvents()
+
+
 def run_self_test(output: Path) -> int:
     """执行自检并写 JSON；返回 0 表示全部通过。
 
@@ -219,6 +260,10 @@ def run_self_test(output: Path) -> int:
         report["registry"] = _registry_report()
         report["media"] = _media_roundtrip()
         report["packages"] = _package_versions()
+        report["runtime_imports"] = _runtime_imports()
+        if app.platformName() not in {"offscreen", "minimal"}:
+            report["native_preview"] = _native_preview_report(
+                app, output.with_name(output.stem + "-video.png"))
 
         ui_ok = (
             report["ui"]["pages"] >= 4 and report["ui"]["grab"][0] > 0
@@ -259,7 +304,7 @@ def _ffmpeg_report() -> dict:
 def _package_versions() -> dict:
     import importlib.metadata
 
-    wanted = ("PySide6", "pyinstaller", "av")
+    wanted = ("PySide6", "pyinstaller", "av", "aiortc", "dxcam", "soundcard", "sounddevice", "numpy")
     versions = {}
     for name in wanted:
         try:
@@ -267,6 +312,17 @@ def _package_versions() -> dict:
         except importlib.metadata.PackageNotFoundError:
             continue
     return versions
+
+
+def _runtime_imports() -> dict:
+    import importlib
+    libraries = ["av", "aiortc", "aioice", "pylibsrtp", "soundcard", "sounddevice",
+                 "PySide6.QtOpenGLWidgets"]
+    if os.name == "nt":
+        libraries.append("dxcam")
+    for library in libraries:
+        importlib.import_module(library)
+    return dict.fromkeys(libraries, "ok")
 
 
 if __name__ == "__main__":  # pragma: no cover

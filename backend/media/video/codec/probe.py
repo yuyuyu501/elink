@@ -142,7 +142,7 @@ VIDEO_ENCODERS: dict[str, str] = {
 
 VIDEO_DECODERS: dict[str, str] = {
     **{f"{codec}_pyav{suffix}": codec for codec in ("h264", "hevc", "av1")
-       for suffix in ("", "_d3d11va")},
+       for suffix in ("", "_d3d11va") if codec != "h264" or suffix},
     "h264": "h264",
     "h264_cuvid": "h264",
     "h264_amf": "h264",
@@ -295,6 +295,8 @@ def codec_options(values: dict) -> dict:
     if not isinstance(values, dict):
         raise ValueError("编解码设置格式无效")
     result = {key: values.get(key, "auto") for key in ("codec", "encoder", "decoder")}
+    if result["decoder"] == "h264_pyav":
+        result["decoder"] = "h264"
     for key, allowed in (
         ("codec", {"auto", "h264", "hevc", "av1"}),
         ("encoder", {"auto", *VIDEO_ENCODERS}),
@@ -314,10 +316,12 @@ def checked_capabilities(value: dict) -> dict:
     result = {}
     for kind, mapping in (("encoders", VIDEO_ENCODERS), ("decoders", VIDEO_DECODERS)):
         items = value.get(kind, {})
-        if not isinstance(items, dict) or len(items) > len(mapping):
+        if not isinstance(items, dict) or len(items) > len(mapping) + (kind == "decoders"):
             raise ValueError("能力信息过长")
         result[kind] = {}
         for name, item in items.items():
+            if kind == "decoders" and name == "h264_pyav":
+                name = "h264"
             if name not in mapping or not isinstance(item, dict) or item.get("codec") != mapping[name]:
                 raise ValueError("能力后端无效")
             if item.get("state") == "available":
@@ -333,14 +337,18 @@ def public_capabilities(snapshot: dict) -> dict:
     })
 
 
-def compatible_choices(remote: dict, local: dict, preference: dict) -> list[dict]:
+def compatible_choices(remote: dict, local: dict, preference: dict, transport="srt") -> list[dict]:
     options = codec_options(preference)
     encoders, decoders = remote.get("encoders", {}), local.get("decoders", {})
     result = []
     for codec in ("h264", "hevc", "av1"):
+        if transport == "webrtc" and codec != "h264":
+            continue
         if options["codec"] not in ("auto", codec):
             continue
         for encoder, enc in encoders.items():
+            if transport == "webrtc" and encoder.endswith(("_vaapi", "_mediacodec")):
+                continue
             if enc["codec"] != codec or options["encoder"] not in ("auto", encoder):
                 continue
             for decoder, dec in decoders.items():

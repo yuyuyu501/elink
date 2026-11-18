@@ -115,6 +115,7 @@ def test_aac_roundtrip() -> None:
     frames = []
     for packet in packets:
         frames.extend(decoder.decode(packet))
+    assert frames, "AAC must start decoding before the input closes"
     frames.extend(decoder.flush())
     decoder.close()
 
@@ -291,6 +292,31 @@ def test_websocket_channel_roundtrip() -> None:
     assert isinstance(received[0], protocol.ControlCommand)
     assert received[0].name == "hello"
     assert received[0].args.get("n") == 1
+
+
+def test_srt_mux_demux_keeps_audio_and_video_streams_separate():
+    import io
+    from backend.media.container.mpegts import MpegTsMuxer, MpegTsDemuxer
+    from backend.media.packet import Packet
+    output = io.BytesIO()
+    muxer = MpegTsMuxer(output)
+    video = StreamInfo(codec=CodecId.H264, width=320, height=240)
+    audio = StreamInfo(stream_id=1, media_type=MediaType.AUDIO, codec=CodecId.AAC,
+                       sample_rate=48000, channels=2)
+    muxer.open([video, audio])
+    for index in range(3):
+        muxer.write(Packet(data=b"\0\0\0\1\x65video", pts=index * 3000))
+        muxer.write(Packet(data=b"\xff\xf1audio", codec=CodecId.AAC, pts=index * 1800, stream_id=1))
+    demuxer = MpegTsDemuxer(io.BytesIO(output.getvalue()))
+    demuxer.open()
+    packets = []
+    while (packet := demuxer.read()) is not None:
+        packets.append(packet)
+    assert len(packets) == 6
+    assert {s.codec for s in demuxer.streams} == {CodecId.H264, CodecId.AAC}
+    assert [p.pts for p in packets if p.codec == CodecId.AAC] == [0, 1800, 3600]
+    assert all(p.stream_id == 1 and p.data == b"\xff\xf1audio"
+               for p in packets if p.codec == CodecId.AAC)
 
 
 def main() -> int:

@@ -108,3 +108,250 @@ class MediaTrack:
 
     def close(self) -> None:
         self.depacketizer.reset()
+
+
+# Native tracks are separate from the packetizer above: aiortc owns RTP/RTCP.
+import asyncio
+import queue
+import threading
+from collections import deque
+
+import av
+from aiortc import MediaStreamTrack
+from aiortc.codecs.h264 import H264Encoder
+from aiortc.mediastreams import MediaStreamError
+
+from backend.media.frame import Frame
+
+
+class DesktopTrack(MediaStreamTrack):
+    kind = "video"
+
+    def __init__(self, capture, failure):
+        super().__init__()
+        self.capture, self.failure = capture, failure
+        self.loop = asyncio.get_running_loop()
+        self.ready = asyncio.Event()
+        self._closed = threading.Event()
+        self._latest = None
+        self._lock = threading.Lock()
+        self.capture_ms = deque(maxlen=4096)
+        self.frames = 0
+        self.origin_pts = None
+        self._worker = threading.Thread(target=self._capture, name="rtc-capture", daemon=True)
+        self._worker.start()
+
+    def _capture(self):
+        try:
+            self.capture.open()
+            from backend.qos.pacing import FrameClock
+            clock = FrameClock(self.capture.config.fps)
+            started = time.perf_counter()
+            while not self._closed.is_set():
+                clock.wait()
+                begin = time.perf_counter()
+                frame = self.capture.read()
+                self.capture_ms.append((time.perf_counter() - begin) * 1000)
+                frame.pts = round((time.perf_counter() - started) * 90000)
+                self.capture.cursor_state = {"mode": self.capture.cursor_applied_mode,
+                                            "visible": self.capture.cursor_visible,
+                                            "pts": frame.pts - (self.origin_pts or 0)}
+                with self._lock:
+                    self._latest = frame
+                self.frames += 1
+                self.loop.call_soon_threadsafe(self.ready.set)
+        except Exception as exc:
+            if not self._closed.is_set():
+                self.failure(exc)
+        finally:
+            self.capture.close()
+            self.loop.call_soon_threadsafe(self.ready.set)
+
+    async def recv(self):
+        while not self._closed.is_set():
+            await self.ready.wait()
+            self.ready.clear()
+            with self._lock:
+                frame, self._latest = self._latest, None
+            if frame is not None:
+                if self.origin_pts is None:
+                    self.origin_pts = frame.pts
+                frame = frame.with_data(frame.data, pts=frame.pts - self.origin_pts)
+                return frame.to_av()
+        raise MediaStreamError
+
+    def stop(self):
+        if not self._closed.is_set():
+            self.failure(RuntimeError("WebRTC 视频发送已停止"))
+        self._closed.set()
+        self.ready.set()
+        super().stop()
+
+    async def close(self):
+        self.stop()
+        await asyncio.to_thread(self._worker.join, 5)
+
+
+class SelectedEncoder(H264Encoder):
+    def __init__(self, adapter, stats):
+        super().__init__()
+        self.adapter = adapter
+        self.stats = stats
+        self._opened = False
+
+    @property
+    def target_bitrate(self):
+        return self.adapter.target_bitrate
+
+    @target_bitrate.setter
+    def target_bitrate(self, value):
+        if hasattr(self, "adapter"):
+            self.adapter.target_bitrate = max(300000, min(value, self.adapter.config.bitrate_kbps * 1000))
+
+    def encode(self, image, force_keyframe=False):
+        if not self._opened:
+            self.adapter.open()
+            self._opened = True
+        self.adapter.force_keyframe = force_keyframe
+        begin = time.perf_counter()
+        frame = Frame.from_av(image, native=True)
+        packets = self.adapter.encode(frame)
+        self.stats.extra.setdefault("encode_ms", deque(maxlen=4096)).append(
+            (time.perf_counter() - begin) * 1000)
+        self.stats.frames_encoded += 1
+        self.stats.bytes_written += sum(p.size for p in packets)
+        self.stats.keyframes += sum(p.keyframe for p in packets)
+        payloads = []
+        for packet in packets:
+            payloads.extend(self._packetize(self._split_bitstream(packet.data)))
+        return payloads, frame.pts
+
+
+class LatestQueue(asyncio.Queue):
+    async def put(self, item):
+        if self.full():
+            self.get_nowait()
+        self.put_nowait(item)
+
+
+class DecodeQueue(queue.Queue):
+    """Recover at IDR after overflow; never drop an arbitrary reference frame."""
+
+    def __init__(self, decode, request_keyframe):
+        super().__init__(maxsize=4)
+        self.decode = decode
+        self.request_keyframe = request_keyframe
+        self.waiting_keyframe = False
+
+    def put(self, item, block=True, timeout=None):
+        with self.mutex:
+            if item is None:
+                self.queue.clear()
+            elif self._qsize() >= self.maxsize:
+                self.queue.clear()
+                self.waiting_keyframe = True
+                self.request_keyframe()
+            if item is not None and self.waiting_keyframe:
+                if not any(n and n[0] & 31 == 5 for n in H264Encoder._split_bitstream(item[1].data)):
+                    return
+                self.waiting_keyframe = False
+                item[1]._elink_reset = True
+            self._put(item)
+            self.unfinished_tasks += 1
+            self.not_empty.notify()
+
+
+def tune_receiver(receiver, adapter, failure, stats):
+    """Pinned aiortc 1.14 decoder worker hook, with per-receiver state."""
+    from aiortc import rtcrtpreceiver
+    from aiortc.jitterbuffer import JitterBuffer
+    from backend.media.packet import Packet
+    loop = asyncio.get_running_loop()
+    if not getattr(rtcrtpreceiver.decoder_worker, "_elink", False):
+        original = rtcrtpreceiver.decoder_worker
+
+        def worker(loop, input_q, output_q):
+            if not isinstance(input_q, DecodeQueue):
+                return original(loop, input_q, output_q)
+            while True:
+                task = input_q.get()
+                if task is None:
+                    asyncio.run_coroutine_threadsafe(output_q.put(None), loop)
+                    return
+                for frame in input_q.decode(task[1]):
+                    asyncio.run_coroutine_threadsafe(output_q.put(frame), loop)
+        worker._elink = True
+        rtcrtpreceiver.decoder_worker = worker
+
+    adapter.native_output = True
+    opened = False
+
+    def decode(encoded):
+        nonlocal opened
+        try:
+            if not opened:
+                adapter.open()
+                opened = True
+            packet = Packet(data=encoded.data, pts=encoded.timestamp)
+            if getattr(encoded, "_elink_reset", False):
+                adapter.reset(packet)
+            frames = adapter.decode(packet)
+            stats.packets_read += 1
+            stats.bytes_read += len(encoded.data)
+            stats.frames_decoded += len(frames)
+            return [f.to_av() for f in frames]
+        except Exception as exc:
+            failure(exc)
+            return []
+
+    def request():
+        async def pli():
+            for ssrc in list(receiver._RTCRtpReceiver__active_ssrc):
+                await receiver._send_rtcp_pli(ssrc)
+        loop.call_soon_threadsafe(lambda: asyncio.create_task(pli()))
+
+    receiver._RTCRtpReceiver__decoder_queue = DecodeQueue(decode, request)
+    receiver._RTCRtpReceiver__jitter_buffer = JitterBuffer(capacity=2048, is_video=True)
+
+
+class LoopbackTrack(MediaStreamTrack):
+    kind = "audio"
+
+    def __init__(self, notify):
+        super().__init__()
+        self.loop = asyncio.get_running_loop()
+        self.queue = LatestQueue(maxsize=3)
+        self.closed = threading.Event()
+        self._worker = threading.Thread(target=self._read, args=(notify,), name="rtc-loopback", daemon=True)
+        self._worker.start()
+
+    def _read(self, notify):
+        from fractions import Fraction
+        from backend.media.audio.capture.windows.wasapi_capture import WasapiCapture
+        capture = WasapiCapture()
+        try:
+            capture.open()
+            while not self.closed.is_set():
+                frame = capture.read()
+                image = av.AudioFrame(format="s16", layout="stereo", samples=frame.samples)
+                image.planes[0].update(frame.data)
+                image.sample_rate = frame.sample_rate
+                image.pts, image.time_base = frame.pts, Fraction(1, frame.sample_rate)
+                asyncio.run_coroutine_threadsafe(self.queue.put(image), self.loop).result(timeout=2)
+        except Exception as exc:
+            if not self.closed.is_set():
+                notify(exc)
+        finally:
+            capture.close()
+
+    async def recv(self):
+        frame = await self.queue.get()
+        if frame is None:
+            raise MediaStreamError
+        return frame
+
+    async def close(self):
+        self.closed.set()
+        await self.queue.put(None)
+        self.stop()
+        await asyncio.to_thread(self._worker.join, 3)

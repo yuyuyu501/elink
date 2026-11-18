@@ -63,6 +63,20 @@ def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = F
         "frontend.desktop.upscale",
         "--collect-all",
         "av",
+        "--collect-all",
+        "aiortc",
+        "--collect-all",
+        "aioice",
+        "--collect-all",
+        "pylibsrtp",
+        "--collect-all",
+        "soundcard",
+        "--collect-all",
+        "sounddevice",
+        "--collect-all",
+        "dxcam",
+        "--hidden-import",
+        "PySide6.QtOpenGLWidgets",
         "--icon",
         str(ROOT / "frontend" / "desktop" / "resources" / "elink.ico"),
         "--exclude-module",
@@ -150,7 +164,7 @@ def _write_build_info(output: Path) -> None:
     from frontend.desktop import __version__
 
     versions: dict[str, str] = {}
-    for name in ("PySide6", "pyinstaller", "av"):
+    for name in ("PySide6", "pyinstaller", "av", "aiortc", "soundcard", "sounddevice", "dxcam"):
         try:
             versions[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:

@@ -572,6 +572,7 @@ class UpscaleProcessor:
             raise
 
     def upscale(self, frame):
+        frame = frame.bgra()
         output = self.processor.upscale(frame)
         if self.sharpen is not None:
             output = self.sharpen.upscale(output)

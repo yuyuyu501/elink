@@ -76,12 +76,47 @@ class PreviewWidget(QWidget):
         self._edge_padding = 12
         self._frames = 0
         self._source_size = QSize(0, 0)
+        self._scaled = None
+        self._scaled_key = None
+        self._hover_resume = False
+        self._native_frame = None
+        self._surface = self._overlay = None
+        self._gpu_failed = False
 
     # ---- 数据 ----
     def set_frame(self, frame: Frame) -> None:
         if frame.width <= 0 or frame.height <= 0:
             return
-        payload = bytes(frame.data)
+        self._native_frame = frame
+        if (frame.owner is not None and frame.pixel_format.value in {"nv12", "yuv420p"}
+                and QApplication.platformName() not in {"offscreen", "minimal"} and not self._gpu_failed):
+            try:
+                if self._surface is None:
+                    from .video_surface import YuvSurface, VideoOverlay
+                    self._surface, self._overlay = YuvSurface(self), VideoOverlay(self)
+                    self._surface.failed.connect(self._gpu_fallback)
+                self._source_size = QSize(frame.width, frame.height)
+                self._frame_pts = frame.pts
+                if self._cursor_boundary is not None and frame.pts >= self._cursor_boundary:
+                    self._cursor_boundary = None
+                self._frames += 1
+                self._info = f"{frame.width}×{frame.height} · 第 {self._frames} 帧"
+                self._surface.setGeometry(self.rect())
+                self._overlay.setGeometry(self.rect())
+                self._surface.show()
+                self._overlay.show()
+                self._overlay.raise_()
+                self._surface.set_frame(frame.owner)
+                self._overlay.update()
+                return
+            except Exception as exc:
+                self._gpu_fallback(str(exc))
+                return
+        if self._surface is not None:
+            self._surface.hide()
+            self._overlay.hide()
+        frame = frame.bgra()
+        payload = frame.data if isinstance(frame.data, (bytes, bytearray, memoryview)) else bytes(frame.data)
         image = QImage(
             payload,
             frame.width,
@@ -91,6 +126,7 @@ class PreviewWidget(QWidget):
         )
         self._image = image
         self._pixels = payload
+        self._scaled = self._scaled_key = None
         self._frame_pts = frame.pts
         if self._cursor_boundary is not None and frame.pts >= self._cursor_boundary:
             self._cursor_boundary = None
@@ -103,6 +139,11 @@ class PreviewWidget(QWidget):
     def clear(self) -> None:
         self.release_input()
         self._image = None
+        self._native_frame = None
+        if self._surface:
+            self._surface.frame = None
+            self._surface.hide()
+            self._overlay.hide()
         self._pixels = None
         self._paint_pending = False
         self._cursor_boundary = None
@@ -121,10 +162,14 @@ class PreviewWidget(QWidget):
 
     def set_stats_lines(self, lines: list[str]) -> None:
         self._stats_lines = [str(line) for line in lines if line]
+        if self._overlay:
+            self._overlay.update()
         self.update()
 
     def set_stats_visible(self, visible: bool) -> None:
         self._stats_visible = bool(visible)
+        if self._overlay:
+            self._overlay.update()
         self.update()
 
     def set_edge_padding(self, padding: int) -> None:
@@ -137,7 +182,15 @@ class PreviewWidget(QWidget):
 
     @property
     def has_frame(self) -> bool:
-        return self._image is not None
+        return self._image is not None or self._native_frame is not None
+
+    def _gpu_fallback(self, reason):
+        self._gpu_failed = True
+        if self._surface:
+            self._surface.hide()
+            self._overlay.hide()
+        if self._native_frame is not None:
+            self.set_frame(self._native_frame.bgra())
 
     @property
     def source_size(self) -> QSize:
@@ -298,6 +351,7 @@ class PreviewWidget(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
+        self.resume_hover_input(event.position())
         if self.captured and not self._relative:
             self._absolute_motion(event.position())
             if not self.video_contains(event.position()):
@@ -353,6 +407,7 @@ class PreviewWidget(QWidget):
     def event(self, event) -> bool:
         if getattr(self, "captured", False):
             if event.type() in (QEvent.Type.FocusOut, QEvent.Type.WindowDeactivate):
+                self._hover_resume = True
                 self.release_input()
             elif event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Tab:
                 self._key(event, event.type() == QEvent.Type.KeyPress)
@@ -361,14 +416,37 @@ class PreviewWidget(QWidget):
 
     def leaveEvent(self, event) -> None:
         if not self._relative:
+            self._hover_resume = self.captured or self._hover_resume
             self.release_input()
         super().leaveEvent(event)
+
+    def enterEvent(self, event):
+        self.resume_hover_input(event.position())
+        super().enterEvent(event)
+
+    def resume_hover_input(self, position):
+        if (not self._hover_resume or self.captured or not self.control_enabled
+                or not self.window().isActiveWindow()
+                or QApplication.activeModalWidget() is not None
+                or QApplication.activePopupWidget() is not None
+                or not self.video_contains(position)):
+            return
+        hit = QApplication.widgetAt(self.mapToGlobal(position.toPoint()))
+        if hit in (self._surface, self._overlay):
+            hit = self
+        if hit is not self:
+            return
+        if self.capture_input():
+            self._hover_resume = False
 
     def _confine_cursor(self) -> None:
         self._confinement.confine(int(self.winId()), self._target_rect().getRect(),
                                  (self.width(), self.height()))
 
     def resizeEvent(self, event) -> None:
+        if self._surface:
+            self._surface.setGeometry(self.rect())
+            self._overlay.setGeometry(self.rect())
         if self.captured and self._relative:
             try:
                 self._confine_cursor()
@@ -389,11 +467,11 @@ class PreviewWidget(QWidget):
 
     # ---- 绘制 ----
     def _target_rect(self) -> QRect:
-        if self._image is None:
+        if not self.has_frame:
             return QRect()
         pad = self._edge_padding
         area = self.rect().adjusted(pad, pad, -pad, -pad)
-        image_ratio = self._image.width() / max(1, self._image.height())
+        image_ratio = self._source_size.width() / max(1, self._source_size.height())
         area_ratio = area.width() / max(1, area.height())
         if image_ratio > area_ratio:
             width = area.width()
@@ -421,11 +499,19 @@ class PreviewWidget(QWidget):
         path.addRoundedRect(QRectF(target), 8, 8)
         painter.save()
         painter.setClipPath(path)
-        painter.drawImage(target, self._image)
+        key = (self._frames, target.size().width(), target.size().height())
+        if key != self._scaled_key:
+            self._scaled = self._image.scaled(target.size(), Qt.AspectRatioMode.IgnoreAspectRatio,
+                                              Qt.TransformationMode.SmoothTransformation)
+            self._scaled_key = key
+        painter.drawImage(target.topLeft(), self._scaled)
         painter.restore()
         if self._paint_pending:
             self._paint_pending = False
             self.presented.emit()
+        self._paint_overlays(painter, target)
+
+    def _paint_overlays(self, painter, target):
         if self.captured and self.mouse_mode == "local" and not self._relative and self._software_position is not None:
             pointer = QPainterPath()
             point = self._software_position

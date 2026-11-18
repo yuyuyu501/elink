@@ -47,6 +47,14 @@ def load() -> tuple[HostSettings, ViewerSettings]:
     data = _read()
     host = _merge(HostSettings, data.get("host"))
     viewer = _merge(ViewerSettings, data.get("viewer"))
+    host.clipboard_enabled = host.gamepad_enabled = True
+    viewer.clipboard_enabled = viewer.gamepad_enabled = True
+    viewer.decoder = "h264" if viewer.decoder == "h264_pyav" else viewer.decoder
+    protocols = viewer.protocol_preferences
+    viewer.protocol_preferences = {
+        peer: protocol for peer, protocol in protocols.items()
+        if isinstance(peer, str) and len(peer) <= 128 and protocol in {"webrtc", "srt"}
+    } if isinstance(protocols, dict) else {}
     viewer.mouse_mode = mouse_mode(viewer.mouse_mode)
     viewer.mouse_sensitivity = sensitivity_value(viewer.mouse_sensitivity)
     viewer.stats_visible = viewer.stats_visible is True

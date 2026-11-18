@@ -445,8 +445,10 @@ class MainWindow(QMainWindow):
         decoder = extra.get("decoder", "--") if fresh else "--"
         codec = {"h264": "H.264", "hevc": "H.265", "av1": "AV1"}.get(extra.get("codec"), "--")
         decode_label = extra.get("decode_label", "解码")
+        loss = ([f"丢包 {extra['packet_loss_percent']:.2f}%"]
+                if fresh and extra.get("packet_loss_percent") is not None else [])
         return [f"{fps} FPS", f"{bitrate} Mbps", f"RTT {rtt} ms", f"{decode_label} {decode} ms",
-                codec, f"编码 {encoder}", f"解码 {decoder}", "丢包 --"]
+                *loss, codec, f"编码 {encoder}", f"解码 {decoder}"]
 
     def _on_cursor(self, state) -> None:
         if self._stream_window is not None:
@@ -469,10 +471,7 @@ class MainWindow(QMainWindow):
         window.set_status(self.status_label.text(), self.status_dot.property("tone") or "ok")
         window.stats_toggled.connect(self._toggle_stats_overlay)
         window.picture_requested.connect(self._edit_picture)
-        window.snapshot_requested.connect(self._snapshot_current)
-        window.report_requested.connect(lambda: self._export_report("viewer"))
         window.preference_changed.connect(self._viewer_preference)
-        window.upscale_refresh.connect(self.service.refresh_upscale)
         window.upscale_cancel.connect(self.service.cancel_upscale_probe)
         window.set_upscale_capabilities(self.service.upscale_capabilities, self.service.upscale_status)
         window.preview.bind_input(self.service.send_input, self.service.set_input_focus)
@@ -662,10 +661,12 @@ class MainWindow(QMainWindow):
         if self._stream_window is not None:
             self._stream_window.release_input()
         if name not in {"mouse_mode", "mouse_sensitivity", "clipboard_enabled", "gamepad_enabled",
-                        "sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness"}:
+                        "sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness", "muted"}:
             return
         previous = replace(self._viewer_settings)
         setattr(self._viewer_settings, name, value)
+        if name == "muted":
+            self.service.set_muted(value)
         if name.startswith("sr_") and not self._viewer_settings.sr_enabled and name != "sr_enabled":
             setattr(self.connection._viewer, name, value)
             self._persist_ui()

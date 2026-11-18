@@ -47,6 +47,61 @@ def key(epoch=1, pressed=True):
 
 
 class InputSessionTests(unittest.TestCase):
+    def test_gamepad_state_rejects_duplicates_and_reordered_packets_per_device(self):
+        from backend.control_channel.udp_motion import GamepadOrder
+        sender, receiver = GamepadOrder(), GamepadOrder()
+        first, last = [sender.prepare(InputEvent(EventType.GAMEPAD, extra={"index": 0, "values": [n]}))
+                       for n in (1, 2)]
+        self.assertTrue(receiver.accept(last))
+        self.assertFalse(receiver.accept(first))
+        self.assertFalse(receiver.accept(last))
+        other = sender.prepare(InputEvent(EventType.GAMEPAD, extra={"index": 1, "values": [3]}))
+        self.assertTrue(receiver.accept(other))
+
+    def test_unreliable_motion_recovers_relative_loss_and_ignores_reordering(self):
+        from backend.control_channel.udp_motion import MotionSender
+        sender = MotionSender()
+        events = []
+        session = InputSession(lambda event: events.append(event) or True)
+        session.receive(focus())
+        moves = [sender.prepare(InputEvent(EventType.MOUSE_MOVE, x=5, y=2,
+                                           extra={"epoch": 1, "coordinates": "relative"}))
+                 for _ in range(3)]
+        self.assertTrue(session.receive(moves[1]))
+        self.assertEqual((events[-1].x, events[-1].y), (10, 4))
+        self.assertFalse(session.receive(moves[0]))
+        self.assertFalse(session.receive(moves[1]))
+        self.assertTrue(session.receive(moves[2]))
+        self.assertEqual((events[-1].x, events[-1].y), (5, 2))
+        session.receive(focus(2, False))
+        self.assertFalse(session.receive(moves[2]))
+
+    def test_udp_motion_requires_the_negotiated_token(self):
+        from backend.control_channel.udp_motion import UdpMotionChannel
+        events = []
+        server = UdpMotionChannel("127.0.0.1", 0, "session-token", events.append,
+                                 server=True, peer="127.0.0.1")
+        server.open()
+        port = server.socket.getsockname()[1]
+        client = UdpMotionChannel("127.0.0.1", port, "session-token", lambda _: None)
+        impostor = UdpMotionChannel("127.0.0.1", port, "other-token", lambda _: None)
+        client.open()
+        impostor.open()
+        try:
+            event = InputEvent(EventType.MOUSE_MOVE, x=5, y=9)
+            impostor.send_event(event)
+            time.sleep(.03)
+            self.assertFalse(events)
+            client.send_event(event)
+            deadline = time.monotonic() + 1
+            while not events and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertEqual((events[0].x, events[0].y), (5, 9))
+        finally:
+            client.close()
+            impostor.close()
+            server.close()
+
     def setUp(self):
         self.events = []
         self.session = InputSession(lambda event: self.events.append(event) or True)

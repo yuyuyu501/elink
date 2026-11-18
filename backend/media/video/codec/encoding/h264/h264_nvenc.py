@@ -22,7 +22,9 @@ class H264NvencEncoder(FfmpegEncoderBase):
                       ("-rc-lookahead", "0"), ("-zerolatency", "1"))
 
     def video_args(self) -> list[str]:
-        return [*super().video_args(), "-bufsize", f"{max(1, self.config.bitrate_kbps // 10)}k"]
+        fps = self.stream.framerate or 30
+        return [*super().video_args(), "-bufsize",
+                str(max(300000, round(2 * self.config.bitrate_kbps * 1000 / fps)))]
 
     @classmethod
     def available(cls, ffmpeg_path: str = "ffmpeg") -> bool:

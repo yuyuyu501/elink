@@ -166,6 +166,7 @@ class VideoPipeline:
         deadline = time.perf_counter() + duration_s if duration_s else None
         next_deadline = time.perf_counter()
         frame_index = 0
+        from backend.qos.pacing import wait_until
 
         try:
             while not self._stop_event.is_set():
@@ -185,7 +186,7 @@ class VideoPipeline:
                 # 把线程调度抖动写进 PTS 会让下游（封装/播放器）看到长短不一的
                 # 帧间隔，进而触发重复 DTS 之类的重排问题。
                 grid_pts = self._timebase.ticks(frame_index / fps)
-                frame = frame.with_data(bytes(frame.data), pts=grid_pts)
+                frame = frame.with_data(frame.data, pts=grid_pts)
                 if hasattr(self.capture, "cursor_applied_mode"):
                     self.capture.cursor_state = {
                         "mode": self.capture.cursor_applied_mode,
@@ -199,7 +200,7 @@ class VideoPipeline:
                 next_deadline += interval
                 delay = next_deadline - time.perf_counter()
                 if delay > 0:
-                    self._stop_event.wait(delay)
+                    wait_until(next_deadline)
                 else:
                     next_deadline = time.perf_counter()
         except Exception as exc:

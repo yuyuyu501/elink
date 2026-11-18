@@ -171,7 +171,8 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
             for hardware in (True, False):
                 if hardware and sys.platform != "win32":
                     continue
-                name = f"{codec}_pyav" + ("_d3d11va" if hardware else "")
+                name = (f"{codec}_pyav_d3d11va" if hardware else
+                        "h264" if codec == "h264" else f"{codec}_pyav")
                 registry.register_decoder(
                     codec, name,
                     lambda stream, config, hw=hardware: InprocessDecoder(stream, config, hardware=hw),
@@ -212,7 +213,6 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
     ]
 
     decoder_specs = [
-        (CodecId.H264.value, "h264", "backend.media.video.codec.decoding.h264.h264", "H264Decoder", False),
         (CodecId.H264.value, "h264_cuvid", "backend.media.video.codec.decoding.h264.h264_cuvid", "H264CuvidDecoder", True),
         (CodecId.H264.value, "h264_amf", "backend.media.video.codec.decoding.h264.h264_amf", "H264AmfDecoder", True),
         (CodecId.H264.value, "h264_qsv", "backend.media.video.codec.decoding.h264.h264_qsv", "H264QsvDecoder", True),
@@ -239,11 +239,22 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
         except ImportError as exc:
             logger.debug("跳过编码后端 %s: %s", name, exc)
             continue
+        # Device-context-only FFmpeg adapters retain their existing upload path.
+        if not name.endswith(("_vaapi", "_mediacodec")):
+            from backend.media.video.codec.inprocess import InprocessEncoder
+            factory = lambda stream, config, n=name: InprocessEncoder(
+                stream, replace(config, encoder=n))
+            import av
+            available = lambda n=name: n in av.codecs_available
+        else:
+            factory = lambda stream, config, _cls=cls: _cls(
+                stream, replace(config, ffmpeg_path=ffmpeg_path))
+            available = availability(name)
         registry.register_encoder(
             codec,
             name,
-            lambda stream, config, _cls=cls: _cls(stream, replace(config, ffmpeg_path=ffmpeg_path)),
-            available=availability(name),
+            factory,
+            available=available,
             priority=_PRIORITY_HARDWARE if is_hardware else _PRIORITY_SOFTWARE,
         )
 

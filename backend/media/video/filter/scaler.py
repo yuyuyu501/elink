@@ -40,12 +40,10 @@ class Scaler(BaseVideoFilter):
         return max(2, int(self.height * source_ratio)), self.height
 
     def process(self, frame: Frame) -> Frame:
-        if frame.pixel_format is not PixelFormat.BGRA:
-            raise ValueError("Scaler 当前只支持 BGRA")
-
         target_width, target_height = self._target_size(frame)
         if (target_width, target_height) == (frame.width, frame.height):
             return frame
+        frame = frame.bgra()
 
         source = bytes(frame.data)
         source_stride = frame.width * 4

@@ -106,3 +106,86 @@ def _get_loop() -> asyncio.AbstractEventLoop:
 
 async def _await(awaitable):
     return await awaitable
+
+
+class RtcControlChannel(ControlChannel):
+    """aiortc channels are owned exclusively by their asyncio thread."""
+
+    kind = "webrtc"
+
+    def __init__(self, loop, failure):
+        super().__init__()
+        self.loop, self.failure = loop, failure
+        self.channels = {}
+        self._pending = 0
+        from .udp_motion import GamepadOrder
+        self.order = GamepadOrder()
+
+    def attach(self, channel):
+        if channel.label not in {"control", "motion"} or channel.label in self.channels:
+            raise TransportClosedError("无效或重复的数据通道")
+        self.channels[channel.label] = channel
+        channel.on("message", self._message)
+        channel.on("close", lambda: setattr(self, "state", ChannelState.CLOSED))
+        channel.on("open", self.open)
+        self.open()
+
+    def open(self):
+        if (len(self.channels) == 2
+                and all(c.readyState == "open" for c in self.channels.values())):
+            self.state = ChannelState.OPEN
+
+    def _message(self, data):
+        if not isinstance(data, bytes):
+            return
+        for kind, payload in protocol.FrameDecoder().push(data):
+            if kind == protocol.FrameType.JSON:
+                event = protocol.decode_json(payload)
+                if self.order.accept(event):
+                    self._dispatch(payload)
+
+    def _send(self, label, data):
+        if self.state != ChannelState.OPEN:
+            raise TransportClosedError("WebRTC 控制通道未连接")
+        with self._lock:
+            if self._pending >= 512:
+                raise TransportClosedError("可靠控制消息积压超限")
+            self._pending += 1
+
+        def send():
+            try:
+                channel = self.channels[label]
+                if channel.readyState != "open":
+                    raise TransportClosedError("WebRTC 控制通道已关闭")
+                if channel.bufferedAmount > 256 * 1024:
+                    if label == "motion":
+                        return
+                    raise TransportClosedError("可靠控制缓冲超限")
+                channel.send(data)
+            except Exception as exc:
+                self.state = ChannelState.FAILED
+                self.failure(exc)
+            finally:
+                with self._lock:
+                    self._pending -= 1
+        self.loop.call_soon_threadsafe(send)
+
+    def _write(self, data):
+        self._send("control", data)
+
+    def send_event(self, event):
+        event = self.order.prepare(event)
+        label = ("motion" if event.event_type in (protocol.EventType.MOUSE_MOVE, protocol.EventType.GAMEPAD)
+                 else "control")
+        self._send(label, protocol.encode_json(event))
+
+    def send_reliable_event(self, event):
+        self._send("control", protocol.encode_json(event))
+
+    def send_ping(self):
+        pass
+
+    def close(self):
+        self.state = ChannelState.CLOSED
+        for channel in self.channels.values():
+            self.loop.call_soon_threadsafe(channel.close)

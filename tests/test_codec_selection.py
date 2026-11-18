@@ -48,7 +48,8 @@ class SelectionTests(unittest.TestCase):
         for codec in PROBE_SAMPLES:
             for suffix in ("_pyav", "_pyav_d3d11va"):
                 name = codec + suffix
-                self.assertEqual(codec_options({"codec": codec, "decoder": name})["decoder"], name)
+                expected = "h264" if name == "h264_pyav" else name
+                self.assertEqual(codec_options({"codec": codec, "decoder": name})["decoder"], expected)
                 self.assertNotIn("NVIDIA", codec_label(name))
         self.assertIn("D3D11VA", codec_label("h264_pyav_d3d11va"))
 

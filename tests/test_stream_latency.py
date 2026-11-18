@@ -22,7 +22,7 @@ from backend.control_channel.tcp import _ControlQueue
 from backend.media.frame import Frame
 from backend.media.packet import Packet
 from backend.media.stream import StreamInfo
-from backend.media.video.codec.decoding.h264.h264 import H264Decoder
+from backend.media.video.codec.base import FfmpegDecoderBase
 from backend.media.video.codec.encoding.h264.libx264 import Libx264Encoder
 from backend.pipeline.video_pipeline import VideoPipeline
 from backend.pipeline.receive_pipeline import ReceivePipeline
@@ -31,6 +31,13 @@ from backend.transport.srt import build_srt_url
 from frontend.desktop.service import SessionService, _QtRenderer
 
 APP = QCoreApplication.instance() or QCoreApplication([])
+
+
+class H264Decoder(FfmpegDecoderBase):
+    """Exercise the shared subprocess path still used by hardware adapters."""
+    name = codec = input_format = "h264"
+    ffmpeg_decoder = None
+    hardware = False
 
 
 def frame(index=0):
@@ -284,10 +291,10 @@ class StreamLatencyTests(unittest.TestCase):
             capture = SimpleNamespace(config=SimpleNamespace(fps=fps), read=lambda: frame())
             pipeline = VideoPipeline(capture, None, None, VideoEncodeConfig(realtime=True))
             clock = [0.0]
-            pipeline._stop_event.wait = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
             captured = []
             pipeline._offer = captured.append
-            with patch("backend.pipeline.video_pipeline.time.perf_counter", side_effect=lambda: clock[0]):
+            with patch("backend.pipeline.video_pipeline.time.perf_counter", side_effect=lambda: clock[0]), \
+                    patch("backend.qos.pacing.wait_until", side_effect=lambda deadline: clock.__setitem__(0, deadline)):
                 pipeline._capture_loop(None, 10)
             frames = [item[0] for item in captured if isinstance(item, tuple)]
             self.assertEqual(len(frames), 10)

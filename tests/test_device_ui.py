@@ -412,6 +412,7 @@ class WindowConnectionTests(unittest.TestCase):
 
     def test_codec_choices_follow_format_and_apply_state(self):
         connection = self.window.connection
+        connection._protocol = "srt"
         connection._codec_enabled = True
         connection.phase = "active"
         connection._peer_caps = {"encoders": {
@@ -431,6 +432,10 @@ class WindowConnectionTests(unittest.TestCase):
         dialog.decoder.setCurrentIndex(1)
         self.assertEqual(dialog.picture()["codec"], "hevc")
         self.assertEqual(dialog.picture()["encoder"], "libx265")
+        dialog.transport.setCurrentIndex(dialog.transport.findData("webrtc"))
+        self.assertEqual(dialog.picture()["transport"], "webrtc")
+        self.assertEqual([dialog.codec.itemData(i) for i in range(dialog.codec.count())], ["auto", "h264"])
+        self.assertFalse(hasattr(dialog, "refresh_button"))
         connection.phase = "validating"
         connection.changed.emit()
         self.assertFalse(dialog.apply_button.isEnabled())
@@ -475,8 +480,11 @@ class WindowConnectionTests(unittest.TestCase):
             "encoder": "libx264", "decoder": "h264",
         })
         text = "\n".join(self.window._stats_lines(stats))
-        for value in ("119.5", "8.00 Mbps", "12.0 ms", "3.0 ms", "libx264", "丢包 --"):
+        for value in ("119.5", "8.00 Mbps", "12.0 ms", "3.0 ms", "libx264"):
             self.assertIn(value, text)
+        self.assertNotIn("丢包", text)
+        stats.extra["packet_loss_percent"] = 1.25
+        self.assertIn("丢包 1.25%", "\n".join(self.window._stats_lines(stats)))
         stats.extra["decode_label"] = "输出等待"
         self.assertIn("输出等待 3.0 ms", "\n".join(self.window._stats_lines(stats)))
         stats.extra = {}
@@ -499,6 +507,15 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertFalse(hasattr(self.window.settings_page, "auto_host_row"))
         self.assertNotIn("allow_discovery", UiSettings.__dataclass_fields__)
         self.assertNotIn("auto_host", UiSettings.__dataclass_fields__)
+        self.window._session_connected(ViewerSettings())
+        stream = self.window._stream_window
+        self.assertNotIn("clipboard_enabled", stream.preferences)
+        self.assertNotIn("gamepad_enabled", stream.preferences)
+        self.assertFalse(hasattr(stream, "sr_refresh"))
+        from PySide6.QtWidgets import QPushButton
+        texts = [button.text() for button in stream.findChildren(QPushButton)]
+        for text in ("截图", "导出性能报告", "释放键鼠输入"):
+            self.assertNotIn(text, texts)
 
 
 class DiscoveryUpdateTests(unittest.TestCase):

@@ -201,3 +201,88 @@ class AudioPipeline:
     def _publish(self, event) -> None:
         if self.bus is not None:
             self.bus.publish(event)
+
+
+class SessionAudio:
+    """SRT audio stays on a separate worker; its queues cannot stall video."""
+
+    def __init__(self, *, muxer=None, ffmpeg_path="ffmpeg", muted=False):
+        self.muxer, self.ffmpeg_path = muxer, ffmpeg_path
+        self.muted = muted
+        self.closed = threading.Event()
+        self.queue = queue.Queue(maxsize=4)
+        self.playback = None
+        self.failure = ""
+        self.packets = self.frames = 0
+        if muxer is not None:
+            muxer.audio_stream = StreamInfo(stream_id=1, media_type=MediaType.AUDIO,
+                                            codec=CodecId.AAC, sample_rate=48000, channels=2)
+        self.worker = threading.Thread(target=self._run, name="srt-audio", daemon=True)
+        self.worker.start()
+
+    def submit(self, packet):
+        if self.queue.full():
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+        try:
+            self.queue.put_nowait(packet)
+        except queue.Full:
+            pass
+
+    def _run(self):
+        capture = codec = None
+        try:
+            stream = StreamInfo(stream_id=1, media_type=MediaType.AUDIO, codec=CodecId.AAC,
+                                sample_rate=48000, channels=2)
+            if self.muxer is not None:
+                from backend.media.audio.capture.windows.wasapi_capture import WasapiCapture
+                from backend.media.audio.codec.encoding.aac import AacEncoder
+                while not self.closed.is_set() and not self.muxer.ready.wait(.05):
+                    pass
+                if self.closed.is_set():
+                    return
+                capture = WasapiCapture()
+                capture.open()
+                codec = AacEncoder(stream, bitrate_kbps=128, ffmpeg_path=self.ffmpeg_path)
+                codec.open()
+                while not self.closed.is_set():
+                    for packet in codec.encode(capture.read()):
+                        if self.closed.is_set():
+                            break
+                        self.muxer.write(packet)
+                        self.packets += 1
+                    self.frames += 1
+            else:
+                from backend.media.audio.playback.windows.wasapi_playback import WasapiPlayback
+                from backend.media.audio.codec.decoding.aac import AacDecoder
+                self.playback = WasapiPlayback()
+                self.playback.muted = self.muted
+                self.playback.open()
+                codec = AacDecoder(stream, ffmpeg_path=self.ffmpeg_path)
+                codec.open()
+                while not self.closed.is_set():
+                    try:
+                        packet = self.queue.get(timeout=.05)
+                    except queue.Empty:
+                        continue
+                    self.packets += 1
+                    for frame in codec.decode(packet):
+                        self.playback.write(frame)
+                        self.frames += 1
+        except Exception as exc:
+            if not self.closed.is_set():
+                self.failure = str(exc)
+                logger.warning("系统声音不可用: %s", exc)
+        finally:
+            if capture:
+                capture.close()
+            if codec:
+                codec.close()
+            if self.playback:
+                self.playback.close()
+
+    def close(self):
+        self.closed.set()
+        self.worker.join(timeout=5)

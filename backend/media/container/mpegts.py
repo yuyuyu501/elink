@@ -11,6 +11,7 @@ TS 层的时间语义固定为 90kHz（``Timebase.mpegts()``），因此 packet 
 from __future__ import annotations
 
 import struct
+import threading
 from typing import BinaryIO
 
 from backend.config.schema import MuxConfig
@@ -39,11 +40,13 @@ _STREAM_TYPE_OF = {
     CodecId.H264: STREAM_TYPE_H264,
     CodecId.H265: STREAM_TYPE_HEVC,
     CodecId.AV1: STREAM_TYPE_AV1,
+    CodecId.AAC: 0x0F,
 }
 _CODEC_OF_STREAM_TYPE = {
     STREAM_TYPE_H264: CodecId.H264,
     STREAM_TYPE_HEVC: CodecId.H265,
     STREAM_TYPE_AV1: CodecId.AV1,
+    0x0F: CodecId.AAC,
 }
 
 TS_TIMEBASE = Timebase.mpegts()
@@ -106,9 +109,11 @@ def build_pmt(
         + struct.pack(">H", 0xE000 | pcr_pid)
         + struct.pack(">H", 0xF000)
     )
-    for stream_type, pid in elementary:
+    for entry in elementary:
+        stream_type, pid = entry[:2]
+        info = entry[2] if len(entry) > 2 else descriptors
         body += (bytes([stream_type]) + struct.pack(">H", 0xE000 | pid)
-                 + struct.pack(">H", 0xF000 | len(descriptors)) + descriptors)
+                 + struct.pack(">H", 0xF000 | len(info)) + info)
     return _build_section(0x02, body)
 
 
@@ -156,6 +161,9 @@ class MpegTsMuxer(Muxer):
         self._last_psi_pts: int | None = None
         self._last_pcr: int | None = None
         self._pcr_interval = TS_TIMEBASE.ticks(self.config.pcr_interval_ms / 1000.0)
+        self.audio_stream = None
+        self.ready = threading.Event()
+        self._write_lock = threading.RLock()
 
     @property
     def bytes_written(self) -> int:
@@ -171,12 +179,18 @@ class MpegTsMuxer(Muxer):
                 f"MPEG-TS 暂不支持该编码: {video.codec.value}", detail=video.codec.value
             )
 
-        self.streams = [video]
+        audio = self.audio_stream or next((s for s in streams if s.codec == CodecId.AAC), None)
+        self.streams = [video, audio] if audio else [video]
         self._stream_type = stream_type
         self._write_psi()
         self._opened = True
+        self.ready.set()
 
     def write(self, packet: Packet) -> int:
+        with self._write_lock:
+            return self._write_packet(packet)
+
+    def _write_packet(self, packet):
         if not self._opened:
             raise MpegTsError("封装器尚未打开")
 
@@ -189,15 +203,18 @@ class MpegTsMuxer(Muxer):
             self._write_psi()
             self._last_psi_pts = pts
 
+        audio = packet.codec == CodecId.AAC
+        if audio and self.audio_stream is None and len(self.streams) < 2:
+            raise MpegTsError("没有协商音频流")
         pcr = None
-        if self._last_pcr is None or dts - self._last_pcr >= self._pcr_interval:
+        if not audio and (self._last_pcr is None or dts - self._last_pcr >= self._pcr_interval):
             pcr = dts
             self._last_pcr = dts
 
-        pes = self._build_pes(packet.data, pts, dts)
+        pes = self._build_pes(packet.data, pts, dts, 0xC0 if audio else VIDEO_STREAM_ID)
         before = self._bytes_written
         self._packetize(
-            self._es_pid,
+            self._es_pid + 1 if audio else self._es_pid,
             pes,
             pusi=True,
             pcr=pcr,
@@ -211,10 +228,10 @@ class MpegTsMuxer(Muxer):
             self.config.program_number,
             self._pmt_pid,
         )
-        pmt = build_pmt(
-            self.config.program_number, self._es_pid, [(self._stream_type, self._es_pid)],
-            self._descriptors(),
-        )
+        elementary = [(self._stream_type, self._es_pid, self._descriptors())]
+        if len(self.streams) > 1:
+            elementary.append((0x0F, self._es_pid + 1, b""))
+        pmt = build_pmt(self.config.program_number, self._es_pid, elementary)
         self._packetize(PAT_PID, b"\x00" + pat, pusi=True)
         self._packetize(self._pmt_pid, b"\x00" + pmt, pusi=True)
 
@@ -223,7 +240,7 @@ class MpegTsMuxer(Muxer):
         payload = b"ELNK" + struct.pack(">HHf", stream.width, stream.height, stream.framerate)
         return (b"\x05\x04AV01" if stream.codec is CodecId.AV1 else b"") + bytes([0x80, len(payload)]) + payload
 
-    def _build_pes(self, payload: bytes, pts: int, dts: int) -> bytes:
+    def _build_pes(self, payload: bytes, pts: int, dts: int, stream_id=VIDEO_STREAM_ID) -> bytes:
         if dts != pts:
             flags = 0xC0
             header = _encode_timestamp(pts, 0b0011) + _encode_timestamp(dts, 0b0001)
@@ -236,7 +253,7 @@ class MpegTsMuxer(Muxer):
         length_field = 0 if payload_len > 0xFFFF else payload_len
         return (
             b"\x00\x00\x01"
-            + bytes([VIDEO_STREAM_ID])
+            + bytes([stream_id])
             + struct.pack(">H", length_field)
             + bytes([0x80, flags, header_len])
             + header
@@ -331,6 +348,7 @@ class MpegTsDemuxer(Demuxer):
         self._eof = False
         self._video_pid: int | None = None
         self._random_access: dict[int, bool] = {}
+        self._pid_stream = {}
 
     def open(self) -> None:
         # TS 不需要预读头部，PAT/PMT 会随流出现；这里只重置状态。
@@ -459,6 +477,12 @@ class MpegTsDemuxer(Demuxer):
                 continue
 
             self._elementary[pid] = stream_type
+            if codec == CodecId.AAC:
+                stream = StreamInfo(stream_id=len(self._streams), media_type=MediaType.AUDIO,
+                                    codec=codec, sample_rate=48000, channels=2, timebase=TS_TIMEBASE)
+                self._streams.append(stream)
+                self._pid_stream[pid] = stream.stream_id
+                continue
             if self._video_pid is None:
                 self._video_pid = pid
                 self._streams.append(
@@ -470,6 +494,7 @@ class MpegTsDemuxer(Demuxer):
                         width=width, height=height, framerate=fps,
                     )
                 )
+                self._pid_stream[pid] = self._streams[-1].stream_id
                 logger.debug(
                     "解封装发现视频流: pid=0x%04X codec=%s", pid, codec.value
                 )
@@ -521,7 +546,7 @@ class MpegTsDemuxer(Demuxer):
                 timebase=TS_TIMEBASE,
                 pts=pts,
                 dts=dts,
-                stream_id=0,
+                stream_id=self._pid_stream.get(pid, 0),
                 keyframe=self._random_access.pop(pid, False) or is_keyframe(data, codec=codec),
             )
         )

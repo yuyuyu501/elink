@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import platform
+import queue
 import sys
 import threading
 import time
@@ -75,6 +76,9 @@ class HostSettings:
     clipboard_enabled: bool = True
     gamepad_enabled: bool = True
     ffmpeg_path: str = "ffmpeg"
+    srt_latency_ms: int = 120
+    session_token: str = ""
+    motion_port: int = 0
 
 
 @dataclass
@@ -109,6 +113,11 @@ class ViewerSettings:
     output_width: int = 1920
     output_height: int = 1080
     ffmpeg_path: str = "ffmpeg"
+    protocol_preferences: dict = field(default_factory=dict)
+    srt_latency_ms: int = 120
+    session_token: str = ""
+    motion_port: int = 0
+    muted: bool = False
 
 
 @dataclass
@@ -146,6 +155,7 @@ class _QtRenderer:
     """接收侧的渲染器：把解码帧交给界面（替代写 PNG 的 ImageSink）。"""
 
     name = "qt_preview"
+    native_frames = True
 
     def __init__(self, emit: Callable[[Frame], None], upscaler=None, *, upscaler_factory=None,
                  failure=None) -> None:
@@ -290,6 +300,7 @@ class SessionService(QObject):
     capabilities_changed = Signal()
     codec_validated = Signal(int, str)
     upscale_changed = Signal()
+    rtc_signal = Signal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -337,13 +348,19 @@ class SessionService(QObject):
         self._upscale_worker = None
         self._upscale_cancel = threading.Event()
         self._upscale_checked = 0.0
+        self._rtc_inbox = queue.Queue(maxsize=8)
+        self._rtc_ready = threading.Event()
+        self._audio_output = None
+        self._session_audio = None
+        from backend.control_channel.udp_motion import MotionSender
+        self._motion_sender = MotionSender()
 
     def refresh_upscale(self, force=False):
         if self._upscale_worker is not None and self._upscale_worker.is_alive():
             return
         if self.running and self._viewer_live is not None and self._viewer_live.sr_enabled:
             return
-        if not force and time.monotonic() - self._upscale_checked < 30:
+        if not force and self.upscale_capabilities is not None:
             return
         from .upscale import probe_native
         cancel = self._upscale_cancel = threading.Event()
@@ -535,7 +552,7 @@ class SessionService(QObject):
                            height=config.encode.height or settings.height)
         self._host_live = settings
         self._worker = threading.Thread(
-            target=self._run_host,
+            target=self._run_rtc if settings.transport == "webrtc" else self._run_host,
             args=(config, filters, settings),
             name="host-session",
             daemon=True,
@@ -551,8 +568,8 @@ class SessionService(QObject):
         self._begin("viewer")
         config = _viewer_config(settings)
         self._worker = threading.Thread(
-            target=self._run_viewer,
-            args=(config, settings),
+            target=self._run_rtc if settings.transport == "webrtc" else self._run_viewer,
+            args=(config, [], settings) if settings.transport == "webrtc" else (config, settings),
             name="viewer-session",
             daemon=True,
         )
@@ -593,6 +610,9 @@ class SessionService(QObject):
         self._clear_frames()
         self._presented = 0
         self._stats = SessionStats()
+        while not self._rtc_inbox.empty():
+            self._rtc_inbox.get_nowait()
+        self._rtc_ready.clear()
         self._started_at = time.monotonic()
         self.state_changed.emit("running", "正在启动…")
         self.stats_changed.emit(self._stats)
@@ -614,6 +634,7 @@ class SessionService(QObject):
             self._injector = None
         self._pipeline = None
         self._transport = None
+        self._session_audio = None
         self._host_live = None
         self._viewer_live = None
         self._mode = ""
@@ -682,6 +703,44 @@ class SessionService(QObject):
                 continue
 
     # ---- 内部：主机 ----
+    def receive_rtc(self, description):
+        try:
+            self._rtc_inbox.put_nowait(description)
+        except queue.Full:
+            self.record_failure("WebRTC 信令积压超限")
+            self.state_changed.emit("error", "WebRTC 信令积压超限")
+
+    def _run_rtc(self, config, filters, settings):
+        import asyncio
+        from backend.transport.webrtc.peer_connection import RtcSession
+        self._capture_region = config.capture.clamped_region()
+        runtime = None
+
+        async def run():
+            nonlocal runtime
+            renderer = (_QtRenderer(self._frame_sink(), upscaler_factory=lambda: self._create_upscaler(settings),
+                                    failure=self._upscale_failure) if self._mode == "viewer" else None)
+            runtime = RtcSession(self, config, settings, renderer)
+            if ((self._mode == "host" and settings.allow_inject)
+                    or (self._mode == "viewer" and settings.control_enabled)):
+                self._start_clipboard()
+                self._start_gamepad_host() if self._mode == "host" else self._start_gamepad_viewer()
+            try:
+                await runtime.run()
+            finally:
+                if not runtime._closing:
+                    await runtime.close()
+        try:
+            asyncio.run(run())
+        except Exception as exc:
+            # Runtime failures set the stop event to wake its loop.
+            if runtime is not None and runtime._failure or not self._stop.is_set():
+                self.record_failure(exc)
+                self.log.emit(f"WebRTC 会话失败：{exc}", "error")
+                self.state_changed.emit("error", str(exc))
+        finally:
+            self._finish("WebRTC 已停止")
+
     def _run_host(self, config: AppConfig, filters: list, settings: HostSettings) -> None:
         runtime = None
         self._capture_region = config.capture.clamped_region()
@@ -691,6 +750,7 @@ class SessionService(QObject):
             pipeline = runtime.get("pipeline")
             self._pipeline = pipeline
             self._transport = runtime.get("srt")
+            self._session_audio = runtime.get("audio")
             if self._stop.is_set():
                 return
 
@@ -738,6 +798,7 @@ class SessionService(QObject):
             pipeline = runtime.get("pipeline")
             self._pipeline = pipeline
             self._transport = runtime.get("srt")
+            self._session_audio = runtime.get("audio")
             if self._stop.is_set():
                 return
 
@@ -806,6 +867,14 @@ class SessionService(QObject):
                                    if self._control is channel and not self._stop.is_set() else None)
                 self.control_changed.emit(f"等待控制端连接 :{settings.control_port}")
                 channel.open()
+                if settings.motion_port and settings.session_token:
+                    from backend.control_channel.udp_motion import UdpMotionChannel
+                    motion = UdpMotionChannel("0.0.0.0", settings.motion_port, settings.session_token,
+                                              lambda event: self._on_remote_input(event, settings),
+                                              server=True,
+                                              peer=self.error_context.get("peer") or None)
+                    motion.open()
+                    channel.motion = motion
                 self.control_changed.emit(f"控制端已接入 :{settings.control_port}")
                 while not self._stop.wait(0.05) and channel.state == ChannelState.OPEN:
                     try:
@@ -851,6 +920,12 @@ class SessionService(QObject):
                         self._stop.wait(0.2)
                 if self._stop.is_set():
                     return
+                if settings.motion_port and settings.session_token:
+                    from backend.control_channel.udp_motion import UdpMotionChannel
+                    motion = UdpMotionChannel(settings.control_host, settings.motion_port,
+                                              settings.session_token, lambda _: None)
+                    motion.open()
+                    channel.motion = motion
                 self.control_changed.emit(f"已连接控制通道 {settings.control_host}:{settings.control_port}")
                 self.input_available.emit(True)
                 channel.send_command(ControlCommand("mouse_mode", {"mode": mouse_mode(settings.mouse_mode)}))
@@ -922,6 +997,13 @@ class SessionService(QObject):
                 return False
             try:
                 event.extra = {**event.extra, "epoch": self._input_epoch}
+                if event.event_type == EventType.MOUSE_MOVE:
+                    event = self._motion_sender.prepare(event)
+                elif event.event_type in {EventType.MOUSE_BUTTON, EventType.MOUSE_WHEEL}:
+                    latest = self._motion_sender.latest
+                    if latest is not None and latest.extra.get("epoch") == self._input_epoch:
+                        reliable = getattr(self._control, "send_reliable_event", self._control.send_event)
+                        reliable(latest)
                 self._control.send_event(event)
                 return True
             except Exception as exc:
@@ -1027,6 +1109,9 @@ class SessionService(QObject):
             elif message.name == "host_stats":
                 self._stats.extra["encoder"] = str(message.args.get("encoder", "--"))
                 self._stats.extra["host_sampled_at"] = time.monotonic()
+                rtt = message.args.get("rtt_ms")
+                if isinstance(rtt, (int, float)) and rtt >= 0:
+                    self._stats.extra.update(rtt_ms=rtt, rtt_sampled_at=time.monotonic())
             return
         if not isinstance(message, InputEvent):
             return
@@ -1146,6 +1231,16 @@ class SessionService(QObject):
                 pass
         self.input_available.emit(False)
 
+    def set_muted(self, muted):
+        if self._viewer_live is not None:
+            self._viewer_live.muted = bool(muted)
+        if self._audio_output is not None:
+            self._audio_output.muted = bool(muted)
+        if self._session_audio is not None:
+            self._session_audio.muted = bool(muted)
+            if self._session_audio.playback is not None:
+                self._session_audio.playback.muted = bool(muted)
+
     # ---- 性能报告 ----
     def performance_report(self) -> dict:
         pipeline = self._pipeline
@@ -1179,6 +1274,10 @@ class SessionService(QObject):
             "settings": self._settings_snapshot,
             "session": asdict(self._stats),
             "stages": stages,
+            "audio": ({"packets": self._session_audio.packets,
+                       "frames": self._session_audio.frames,
+                       "failure": self._session_audio.failure}
+                      if self._session_audio is not None else {}),
             "control_channel": channel.stats() if channel is not None else {},
             "limitations": [
                 "stage timings cover pipeline encode/decode/render only, not network RTT",
@@ -1218,8 +1317,8 @@ def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
     config.capture.fps = settings.fps
     config.encode.encoder = settings.encoder
     config.encode.codec = settings.codec
-    config.encode.preset = "ultrafast" if settings.transport == "srt" and settings.preset == "veryfast" else settings.preset
-    config.encode.realtime = settings.transport == "srt"
+    config.encode.preset = "ultrafast" if settings.transport != "file" and settings.preset == "veryfast" else settings.preset
+    config.encode.realtime = settings.transport != "file"
     config.encode.bitrate_kbps = settings.bitrate_kbps
     config.encode.ffmpeg_path = settings.ffmpeg_path
     config.encode.gop = max(1, int(settings.fps * 2))
@@ -1227,6 +1326,8 @@ def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
     config.transport.srt_url = settings.srt_url
     config.transport.srt_mode = settings.srt_mode
     config.transport.path = settings.file_path
+    config.transport.srt_latency_ms = settings.srt_latency_ms
+    config.audio.enabled = settings.transport != "file"
     config.validate()
 
     filters: list = []
@@ -1234,6 +1335,7 @@ def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
         width = min(settings.width, region[2]) & ~1
         height = min(settings.height, region[3]) & ~1
         config.encode.width, config.encode.height = width, height
+        config.capture.width, config.capture.height = width, height
         if (width, height) != (region[2], region[3]):
             filters.append(Scaler(width, height))
     return config, filters
@@ -1246,14 +1348,17 @@ def _viewer_config(settings: ViewerSettings) -> AppConfig:
     config.transport.srt_mode = settings.srt_mode
     config.transport.path = settings.file_path
     config.encode.ffmpeg_path = settings.ffmpeg_path
-    config.encode.realtime = settings.transport == "srt"
+    config.encode.realtime = settings.transport != "file"
     config.encode.codec = settings.stream_codec
     config.encode.decoder = settings.decoder
-    if settings.transport == "srt":
+    if settings.transport != "file":
         config.encode.width = settings.stream_width
         config.encode.height = settings.stream_height
         config.encode.framerate = settings.stream_fps
     config.capture.fps = settings.stream_fps
+    config.transport.srt_latency_ms = settings.srt_latency_ms
+    config.audio.enabled = settings.transport != "file"
+    config.audio.muted = settings.muted
     config.validate()
     return config
 

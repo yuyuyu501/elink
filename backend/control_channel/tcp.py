@@ -72,7 +72,8 @@ class TcpControlChannel(ControlChannel):
         self._listener: socket.socket | None = None
         self._reader: threading.Thread | None = None
         self._writer: threading.Thread | None = None
-        self._outbox = _ControlQueue()
+        self._outbox = _ControlQueue(maxsize=512)
+        self.motion = None
         self._stopping = threading.Event()
         self._connected = threading.Event()
 
@@ -136,7 +137,12 @@ class TcpControlChannel(ControlChannel):
 
     def close(self) -> None:
         self._stopping.set()
-        self._outbox.put(None)
+        if self.motion is not None:
+            self.motion.close()
+        try:
+            self._outbox.put_nowait(None)
+        except queue.Full:
+            pass
         if self._listener is not None:
             try:
                 self._listener.close()
@@ -159,17 +165,35 @@ class TcpControlChannel(ControlChannel):
     def send_event(self, event: protocol.InputEvent) -> None:
         if self.state != ChannelState.OPEN or self._socket is None:
             raise TransportClosedError("控制通道未连接")
-        self._outbox.put(replace(event, extra=dict(event.extra)))
+        if self.motion is not None and event.event_type in (protocol.EventType.MOUSE_MOVE, protocol.EventType.GAMEPAD):
+            self.motion.send_event(event)
+            return
+        self.send_reliable_event(event)
+
+    def send_reliable_event(self, event):
+        self._enqueue(replace(event, extra=dict(event.extra)))
+
+    def _enqueue(self, value):
+        try:
+            self._outbox.put_nowait(value)
+        except queue.Full:
+            self.close()
+            raise TransportClosedError("可靠控制消息积压超限")
 
     def _write(self, data: bytes) -> None:
         if self._socket is None:
             raise TransportClosedError("控制通道未连接")
         # 入队而非直接写：写操作集中在一个线程里，避免多线程交错写出半帧
-        self._outbox.put(data)
+        self._enqueue(data)
 
     def _write_loop(self) -> None:
         while True:
-            data = self._outbox.get()
+            try:
+                data = self._outbox.get(timeout=.2)
+            except queue.Empty:
+                if self._stopping.is_set():
+                    break
+                continue
             if data is None:
                 break
             if self._socket is None:
@@ -205,7 +229,7 @@ class TcpControlChannel(ControlChannel):
                     if frame_type is protocol.FrameType.JSON:
                         self._dispatch(payload)
                     elif frame_type is protocol.FrameType.PING:
-                        self._outbox.put(protocol.encode_frame(protocol.FrameType.PONG, payload))
+                        self._enqueue(protocol.encode_frame(protocol.FrameType.PONG, payload))
                     # PONG 只用于刷新 last_rx，无需处理
 
                 if self.heartbeat_s and time.monotonic() - last_rx > self.heartbeat_s * 3:
@@ -217,4 +241,4 @@ class TcpControlChannel(ControlChannel):
             logger.debug("控制通道读循环结束")
 
     def send_ping(self) -> None:
-        self._outbox.put(protocol.encode_frame(protocol.FrameType.PING, b"ka"))
+        self._enqueue(protocol.encode_frame(protocol.FrameType.PING, b"ka"))

@@ -112,6 +112,8 @@ class PackagingTests(unittest.TestCase):
             build(self.root / "dist")
         args = run.call_args.args[0]
         self.assertIn("av", args)
+        for library in ("aiortc", "aioice", "pylibsrtp", "soundcard", "sounddevice", "dxcam"):
+            self.assertIn(library, args)
         self.assertEqual(args[args.index("--collect-all") + 1], "av")
 
     @unittest.skipUnless(os.name == "nt", "Windows native bridge")

@@ -1,16 +1,12 @@
-"""H.264 软件解码器（h264 原生解码器）+ 码流参数解析。
-
-类本身只是 ``FfmpegDecoderBase`` 的薄壳；本文件更有价值的是
-:func:`parse_sps_dimensions`：解封装只能从 PMT 拿到 stream_type，拿不到分辨率，
-分辨率藏在 SPS 里，接收侧必须先解 SPS 才能确定 rawvideo 每帧的字节数。
-"""
+"""H.264 SPS parsing and the compatible import for the software decoder."""
 
 from __future__ import annotations
 
 from backend.logging.logger import get_logger
 from backend.media.packet import split_annexb
 from backend.media.stream import CodecId
-from backend.media.video.codec.base import FfmpegDecoderBase, unescape_nal
+from backend.media.video.codec.base import unescape_nal
+from backend.media.video.codec.inprocess import InprocessDecoder as H264Decoder
 
 logger = get_logger(__name__)
 
@@ -19,17 +15,6 @@ _HIGH_PROFILE_IDS = frozenset(
     {100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135}
 )
 _CHROMA_SUB = {0: (1, 1), 1: (2, 2), 2: (2, 1), 3: (1, 1)}
-
-
-class H264Decoder(FfmpegDecoderBase):
-    """H.264 解码：Packet(Annex-B) -> Frame(BGRA)。"""
-
-    name = "h264"
-    codec = CodecId.H264.value
-    hardware = False
-
-    ffmpeg_decoder = None  # 交给 ffmpeg 自动选择原生解码器
-    input_format = "h264"
 
 
 class _BitReader:

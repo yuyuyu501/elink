@@ -22,6 +22,8 @@ class InputSession:
         self.epoch = -1
         self.active = False
         self.heartbeat = 0.0
+        self._motion_seq = 0
+        self._motion_total = [0, 0]
 
     def receive(self, message) -> bool:
         with self._lock:
@@ -36,6 +38,8 @@ class InputSession:
                     return False
                 if epoch != self.epoch or not active:
                     self.release()
+                    self._motion_seq = 0
+                    self._motion_total = [0, 0]
                 self.epoch, self.active = epoch, active
                 self.heartbeat = time.monotonic()
                 return True
@@ -57,11 +61,29 @@ class InputSession:
                     return False
                 key = (kind, message.button)
             elif kind == EventType.MOUSE_MOVE:
+                sequence = message.extra.get("motion_seq")
+                if sequence is not None:
+                    if not _integer(sequence, 1, 2**53) or sequence <= self._motion_seq:
+                        return False
+                    totals = message.extra.get("motion_total")
+                    if message.extra.get("coordinates") == "relative":
+                        if (not isinstance(totals, list) or len(totals) != 2
+                                or not all(_integer(v, -(2**53), 2**53) for v in totals)):
+                            return False
+                        message = replace(message, x=totals[0] - self._motion_total[0],
+                                          y=totals[1] - self._motion_total[1])
+                    else:
+                        totals = self._motion_total
+                else:
+                    totals = None
                 mode = message.extra.get("coordinates", "pixels")
                 bounds = {"normalized": (0, 65535), "relative": (-32767, 32767),
                           "pixels": (-100000, 100000)}.get(mode)
                 if bounds is None or not all(_integer(v, *bounds) for v in (message.x, message.y)):
                     return False
+                if sequence is not None:
+                    self._motion_seq = sequence
+                    self._motion_total = list(totals)
             elif kind == EventType.MOUSE_WHEEL:
                 if not _integer(message.delta, -12000, 12000):
                     return False

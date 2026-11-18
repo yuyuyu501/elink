@@ -69,7 +69,9 @@ def prepare_environment(config: AppConfig) -> tuple[ProbeResult, CodecRegistry]:
         )
 
     encoder_name = config.encode.encoder
-    if config.mode != "receive" and encoder_name != "auto" and not probe.has_encoder(encoder_name):
+    registry = build_default_registry(config.encode.ffmpeg_path)
+    if (config.mode != "receive" and encoder_name != "auto"
+            and encoder_name not in registry.encoder_names(config.encode.codec)):
         raise BootstrapError(
             f"ffmpeg 缺少编码器 {encoder_name}", detail=probe.describe()
         )
@@ -86,7 +88,7 @@ def prepare_environment(config: AppConfig) -> tuple[ProbeResult, CodecRegistry]:
             raise BootstrapError(f"{config.encode.codec} 没有实际可用的{field}")
         setattr(config.encode, field, names[0])
 
-    return probe, build_default_registry(config.encode.ffmpeg_path)
+    return probe, registry
 
 
 # ---- 采集 ----
@@ -157,6 +159,9 @@ def build_send_resources(
     resources.update(
         {"pipeline": pipeline, "muxer": muxer, "capture": capture}
     )
+    if config.audio.enabled:
+        from backend.pipeline.audio_pipeline import SessionAudio
+        resources["audio"] = SessionAudio(muxer=muxer, ffmpeg_path=config.encode.ffmpeg_path)
     return Runtime(**resources)
 
 
@@ -226,4 +231,9 @@ def build_receive_resources(
     if "srt" in resources:
         pipeline.abort_source = resources["srt"].abort
     resources.update({"pipeline": pipeline, "demuxer": demuxer, "renderer": renderer})
+    if config.audio.enabled:
+        from backend.pipeline.audio_pipeline import SessionAudio
+        audio = SessionAudio(ffmpeg_path=config.encode.ffmpeg_path, muted=config.audio.muted)
+        pipeline.audio_sink = audio.submit
+        resources["audio"] = audio
     return Runtime(**resources)

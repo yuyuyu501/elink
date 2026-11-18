@@ -66,6 +66,9 @@ class Frame:
 
     domain: FrameDomain = FrameDomain.CPU
     stream_id: int = 0
+    owner: object = None
+    colorspace: int = 0
+    color_range: int = 0
 
     def __post_init__(self) -> None:
         if self.media_type is MediaType.VIDEO:
@@ -114,8 +117,44 @@ class Frame:
             "samples": self.samples,
             "domain": self.domain,
             "stream_id": self.stream_id,
+            "owner": self.owner if data is self.data else None,
+            "colorspace": self.colorspace,
+            "color_range": self.color_range,
         }
         values.update(changes)
         if "linesize" in changes and not changes["linesize"]:
             values["linesize"] = 0
         return Frame(**values)
+
+    @classmethod
+    def from_av(cls, image, *, native=False, pts=None):
+        from fractions import Fraction
+        timestamp = round((image.pts or 0) * (image.time_base or Fraction(1, 90000)) * 90000)
+        if native and image.format.name in {"nv12", "yuv420p", "yuvj420p", "bgra"}:
+            return cls(data=memoryview(image.planes[0]), width=image.width, height=image.height,
+                       pixel_format=PixelFormat("yuv420p" if image.format.name == "yuvj420p"
+                                                else image.format.name), linesize=image.planes[0].line_size,
+                       pts=timestamp if pts is None else pts, owner=image,
+                       colorspace=int(image.colorspace), color_range=int(image.color_range))
+        pixels = image.to_ndarray(format="bgra")
+        return cls(data=memoryview(pixels).cast("B"), width=image.width, height=image.height,
+                   pts=timestamp if pts is None else pts, owner=pixels)
+
+    def to_av(self):
+        import av
+        import numpy as np
+        from fractions import Fraction
+        if isinstance(self.owner, av.VideoFrame):
+            image = self.owner
+        else:
+            pixels = np.frombuffer(self.data, dtype=np.uint8).reshape(self.height, self.linesize)
+            pixels = pixels[:, :self.width * 4].reshape(self.height, self.width, 4)
+            image = av.VideoFrame.from_numpy_buffer(pixels, format="bgra")
+        image.pts = self.rescaled_pts(Timebase.mpegts())
+        image.time_base = Fraction(1, 90000)
+        return image
+
+    def bgra(self):
+        if self.pixel_format == PixelFormat.BGRA:
+            return self
+        return Frame.from_av(self.to_av(), pts=self.pts)

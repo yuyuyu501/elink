@@ -23,6 +23,8 @@ class CaptureConfig:
     backend: str = "auto"
     region: tuple[int, int, int, int] | None = None
     fps: float = 30.0
+    width: int = 0
+    height: int = 0
 
     def clamped_region(self) -> tuple[int, int, int, int] | None:
         """H.264 要求偶数分辨率，这里统一向下取偶。"""
@@ -78,6 +80,12 @@ class PipelineConfig:
 
 
 @dataclass
+class AudioConfig:
+    enabled: bool = False
+    muted: bool = False
+
+
+@dataclass
 class AppConfig:
     mode: str = "loopback"
     duration_s: float = 3.0
@@ -87,6 +95,7 @@ class AppConfig:
     mux: MuxConfig = field(default_factory=MuxConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    audio: AudioConfig = field(default_factory=AudioConfig)
     frames_dir: str = "out/frames"
     log_level: str = "INFO"
 

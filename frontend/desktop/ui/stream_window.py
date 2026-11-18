@@ -76,6 +76,14 @@ class PictureDialog(QDialog):
         form.addRow("帧率", self.fps)
         form.addRow("码率（Mbps）", bitrate)
         self.connection = connection
+        self.transport = QComboBox()
+        self.transport.addItem("WebRTC", "webrtc")
+        self.transport.addItem("SRT", "srt")
+        self.transport.setCurrentIndex(max(0, self.transport.findData(
+            getattr(connection, "_protocol", "webrtc"))))
+        form.addRow("传输协议", self.transport)
+        self.transport.currentIndexChanged.connect(lambda _: self._update_codecs()
+                                                   if self.connection is not None else None)
         self.codec = QComboBox()
         self.encoder = QComboBox()
         self.decoder = QComboBox()
@@ -108,12 +116,6 @@ class PictureDialog(QDialog):
         controls = QWidget()
         row = QHBoxLayout(controls)
         row.setContentsMargins(0, 0, 0, 0)
-        if connection is not None and connection._codec_enabled:
-            self.refresh_button = QToolButton()
-            self.refresh_button.setIcon(icons.icon("refresh-cw"))
-            self.refresh_button.setToolTip("重新检测双方编解码能力")
-            self.refresh_button.clicked.connect(connection.refresh_codecs)
-            row.addWidget(self.refresh_button)
         row.addStretch()
         row.addWidget(self.apply_button)
         form.addRow("", controls)
@@ -137,7 +139,7 @@ class PictureDialog(QDialog):
             self.codec_status.setText("正在检测编解码能力…")
             return
         try:
-            choices = compatible_choices(remote, local, {})
+            choices = compatible_choices(remote, local, {}, self.transport.currentData())
         except ValueError:
             choices = []
         names = list(dict.fromkeys(choice["codec"] for choice in choices))
@@ -154,6 +156,8 @@ class PictureDialog(QDialog):
             return
         codec = self.codec.currentData()
         dec_formats = {v["codec"] for v in local["decoders"].values()}
+        if self.transport.currentData() == "webrtc":
+            dec_formats &= {"h264"}
         self._fill(self.encoder, [n for n, v in remote["encoders"].items()
                                  if v["codec"] in dec_formats and codec in ("auto", v["codec"])])
         self._decoder_options()
@@ -168,6 +172,8 @@ class PictureDialog(QDialog):
         if codec == "auto" and self.encoder.currentData() != "auto":
             codec = VIDEO_ENCODERS.get(self.encoder.currentData(), "auto")
         enc_formats = {v["codec"] for v in remote["encoders"].values()}
+        if self.transport.currentData() == "webrtc":
+            enc_formats &= {"h264"}
         self._fill(self.decoder, [n for n, v in local["decoders"].items()
                                  if v["codec"] in enc_formats and codec in ("auto", v["codec"])])
 
@@ -177,13 +183,13 @@ class PictureDialog(QDialog):
             self.apply_button.setEnabled(active)
             for box in (self.codec, self.encoder, self.decoder):
                 box.setEnabled(active)
-            if hasattr(self, "refresh_button"):
-                self.refresh_button.setEnabled(self.connection.phase == "active")
+            self.transport.setEnabled(active)
 
     def picture(self) -> dict:
         width, height = map(int, self.resolution.currentText().split("×"))
         result = {"width": width, "height": height, "fps": self.fps.currentData(),
-                  "bitrate_kbps": self.bitrate.value() * 1000}
+                  "bitrate_kbps": self.bitrate.value() * 1000,
+                  "transport": self.transport.currentData()}
         if self.connection is not None and self.connection._codec_enabled:
             result.update({name: getattr(self, name).currentData() for name in ("codec", "encoder", "decoder")})
         return result
@@ -258,10 +264,7 @@ class StreamWindow(QWidget):
     closed = Signal()
     stats_toggled = Signal(bool)
     picture_requested = Signal()
-    snapshot_requested = Signal()
-    report_requested = Signal()
     preference_changed = Signal(str, object)
-    upscale_refresh = Signal(bool)
     upscale_cancel = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -328,8 +331,7 @@ class StreamWindow(QWidget):
         sensitivity.addWidget(reset)
         controls.addLayout(sensitivity)
         self.preferences = {}
-        for name, text in (("clipboard_enabled", "同步剪贴板"), ("gamepad_enabled", "转发手柄"),
-                           ("sr_enabled", "超分辨率")):
+        for name, text in (("sr_enabled", "超分辨率"), ("muted", "静音")):
             check = QCheckBox(text)
             check.toggled.connect(lambda checked, name=name: self.preference_changed.emit(name, checked))
             self.preferences[name] = check
@@ -338,12 +340,7 @@ class StreamWindow(QWidget):
         self.sr_mode = QComboBox()
         self.sr_mode.addItem("FSR", "fsr")
         self.sr_mode.addItem("RTX", "rtx")
-        self.sr_refresh = QToolButton()
-        self.sr_refresh.setIcon(icons.icon("refresh-cw"))
-        self.sr_refresh.setToolTip("重新检测本机超分能力")
-        self.sr_refresh.clicked.connect(lambda: self.upscale_refresh.emit(True))
         sr.addWidget(self.sr_mode, 1)
-        sr.addWidget(self.sr_refresh)
         controls.addLayout(sr)
         self.sr_mode.currentIndexChanged.connect(
             lambda _: self.preference_changed.emit("sr_mode", self.sr_mode.currentData()))
@@ -383,19 +380,11 @@ class StreamWindow(QWidget):
         self.sr_status = label("")
         self.sr_status.setWordWrap(True)
         controls.addWidget(self.sr_status)
-        self._sr_timer = QTimer(self)
-        self._sr_timer.setInterval(30000)
-        self._sr_timer.timeout.connect(
-            lambda: self.upscale_refresh.emit(False) if self.panel.isVisible() else None)
-        self._sr_timer.start()
         rows.addWidget(self.session_controls)
         self.stats_button = QCheckBox("性能叠加")
         self.stats_button.toggled.connect(self.stats_toggled.emit)
         rows.addWidget(self.stats_button)
-        rows.addWidget(self._command("截图", "camera", self.snapshot_requested.emit))
-        rows.addWidget(self._command("导出性能报告", "file-down", self.report_requested.emit))
         rows.addWidget(self._command("全屏", "maximize", self.toggle_fullscreen))
-        rows.addWidget(self._command("释放键鼠输入", "keyboard", self.release_input))
         disconnect = self._command("断开连接", "power", self.close)
         disconnect.setObjectName("danger")
         rows.addWidget(disconnect)
@@ -450,7 +439,6 @@ class StreamWindow(QWidget):
         self.sr_percent.setEnabled(settings.sr_enabled)
         self.sr_sharpen.setEnabled(settings.sr_enabled)
         self.sr_sharpness.setEnabled(settings.sr_enabled and settings.sr_sharpen)
-        self.sr_refresh.setEnabled(not (settings.sr_enabled and self._active))
         for widget in widgets:
             widget.blockSignals(False)
         self._sync_input()
@@ -470,7 +458,6 @@ class StreamWindow(QWidget):
     def set_session_active(self, active: bool) -> None:
         self._active = active
         self.session_controls.setEnabled(active)
-        self.sr_refresh.setEnabled(not (active and self.preferences["sr_enabled"].isChecked()))
         self._sync_input()
 
     def set_input_available(self, available: bool) -> None:
@@ -508,10 +495,6 @@ class StreamWindow(QWidget):
     def toggle_controls(self) -> None:
         self.release_input()
         self.panel.setVisible(not self.panel.isVisible())
-        if self.panel.isVisible():
-            self.upscale_refresh.emit(False)
-        else:
-            self.upscale_cancel.emit()
         self._layout()
 
     def toggle_fullscreen(self) -> None:
@@ -581,7 +564,6 @@ class StreamWindow(QWidget):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
-        self._sr_timer.stop()
         self.upscale_cancel.emit()
         if not self._closed:
             self._closed = True

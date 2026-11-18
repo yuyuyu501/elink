@@ -23,6 +23,27 @@ PICTURE = {"width": 2560, "height": 1440, "fps": 120, "bitrate_kbps": 12000}
 
 
 class UpscaleTests(unittest.TestCase):
+    def test_native_planes_keep_their_owner_and_transformed_pixels_replace_it(self):
+        import av
+        image = av.VideoFrame(64, 48, "yuv420p")
+        image.colorspace, image.color_range = 1, 1
+        native = Frame.from_av(image, native=True, pts=9000)
+        self.assertIs(native.owner, image)
+        self.assertIs(native.to_av(), image)
+        full = av.VideoFrame(64, 48, "yuvj420p")
+        full.color_range = 2
+        frame = Frame.from_av(full, native=True)
+        self.assertIs(frame.owner, full)
+        self.assertEqual(frame.pixel_format, PixelFormat.YUV420P)
+        self.assertEqual(frame.color_range, 2)
+        self.assertEqual(native.bgra().pts, 9000)
+        converted = native.bgra()
+        pixels = bytes([0, 0, 255, 255]) * (64 * 48)
+        transformed = converted.with_data(pixels)
+        self.assertIsNone(transformed.owner)
+        self.assertEqual(transformed.to_av().to_ndarray(format="bgra")[0, 0].tolist(),
+                         [0, 0, 255, 255])
+
     def test_downscale_preserves_previous_nearest_neighbor_sampling(self):
         width, height = 14, 10
         source = bytes(range(140)) * 4

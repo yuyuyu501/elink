@@ -367,6 +367,22 @@ class ConnectionTests(unittest.TestCase):
 
 
 class SettingsAndTransportTests(unittest.TestCase):
+    def test_saved_disabled_input_preferences_and_decoder_are_migrated(self):
+        from frontend.desktop.settings import load
+        with patch("frontend.desktop.settings._read", return_value={
+            "host": {"clipboard_enabled": False, "gamepad_enabled": False},
+            "viewer": {"clipboard_enabled": False, "gamepad_enabled": False,
+                       "decoder": "h264_pyav", "codec_preferences": {
+                           "peer": {"codec": "h264", "decoder": "h264_pyav"}},
+                       "protocol_preferences": {"peer": "srt", "invalid": "other"}}
+        }):
+            host, viewer = load()
+        self.assertTrue(host.clipboard_enabled and host.gamepad_enabled)
+        self.assertTrue(viewer.clipboard_enabled and viewer.gamepad_enabled)
+        self.assertEqual(viewer.decoder, "h264")
+        self.assertEqual(viewer.codec_preferences["peer"]["decoder"], "h264")
+        self.assertEqual(viewer.protocol_preferences, {"peer": "srt"})
+
     def test_legacy_switches_are_ignored(self):
         settings = _merge(UiSettings, {"allow_discovery": False, "auto_host": True,
                                        "close_to_tray": True})
@@ -477,6 +493,24 @@ class CodecConnectionTests(unittest.TestCase):
         self.assertEqual(self.host._selection, self.viewer._selection)
         self.assertTrue(self.viewer._codec_enabled)
 
+    def test_protocol_switch_saves_only_after_success_and_rolls_back(self):
+        self.connect()
+        picture = dict(self.applied[-1])
+        self.viewer.configure({**picture, "transport": "webrtc"})
+        wait_until(lambda: len(self.applied) == 2 and self.host.phase == "active")
+        self.assertEqual(self.host_media.starts[-1].transport, "webrtc")
+        self.assertEqual(self.viewer_media.starts[-1].transport, "webrtc")
+        self.assertEqual(self.viewer._viewer.protocol_preferences["host"], "webrtc")
+        self.viewer.configure({**picture, "transport": "srt"})
+        wait_until(lambda: len(self.applied) == 3 and self.host.phase == "active")
+        self.assertEqual(self.viewer._viewer.protocol_preferences["host"], "srt")
+        self.viewer_media.fail_next = True
+        self.viewer.configure({**picture, "transport": "webrtc", "codec": "h264",
+                               "encoder": "libx264", "decoder": "h264"})
+        wait_until(lambda: len(self.applied) == 4 and self.host.phase == "active")
+        self.assertEqual(self.viewer_media.starts[-1].transport, "srt")
+        self.assertEqual(self.viewer._viewer.protocol_preferences["host"], "srt")
+
     def test_explicit_format_and_backends_apply_then_save(self):
         self.connect()
         options = {"codec": "hevc", "encoder": "libx265", "decoder": "hevc"}
@@ -586,6 +620,16 @@ class CodecConnectionTests(unittest.TestCase):
 
 
 class MediaIntegrationTests(unittest.TestCase):
+    def test_webrtc_uses_real_media_and_stops_workers(self):
+        from scripts.benchmark_remote import run
+        result = run(transport="webrtc", seconds=.5, width=320, height=240, fps=60, synthetic=True)
+        self.assertFalse(result["errors"])
+        self.assertGreater(result["frames"], 10)
+        self.assertTrue(result["closed_cleanly"])
+        self.assertTrue(result["workers_stopped"])
+        self.assertEqual(result["host"]["settings"]["transport"], "webrtc")
+        self.assertEqual(result["viewer"]["settings"]["decoder"], "h264")
+
     def test_srt_picture_update_and_reconnect_with_real_encoder_decoder(self):
         from types import SimpleNamespace
         from frontend.desktop.diagnostics import _synthetic_frame
@@ -643,7 +687,7 @@ class MediaIntegrationTests(unittest.TestCase):
                 "session_port": host.server.serverPort()}
         settings = ViewerSettings(stream_width=320, stream_height=240,
                                   stream_bitrate_kbps=800, clipboard_enabled=False,
-                                  gamepad_enabled=False)
+                                  gamepad_enabled=False, protocol_preferences={"media-host": "srt"})
         injected = []
         def state():
             return {

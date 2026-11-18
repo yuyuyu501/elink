@@ -133,12 +133,15 @@ class FfmpegAudioEncoderBase(AudioEncoder):
             "-hide_banner",
             "-loglevel", "error",
             "-nostdin",
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-f", self.sample_format,
             "-ar", str(stream.sample_rate),
             "-ac", str(stream.channels),
             "-i", "pipe:0",
             "-c:a", self.ffmpeg_encoder,
             "-b:a", f"{self.bitrate_kbps}k",
+            "-flush_packets", "1",
             "-f", self.output_format,
             "pipe:1",
         ]
@@ -180,6 +183,12 @@ class FfmpegAudioEncoderBase(AudioEncoder):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+        for worker in (self._reader, self._stderr_thread):
+            if worker is not None and worker is not threading.current_thread():
+                worker.join(timeout=1)
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
         self._proc = None
         self._opened = False
 
@@ -320,9 +329,12 @@ class FfmpegAudioDecoderBase(AudioDecoder):
             "-hide_banner",
             "-loglevel", "error",
             "-nostdin",
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-f", self.input_format,
             "-i", "pipe:0",
             *decode_args,
+            "-flush_packets", "1",
             "-f", self.output_format,
             "pipe:1",
         ]
@@ -389,6 +401,12 @@ class FfmpegAudioDecoderBase(AudioDecoder):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+            for worker in (self._reader, self._stderr_thread):
+                if worker is not None and worker is not threading.current_thread():
+                    worker.join(timeout=1)
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
         self._proc = None
         self._opened = False
 

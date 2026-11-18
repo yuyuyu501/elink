@@ -87,6 +87,7 @@ class ReceivePipeline:
         self._receive_error = None
         self._receiver = None
         self._decoder = None
+        self.audio_sink = None
         self._stop_lock = threading.Lock()
         self._abort_thread = None
 
@@ -109,6 +110,10 @@ class ReceivePipeline:
                 packet = self.demuxer.read()
                 if packet is None:
                     break
+                if packet.media_type.value == "audio":
+                    if self.audio_sink is not None:
+                        self.audio_sink(packet)
+                    continue
                 if packet.codec.value != self.encode_config.codec:
                     raise DecodeError("视频格式与协商结果不一致")
                 recovery.observe(packet)
@@ -145,6 +150,10 @@ class ReceivePipeline:
     def _packet_stream(self):
         if not self.encode_config.realtime:
             while (packet := self.demuxer.read()) is not None:
+                if packet.media_type.value == "audio":
+                    if self.audio_sink is not None:
+                        self.audio_sink(packet)
+                    continue
                 yield packet, False
             return
         self._receiver = threading.Thread(target=self._receive, name="video-receive", daemon=True)
@@ -279,6 +288,8 @@ class ReceivePipeline:
         )
 
         decoder = self.decoder_factory(stream, self.encode_config)
+        if hasattr(decoder, "native_output") and self.encode_config.realtime:
+            decoder.native_output = getattr(self.renderer, "native_frames", False)
         self.stats.extra["decoder"] = decoder.name
         if self.encode_config.realtime and hasattr(decoder, "output_callback"):
             decoder.output_callback = self._render
