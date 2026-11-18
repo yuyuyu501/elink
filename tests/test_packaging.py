@@ -17,6 +17,16 @@ from scripts.package_windows import run_self_test
 
 
 class PackagingTests(unittest.TestCase):
+    def test_windows_runtime_imports_initialize_capture_before_audio(self):
+        from frontend.desktop.diagnostics import _runtime_imports
+
+        with patch("frontend.desktop.diagnostics.os.name", "nt"):
+            with patch("importlib.import_module") as load:
+                report = _runtime_imports()
+        imports = [call.args[0] for call in load.call_args_list]
+        self.assertLess(imports.index("dxcam"), imports.index("soundcard"))
+        self.assertTrue(all(value == "ok" for value in report.values()))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

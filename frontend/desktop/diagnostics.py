@@ -319,7 +319,8 @@ def _runtime_imports() -> dict:
     libraries = ["av", "aiortc", "aioice", "pylibsrtp", "soundcard", "sounddevice",
                  "PySide6.QtOpenGLWidgets"]
     if os.name == "nt":
-        libraries.append("dxcam")
+        # comtypes requires STA; soundcard can reuse an existing COM apartment.
+        libraries.insert(0, "dxcam")
     for library in libraries:
         importlib.import_module(library)
     return dict.fromkeys(libraries, "ok")
