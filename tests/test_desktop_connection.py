@@ -630,6 +630,19 @@ class CodecConnectionTests(unittest.TestCase):
         self.assertEqual(self.viewer.phase, "idle")
         self.assertEqual(len(self.host_media.starts), 1)
 
+    def test_peer_notifications_during_encoder_failure_keep_recovery_pending(self):
+        self.connect()
+        self.host.phase = "preparing"
+        self.host._failed_media("encoder failed")
+        pending = self.host._pending_action
+        self.assertEqual(self.host.phase, "negotiating")
+        self.assertIsNotNone(pending)
+        for kind in ("media_failed", "active"):
+            self.host._message({"kind": kind, "session": self.host._session_id,
+                                "revision": self.host._revision, "message": "receiver closed"})
+            self.assertEqual(self.host.phase, "negotiating")
+            self.assertIs(self.host._pending_action, pending)
+
     def test_unavailable_saved_choice_waits_for_user_without_overwriting_it(self):
         options = {"codec": "hevc", "encoder": "hevc_amf", "decoder": "hevc"}
         settings = ViewerSettings(codec_preferences={"host": options})

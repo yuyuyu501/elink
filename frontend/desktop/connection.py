@@ -419,6 +419,10 @@ class DesktopConnection(QObject):
             elif kind == "bye_ack":
                 self._complete_disconnect()
             return
+        if (self._codec_enabled and self.role == "host" and self.phase == "negotiating"
+                and kind in {"active", "media_failed"}):
+            # The peer may finish or fail while this attempt is already being replaced.
+            return
         if kind == "rtc":
             if self._protocol != "webrtc" or self.phase not in {"preparing", "receiving", "active"}:
                 raise ValueError("WebRTC 信令与当前会话不匹配")
