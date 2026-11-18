@@ -188,7 +188,8 @@ class RtcSession:
         self.pc.on("connectionstatechange", self._state)
 
     def fail(self, exc):
-        if self._closing or self.service._stop.is_set():
+        if (self._closing or self.service._stop.is_set()
+                or self.service._expected_stop.is_set()):
             return
         self._failure = exc
         self.service._stop.set()
@@ -283,7 +284,7 @@ class RtcSession:
             if not isinstance(self.encoder, InprocessEncoder):
                 raise NetworkError("WebRTC 编码器需要可用的进程内实现")
             sender = self.pc.addTrack(video)
-            sender._RTCRtpSender__encoder = SelectedEncoder(self.encoder, stats)
+            sender._RTCRtpSender__encoder = SelectedEncoder(self.encoder, stats, self.fail)
             self.tracks.append(LoopbackTrack(
                 lambda exc: self.service.log.emit(f"系统声音采集不可用：{exc}", "warn")))
             self.pc.addTrack(self.tracks[-1])
@@ -295,7 +296,7 @@ class RtcSession:
             self.pc.addTransceiver("audio", direction="recvonly")
             self.adapter = registry.create_decoder("h264", self.settings.decoder, stream, self.config.encode)
             self.adapter.output_callback = None
-            tune_receiver(transceiver.receiver, self.adapter, self.fail, stats)
+            self._receiver_cleanup = tune_receiver(transceiver.receiver, self.adapter, self.fail, stats)
             self.renderer.open()
             if hasattr(self.renderer, "prepare_ms"):
                 stats.extra["display_prepare_ms"] = self.renderer.prepare_ms
@@ -311,6 +312,17 @@ class RtcSession:
         if host:
             stats.extra["capture_ms"] = video.capture_ms
         install_rtp_pacer(self.pc, self.config.encode.bitrate_kbps * 1000, self.config.capture.fps)
+        for transport in {t.sender.transport for t in self.pc.getTransceivers()}:
+            original = transport._send_rtp
+
+            async def send(data, original=original):
+                try:
+                    await original(data)
+                except Exception as exc:
+                    self.fail(exc)
+                    raise
+
+            transport._send_rtp = send
         if host:
             self.service.host_prepared.emit()
             await self.pc.setLocalDescription(await self.pc.createOffer())
@@ -425,6 +437,8 @@ class RtcSession:
     async def close(self):
         import asyncio
         self._closing = True
+        if hasattr(self, "_receiver_cleanup"):
+            self._receiver_cleanup()
         self.service.set_input_focus(False)
         for track in self.tracks:
             track.stop()

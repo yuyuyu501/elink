@@ -14,18 +14,23 @@ from frontend.desktop.service import HostSettings, SessionService, ViewerSetting
 
 
 def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
-        encoder="libx264", decoder="h264", synthetic=False):
+        encoder="libx264", decoder="h264", synthetic=False, updates=()):
     app = QCoreApplication.instance() or QCoreApplication([])
     host_service, viewer_service = SessionService(), SessionService()
     host = DesktopConnection(host_service, "benchmark-host", HostSettings())
     viewer = DesktopConnection(viewer_service, "benchmark-viewer", HostSettings())
-    frames, cursors, errors = [], [], []
+    frames, cursors, errors, applied = [], [], [], []
     viewer_service.frame_ready.connect(lambda frame: (
-        frames.append((time.perf_counter(), frame.pts)), viewer_service.frame_presented()))
+        frames.append((time.perf_counter(), frame.pts, frame.width, frame.height)),
+        viewer_service.frame_presented()))
+    viewer.picture_applied.connect(applied.append)
     viewer_service.cursor_changed.connect(cursors.append)
     host.error.connect(errors.append)
     viewer.error.connect(errors.append)
-    region = patch("frontend.desktop.service._display_region", return_value=(0, 0, width, height))
+    capture_width = max([width] + [value[0] for value in updates])
+    capture_height = max([height] + [value[1] for value in updates])
+    region = patch("frontend.desktop.service._display_region",
+                   return_value=(0, 0, capture_width, capture_height))
 
     class Capture:
         def __init__(self, config):
@@ -84,6 +89,29 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             if active is not None and time.monotonic() - active >= seconds:
                 break
             time.sleep(.001)
+        changes = []
+        for new_width, new_height, new_fps in updates:
+            if host.phase != "active" or viewer.phase != "active":
+                break
+            before, count = len(frames), len(applied)
+            viewer.configure({"width": new_width, "height": new_height,
+                              "fps": new_fps, "bitrate_kbps": 12000})
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                app.processEvents()
+                if (len(applied) > count and host.phase == viewer.phase == "active"
+                        and len(frames) >= before + 10):
+                    break
+                if viewer.phase in {"idle", "stopping", "selection"}:
+                    break
+                time.sleep(.001)
+            changes.append({
+                "requested": [new_width, new_height, new_fps],
+                "applied": dict(applied[-1]) if len(applied) > count else None,
+                "last_frame_size": list(frames[-1][2:]) if frames else None,
+                "frames": len(frames) - before,
+                "phases": [host.phase, viewer.phase],
+            })
         result = {
             "transport": transport, "resolution": [width, height], "requested_fps": fps,
             "synthetic_capture": synthetic, "frames": len(frames), "errors": errors,
@@ -91,6 +119,7 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             "host": host_service.performance_report(), "viewer": viewer_service.performance_report(),
             "cursor": cursors[-1] if cursors else None,
             "last_frame_pts": frames[-1][1] if frames else None,
+            "updates": changes,
         }
         if len(frames) > 1:
             result["delivered_fps"] = (len(frames) - 1) / (frames[-1][0] - frames[0][0])
@@ -124,6 +153,8 @@ def main():
     parser.add_argument("--encoder", default="libx264")
     parser.add_argument("--decoder", default="h264")
     parser.add_argument("--synthetic", action="store_true")
+    parser.add_argument("--update", dest="updates", nargs=3, type=int, action="append",
+                        metavar=("WIDTH", "HEIGHT", "FPS"), default=[])
     parser.add_argument("--output", type=Path, default=Path("out/remote-benchmark.json"))
     args = vars(parser.parse_args())
     output = args.pop("output")
@@ -131,7 +162,14 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=list), encoding="utf-8")
     print(json.dumps({k: v for k, v in result.items() if k not in {"host", "viewer"}}, ensure_ascii=False))
-    return int(bool(result["errors"]) or not result["frames"] or not result["closed_cleanly"])
+    updates_ok = len(result["updates"]) == len(args["updates"]) and all(
+        change["applied"] is not None and
+        [change["applied"][k] for k in ("width", "height", "fps")] == change["requested"] and
+        change["last_frame_size"] == change["requested"][:2] and
+        change["frames"] >= 10 and change["phases"] == ["active", "active"]
+        for change in result["updates"])
+    return int(bool(result["errors"]) or not result["frames"] or
+               not result["closed_cleanly"] or not result["workers_stopped"] or not updates_ok)
 
 
 if __name__ == "__main__":

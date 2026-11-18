@@ -13,8 +13,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtTest import QTest
 
 from frontend.desktop import icons
 from frontend.desktop.discovery import DiscoveryService
@@ -28,6 +30,31 @@ from frontend.desktop.ui.stream_window import PictureDialog
 
 APP = QApplication.instance() or QApplication([])
 apply_theme(APP)
+
+def hover_action(menu, action):
+    point = menu.actionGeometry(action).center()
+    APP.sendEvent(menu, QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(point), QPointF(menu.mapToGlobal(point)),
+        Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+    QTest.qWait(350)
+
+
+def save_menu_view(stream, name):
+    widgets = [stream] + [menu for menu in
+                          (stream.panel, stream.picture_menu, stream.mouse_menu, stream.sr_menu)
+                          if menu.isVisible()]
+    bounds = stream.frameGeometry()
+    for widget in widgets[1:]:
+        bounds = bounds.united(widget.frameGeometry())
+    pixmap = QPixmap(bounds.size())
+    pixmap.fill(Qt.GlobalColor.white)
+    painter = QPainter(pixmap)
+    for widget in widgets:
+        painter.drawPixmap(widget.frameGeometry().topLeft() - bounds.topLeft(), widget.grab())
+    painter.end()
+    output = Path(__file__).resolve().parents[1] / "out" / f"20261118-menu-{name}.png"
+    output.parent.mkdir(exist_ok=True)
+    pixmap.save(str(output))
 
 PEER = {
     "id": "a" * 16,
@@ -362,9 +389,13 @@ class WindowConnectionTests(unittest.TestCase):
         self.window._session_connected(ViewerSettings())
         self.window.connection.role, self.window.connection.phase = "viewer", "active"
         with patch.object(PictureDialog, "exec", side_effect=AssertionError("nested event loop")):
-            self.window._edit_picture()
+            stream = self.window._stream_window
+            stream.set_session_active(True)
+            stream.toggle_controls()
+            hover_action(stream.panel, stream.picture_button)
             dialog = self.window._picture_dialog
             self.assertTrue(dialog.isVisible())
+            self.assertFalse(dialog.isWindow())
             self.window._edit_picture()
             self.assertIs(self.window._picture_dialog, dialog)
             with patch.object(self.window.connection, "disconnect") as disconnect:
@@ -372,6 +403,55 @@ class WindowConnectionTests(unittest.TestCase):
                 disconnect.assert_called_once()
         self.assertIsNone(self.window._picture_dialog)
         APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_hover_submenus_switch_keep_slider_input_local_and_fit_screen(self):
+        self.window._session_connected(ViewerSettings(sr_enabled=True))
+        stream = self.window._stream_window
+        stream.set_session_active(True)
+        stream.resize(640, 400)
+        stream.toggle_controls()
+        hover_action(stream.panel, stream.mouse_menu.menuAction())
+        self.assertTrue(stream.mouse_menu.isVisible())
+        hover_action(stream.panel, stream.sr_menu.menuAction())
+        self.assertTrue(stream.sr_menu.isVisible())
+        self.assertFalse(stream.mouse_menu.isVisible())
+        QTest.mouseMove(stream.sr_percent, stream.sr_percent.rect().center())
+        QTest.qWait(50)
+        self.assertTrue(stream.sr_menu.isVisible())
+        self.assertFalse(stream.preview.captured)
+        available = stream.screen().availableGeometry()
+        for menu in (stream.panel, stream.sr_menu):
+            self.assertTrue(available.contains(menu.frameGeometry()), menu.frameGeometry())
+        save_menu_view(stream, "upscale")
+        QTest.keyClick(stream.sr_percent, Qt.Key.Key_Escape)
+        APP.processEvents()
+        self.assertFalse(stream.panel.isVisible())
+        self.assertFalse(stream.sr_menu.isVisible())
+
+    def test_embedded_picture_applies_once_and_menu_cancel_discards_draft(self):
+        self.window._session_connected(ViewerSettings())
+        self.window.connection.role, self.window.connection.phase = "viewer", "active"
+        stream = self.window._stream_window
+        stream.set_session_active(True)
+        for apply in (False, True):
+            stream.toggle_controls()
+            hover_action(stream.panel, stream.picture_button)
+            dialog = self.window._picture_dialog
+            self.assertIsNotNone(dialog)
+            save_menu_view(stream, "picture")
+            dialog.bitrate.setValue(24)
+            with patch.object(self.window.connection, "configure") as configure:
+                configure.assert_not_called()
+                if apply:
+                    dialog.apply_button.click()
+                    configure.assert_called_once()
+                    self.assertEqual(configure.call_args.args[0]["bitrate_kbps"], 24000)
+                else:
+                    stream.panel.close()
+                    configure.assert_not_called()
+            self.assertIsNone(self.window._picture_dialog)
+            self.assertFalse(stream.panel.isVisible())
+            APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_picture_accept_clears_owner_before_reentrant_disconnect(self):
         self.window._session_connected(ViewerSettings())

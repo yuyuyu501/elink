@@ -7,6 +7,7 @@ import os
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -59,8 +60,13 @@ class Media(QObject):
         self.mode = ""
         self.inject = False
         self.fail_next = False
+        self.expected_stop = False
+
+    def expect_stop(self, *, stop_media=True):
+        self.expected_stop = True
 
     def start_host(self, settings):
+        self.expected_stop = False
         self.running, self.mode = True, "host"
         self.inject = settings.allow_inject
         self.starts.append(settings)
@@ -71,6 +77,7 @@ class Media(QObject):
             QTimer.singleShot(0, self.host_prepared.emit)
 
     def start_viewer(self, settings):
+        self.expected_stop = False
         self.running, self.mode = True, "viewer"
         self.starts.append(settings)
         QTimer.singleShot(0, lambda: self.frame_ready.emit(object()))
@@ -145,6 +152,20 @@ class ConnectionTests(unittest.TestCase):
         new_reports = set(error_dir().glob("*.txt")) - reports
         self.assertFalse(new_reports, "\n".join(path.read_text(encoding="utf-8")
                                                for path in new_reports))
+
+    def test_host_is_marked_before_viewer_closes_and_restart_waits_for_host_worker(self):
+        self.connect()
+        original_stop = self.viewer_media.stop
+        checked = []
+        def stop_viewer():
+            checked.append(self.host_media.expected_stop)
+            original_stop()
+        with patch.object(self.viewer_media, "stop", side_effect=stop_viewer):
+            self.viewer.configure({"width": 1280, "height": 720, "fps": 120, "bitrate_kbps": 4000})
+            wait_until(lambda: len(self.applied) == 2 and self.host.phase == "active")
+        self.assertTrue(checked)
+        self.assertTrue(all(checked))
+        self.assertFalse(self.errors)
 
     def test_invalid_picture_does_not_stop_current_session(self):
         self.connect()
@@ -596,6 +617,8 @@ class CodecConnectionTests(unittest.TestCase):
         self.connect()
         self.viewer._message({"kind": "ready", "session": self.viewer._session_id,
                               "revision": self.viewer._revision - 1})
+        self.viewer._message({"kind": "rtc", "session": self.viewer._session_id,
+                              "revision": self.viewer._revision - 1})
         self.assertEqual(self.viewer.phase, "active")
         self.viewer_media.delay_validation = True
         self.viewer.configure(self.applied[-1])
@@ -620,6 +643,27 @@ class CodecConnectionTests(unittest.TestCase):
 
 
 class MediaIntegrationTests(unittest.TestCase):
+    def test_webrtc_reconfigures_real_media_and_recovers_failed_encoder(self):
+        from scripts.benchmark_remote import run
+        from backend.media.video.codec.inprocess import InprocessEncoder
+        original = InprocessEncoder.encode
+        def encode(adapter, frame):
+            if adapter.stream.width == 352 and threading.current_thread().name.startswith("asyncio"):
+                raise RuntimeError("injected encoder failure")
+            return original(adapter, frame)
+        with patch.object(InprocessEncoder, "encode", encode):
+            result = run(seconds=.2, width=320, height=240, fps=60, synthetic=True,
+                         updates=[(640, 360, 120), (352, 240, 90), (320, 240, 30)])
+        self.assertEqual(len(result["updates"]), 3, result)
+        for change, size in zip(result["updates"], ([640, 360], [640, 360], [320, 240])):
+            self.assertEqual(change["phases"], ["active", "active"], change)
+            self.assertEqual(change["last_frame_size"], size)
+            self.assertGreaterEqual(change["frames"], 10)
+        self.assertTrue(result["closed_cleanly"])
+        self.assertTrue(result["workers_stopped"])
+        self.assertTrue(any("injected encoder failure" in error for error in result["errors"]),
+                        result["errors"])
+
     def test_webrtc_uses_real_media_and_stops_workers(self):
         from scripts.benchmark_remote import run
         result = run(transport="webrtc", seconds=.5, width=320, height=240, fps=60, synthetic=True)

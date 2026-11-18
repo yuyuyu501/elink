@@ -289,10 +289,6 @@ QToolButton#streamTool, QToolButton#streamClose {
 }
 QToolButton#streamTool:hover { background: #EAF1FF; }
 QToolButton#streamClose:hover { background: #FFECEC; }
-QScrollArea#streamPanel {
-    background: #FFFFFF; border: 1px solid #D5DEE9; border-radius: 6px;
-}
-QScrollArea#streamPanel QWidget { background: #FFFFFF; }
 """
 
 

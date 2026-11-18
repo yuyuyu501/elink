@@ -193,11 +193,13 @@ class DesktopTrack(MediaStreamTrack):
 
 
 class SelectedEncoder(H264Encoder):
-    def __init__(self, adapter, stats):
+    def __init__(self, adapter, stats, failure):
         super().__init__()
         self.adapter = adapter
         self.stats = stats
         self._opened = False
+        self.failure = failure
+        self._parameter_sets = {}
 
     @property
     def target_bitrate(self):
@@ -209,6 +211,13 @@ class SelectedEncoder(H264Encoder):
             self.adapter.target_bitrate = max(300000, min(value, self.adapter.config.bitrate_kbps * 1000))
 
     def encode(self, image, force_keyframe=False):
+        try:
+            return self._encode(image, force_keyframe)
+        except Exception as exc:
+            self.failure(exc)
+            raise
+
+    def _encode(self, image, force_keyframe):
         if not self._opened:
             self.adapter.open()
             self._opened = True
@@ -223,7 +232,15 @@ class SelectedEncoder(H264Encoder):
         self.stats.keyframes += sum(p.keyframe for p in packets)
         payloads = []
         for packet in packets:
-            payloads.extend(self._packetize(self._split_bitstream(packet.data)))
+            nals = list(self._split_bitstream(packet.data))
+            types = {nal[0] & 31 for nal in nals if nal}
+            for nal in nals:
+                if nal and nal[0] & 31 in (7, 8):
+                    self._parameter_sets[nal[0] & 31] = nal
+            if 5 in types:
+                nals = [self._parameter_sets[k] for k in (7, 8)
+                        if k not in types and k in self._parameter_sets] + nals
+            payloads.extend(self._packetize(iter(nals)))
         return payloads, frame.pts
 
 
@@ -242,23 +259,65 @@ class DecodeQueue(queue.Queue):
         self.decode = decode
         self.request_keyframe = request_keyframe
         self.waiting_keyframe = False
+        self.generation = 0
+        self.recovering_since = None
+        self.last_error = None
+        self._parameter_sets = {}
+
+    def recover(self, error=None):
+        with self.mutex:
+            self._recover(error)
+        self.request_keyframe()
+
+    def _recover(self, error=None):
+        self.queue.clear()
+        self.generation += 1
+        self.waiting_keyframe = True
+        if self.recovering_since is None:
+            self.recovering_since = time.monotonic()
+        if error is not None:
+            self.last_error = error
+
+    def recovered(self, encoded):
+        with self.mutex:
+            if encoded._elink_generation == self.generation and self.recovering_since is not None:
+                self.recovering_since = self.last_error = None
+                logger.info("WebRTC H.264 已在关键帧后恢复解码")
 
     def put(self, item, block=True, timeout=None):
+        request = False
+        stopping = item is None
         with self.mutex:
             if item is None:
                 self.queue.clear()
-            elif self._qsize() >= self.maxsize:
-                self.queue.clear()
-                self.waiting_keyframe = True
-                self.request_keyframe()
-            if item is not None and self.waiting_keyframe:
-                if not any(n and n[0] & 31 == 5 for n in H264Encoder._split_bitstream(item[1].data)):
-                    return
-                self.waiting_keyframe = False
-                item[1]._elink_reset = True
-            self._put(item)
-            self.unfinished_tasks += 1
-            self.not_empty.notify()
+            else:
+                encoded = item[1]
+                nals = list(H264Encoder._split_bitstream(encoded.data))
+                types = {nal[0] & 31 for nal in nals if nal}
+                for nal in nals:
+                    if nal and nal[0] & 31 in (7, 8):
+                        self._parameter_sets[nal[0] & 31] = nal
+                if self._qsize() >= self.maxsize:
+                    logger.warning("WebRTC 解码队列溢出，等待关键帧恢复")
+                    self._recover()
+                    request = True
+                if self.waiting_keyframe:
+                    if 5 not in types or not all(k in self._parameter_sets for k in (7, 8)):
+                        item = None
+                    else:
+                        missing = [self._parameter_sets[k] for k in (7, 8) if k not in types]
+                        encoded.data = b"".join(b"\x00\x00\x00\x01" + nal for nal in missing) + encoded.data
+                        self.waiting_keyframe = False
+                        encoded._elink_reset = True
+                encoded._elink_generation = self.generation
+                if item is None:
+                    request = True
+            if item is not None or stopping:
+                self._put(item)
+                self.unfinished_tasks += 1
+                self.not_empty.notify()
+        if request:
+            self.request_keyframe()
 
 
 def tune_receiver(receiver, adapter, failure, stats):
@@ -285,10 +344,15 @@ def tune_receiver(receiver, adapter, failure, stats):
 
     adapter.native_output = True
     opened = False
+    closed = False
+    last_request = float("-inf")
 
     def decode(encoded):
         nonlocal opened
         try:
+            with input_q.mutex:
+                if closed or encoded._elink_generation != input_q.generation:
+                    return []
             if not opened:
                 adapter.open()
                 opened = True
@@ -299,19 +363,65 @@ def tune_receiver(receiver, adapter, failure, stats):
             stats.packets_read += 1
             stats.bytes_read += len(encoded.data)
             stats.frames_decoded += len(frames)
+            with input_q.mutex:
+                if closed or encoded._elink_generation != input_q.generation:
+                    return []
+            if frames:
+                input_q.recovered(encoded)
             return [f.to_av() for f in frames]
         except Exception as exc:
+            from backend.errors.codec import DecodeError
+            if (isinstance(exc, av.error.InvalidDataError) or
+                    isinstance(exc, DecodeError) and isinstance(exc.__cause__, av.error.InvalidDataError)):
+                logger.warning("WebRTC H.264 码流无效，等待关键帧恢复: %s", exc)
+                input_q.recover(exc)
+                return []
             failure(exc)
             return []
 
     def request():
+        # Both the RTP loop and decoder thread can request recovery.
         async def pli():
-            for ssrc in list(receiver._RTCRtpReceiver__active_ssrc):
-                await receiver._send_rtcp_pli(ssrc)
+            nonlocal last_request
+            if closed or time.monotonic() - last_request < .5:
+                return
+            last_request = time.monotonic()
+            try:
+                for ssrc in list(receiver._RTCRtpReceiver__active_ssrc):
+                    await receiver._send_rtcp_pli(ssrc)
+            except Exception as exc:
+                if not closed:
+                    failure(exc)
         loop.call_soon_threadsafe(lambda: asyncio.create_task(pli()))
 
-    receiver._RTCRtpReceiver__decoder_queue = DecodeQueue(decode, request)
+    input_q = DecodeQueue(decode, request)
+    receiver._RTCRtpReceiver__decoder_queue = input_q
     receiver._RTCRtpReceiver__jitter_buffer = JitterBuffer(capacity=2048, is_video=True)
+
+    def poll():
+        nonlocal timer
+        if closed:
+            return
+        with input_q.mutex:
+            since, cause = input_q.recovering_since, input_q.last_error
+        if since is not None:
+            if time.monotonic() - since >= 5:
+                from backend.errors.codec import DecodeError
+                error = DecodeError("WebRTC H.264 关键帧恢复超时")
+                error.__cause__ = cause
+                failure(error)
+                return
+            request()
+        timer = loop.call_later(.25, poll)
+
+    timer = loop.call_later(.25, poll)
+
+    def cleanup():
+        nonlocal closed
+        closed = True
+        timer.cancel()
+
+    return cleanup
 
 
 class LoopbackTrack(MediaStreamTrack):

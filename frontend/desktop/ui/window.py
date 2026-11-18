@@ -706,15 +706,17 @@ class MainWindow(QMainWindow):
         if self.connection.role != "viewer" or self.connection.phase not in {"active", "selection"}:
             return
         if self._picture_dialog is not None:
-            self._picture_dialog.raise_()
-            self._picture_dialog.activateWindow()
             return
         self._release_viewer_input()
+        embedded = self.connection.phase == "active" and self._stream_window is not None
         dialog = PictureDialog(saved_picture(self._viewer_settings), self._stream_window or self,
-                               connection=self.connection)
+                               connection=self.connection, embedded=embedded)
         self._picture_dialog = dialog
+        if embedded:
+            self._stream_window.set_picture_editor(dialog)
         dialog.finished.connect(lambda result: self._picture_finished(dialog, result))
-        dialog.open()
+        if not embedded:
+            dialog.open()
 
     def _picture_finished(self, dialog: PictureDialog, result: int) -> None:
         if self._picture_dialog is not dialog:

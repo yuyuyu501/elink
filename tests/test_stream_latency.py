@@ -1,6 +1,7 @@
 """Bounded real-time delivery, frame timing and ordered input regressions."""
 
 import io
+import asyncio
 import os
 import queue
 import sys
@@ -9,7 +10,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -31,6 +32,111 @@ from backend.transport.srt import build_srt_url
 from frontend.desktop.service import SessionService, _QtRenderer
 
 APP = QCoreApplication.instance() or QCoreApplication([])
+
+class RtcRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from backend.media.video.codec.inprocess import InprocessDecoder
+        from backend.pipeline.receive_pipeline import ReceivePipelineStats
+        from backend.transport.webrtc.media_track import tune_receiver
+        self.adapter = InprocessDecoder(StreamInfo(width=320, height=240))
+        self.failures = []
+        self.receiver = SimpleNamespace(
+            _RTCRtpReceiver__active_ssrc={123: None}, _send_rtcp_pli=AsyncMock())
+        self.cleanup = tune_receiver(self.receiver, self.adapter, self.failures.append,
+                                     ReceivePipelineStats())
+        self.q = self.receiver._RTCRtpReceiver__decoder_queue
+        self.packets = _sample_packets("h264")
+
+    async def asyncTearDown(self):
+        self.cleanup()
+        self.adapter.close()
+        await asyncio.sleep(0)
+
+    def feed(self, packet):
+        encoded = SimpleNamespace(data=packet.data, timestamp=packet.pts)
+        self.q.put((None, encoded))
+        return self.q.decode(self.q.get_nowait()[1]) if not self.q.empty() else []
+
+    async def test_real_invalid_frame_recovers_only_after_complete_idr(self):
+        self.assertFalse(self.feed(self.packets[1]))
+        self.assertTrue(self.q.waiting_keyframe)
+        self.assertIsNotNone(self.q.last_error)
+        self.assertFalse(self.failures)
+        self.assertFalse(self.feed(self.packets[1]))
+        await asyncio.sleep(.01)
+        self.receiver._send_rtcp_pli.assert_awaited_once_with(123)
+        self.assertTrue(self.feed(self.packets[0]))
+        self.assertIsNone(self.q.recovering_since)
+        self.assertTrue(self.feed(self.packets[1]))
+        self.assertFalse(self.failures)
+
+    async def test_overflow_discards_stale_generation_and_stops_while_waiting(self):
+        self.assertTrue(self.feed(self.packets[0]))
+        for index in range(5):
+            self.q.put((None, SimpleNamespace(data=self.packets[1].data, timestamp=index)))
+        self.assertTrue(self.q.waiting_keyframe)
+        self.assertTrue(self.q.empty())
+        self.assertTrue(self.feed(self.packets[0]))
+        self.assertIsNone(self.q.recovering_since)
+        self.q.recover()
+        self.q.put(None)
+        self.assertIsNone(self.q.get_nowait())
+
+    async def test_old_queued_frame_is_ignored_and_cached_parameters_restore_idr(self):
+        from aiortc.codecs.h264 import H264Encoder
+        self.assertTrue(self.feed(self.packets[0]))
+        old = SimpleNamespace(data=self.packets[1].data, timestamp=1)
+        self.q.put((None, old))
+        self.q.get_nowait()
+        self.q.recover()
+        self.assertFalse(self.q.decode(old))
+        stripped = b"".join(b"\0\0\0\1" + nal
+                            for nal in H264Encoder._split_bitstream(self.packets[0].data)
+                            if nal[0] & 31 not in (7, 8))
+        self.assertTrue(self.feed(Packet(data=stripped, pts=3000)))
+        self.assertIsNone(self.q.recovering_since)
+        self.assertFalse(self.failures)
+
+    async def test_recovery_timeout_preserves_cause_and_request_is_rate_limited(self):
+        self.feed(self.packets[1])
+        cause = self.q.last_error
+        for _ in range(10):
+            self.q.request_keyframe()
+        await asyncio.sleep(.01)
+        self.receiver._send_rtcp_pli.assert_awaited_once()
+        self.q.recovering_since = time.monotonic() - 6
+        await asyncio.sleep(.3)
+        self.assertEqual(len(self.failures), 1)
+        self.assertIn("恢复超时", str(self.failures[0]))
+        self.assertIs(self.failures[0].__cause__, cause)
+
+    async def test_open_and_hardware_errors_remain_fatal(self):
+        from backend.errors.codec import CodecOpenError
+        original = CodecOpenError("hardware unavailable")
+        with patch.object(self.adapter, "open", side_effect=original):
+            self.feed(self.packets[0])
+        self.assertEqual(self.failures, [original])
+        self.assertFalse(self.q.waiting_keyframe)
+
+    async def test_sender_supplies_cached_parameters_and_preserves_encode_failure(self):
+        from backend.pipeline.video_pipeline import VideoPipelineStats
+        from backend.transport.webrtc.media_track import SelectedEncoder
+        from aiortc.codecs.h264 import H264Encoder
+        nals = list(H264Encoder._split_bitstream(self.packets[0].data))
+        stripped = b"".join(b"\0\0\0\1" + n for n in nals if n[0] & 31 not in (7, 8))
+        adapter = Mock()
+        adapter.encode.side_effect = [[self.packets[0]], [Packet(data=stripped)]]
+        encoder = SelectedEncoder(adapter, VideoPipelineStats(), self.failures.append)
+        with patch.object(encoder, "_packetize", side_effect=lambda items: list(items)):
+            encoder.encode(frame().to_av())
+            payloads, _ = encoder.encode(frame().to_av(), True)
+        self.assertTrue({5, 7, 8}.issubset({n[0] & 31 for n in payloads}))
+        original = RuntimeError("original encoder failure")
+        adapter.encode.side_effect = original
+        with self.assertRaises(RuntimeError) as caught:
+            encoder.encode(frame().to_av())
+        self.assertIs(caught.exception, original)
+        self.assertEqual(self.failures, [original])
 
 
 class H264Decoder(FfmpegDecoderBase):
@@ -187,6 +293,16 @@ class StreamLatencyTests(unittest.TestCase):
         service.expect_stop()
         self.assertTrue(service._stop.is_set())
         service._check_media_end()
+
+    def test_prepare_stop_marks_expectation_without_closing_media_and_new_session_clears_it(self):
+        service = SessionService()
+        service.expect_stop(stop_media=False)
+        self.assertTrue(service._expected_stop.is_set())
+        self.assertFalse(service._stop.is_set())
+        service._begin("viewer")
+        self.assertFalse(service._expected_stop.is_set())
+        service.expect_stop()
+        self.assertTrue(service._stop.is_set())
 
     def test_slow_gui_receives_one_newest_frame_and_rejects_old_generation(self):
         service = SessionService()

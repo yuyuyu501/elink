@@ -253,7 +253,7 @@ class DesktopConnection(QObject):
                        revision=self._revision, transport=self._protocol)
         elif self.service.running:
             self.phase = "updating"
-            self._send("stop_media")
+            self._request_media_stop()
         else:
             self._start_host()
         self.changed.emit()
@@ -269,7 +269,7 @@ class DesktopConnection(QObject):
         self._send("rollback", message="编解码设置失败，恢复此前参数")
         self.phase = "updating"
         self._started = time.monotonic()
-        self._send("stop_media")
+        self._request_media_stop()
 
     @property
     def busy(self) -> bool:
@@ -409,7 +409,7 @@ class DesktopConnection(QObject):
         kind = message.get("kind")
         if self._session_id and message.get("session", self._session_id) != self._session_id:
             return
-        if (self._codec_enabled and kind in {"ready", "candidate_failed", "stop_media", "stopped", "active", "media_failed"}
+        if (self._codec_enabled and kind in {"ready", "candidate_failed", "stop_media", "stopped", "active", "media_failed", "rtc"}
                 and message.get("revision", self._revision) != self._revision):
             return
         if self.phase == "stopping":
@@ -595,7 +595,7 @@ class DesktopConnection(QObject):
             self._previous, self._picture = self._picture, picture
             self.phase = "updating"
             self._started = time.monotonic()
-            self._send("stop_media")
+            self._request_media_stop()
         elif self.role == "viewer" and kind == "stop_media" and self.phase in {"active", "receiving", "updating"}:
             self.phase = "updating"
             self._started = time.monotonic()
@@ -731,7 +731,17 @@ class DesktopConnection(QObject):
 
     def _stop_then(self, action) -> None:
         self._pending_action = action
+        expect_stop = getattr(self.service, "expect_stop", None)
+        if expect_stop is not None:
+            expect_stop()
         self.service.stop()
+
+    def _request_media_stop(self) -> None:
+        # Mark the host before the viewer can close its media connection.
+        expect_stop = getattr(self.service, "expect_stop", None)
+        if expect_stop is not None:
+            expect_stop(stop_media=False)
+        self._send("stop_media")
 
     def _service_state(self, state: str, detail: str) -> None:
         self._update_error_context()
@@ -760,7 +770,7 @@ class DesktopConnection(QObject):
             self._started = time.monotonic()
             self._send("rollback", message=f"画面设置失败，恢复此前参数：{detail}",
                        fault_id=self.fault_id, source=self.identity)
-            self._send("stop_media")
+            self._request_media_stop()
         elif self.role == "viewer" and self.phase == "receiving":
             self.phase = "updating"
             self._stop_then(lambda: self._send("media_failed", message=detail,

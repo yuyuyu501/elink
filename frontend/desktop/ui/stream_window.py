@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
-    QHBoxLayout, QPushButton, QScrollArea, QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget,
+    QHBoxLayout, QMenu, QScrollArea, QSizePolicy, QSlider, QToolButton,
+    QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from backend.input_capture.mouse import MOUSE_MODES
@@ -43,8 +44,10 @@ def fps_control(slider: QSlider) -> QWidget:
 
 
 class PictureDialog(QDialog):
-    def __init__(self, picture: dict, parent=None, *, connection=None) -> None:
+    def __init__(self, picture: dict, parent=None, *, connection=None, embedded=False) -> None:
         super().__init__(parent)
+        if embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
         self.setWindowTitle("画面设置")
         self.setMinimumWidth(300)
         form = QFormLayout(self)
@@ -117,6 +120,11 @@ class PictureDialog(QDialog):
         row = QHBoxLayout(controls)
         row.setContentsMargins(0, 0, 0, 0)
         row.addStretch()
+        cancel = QToolButton()
+        cancel.setIcon(icons.icon("x"))
+        cancel.setToolTip("取消画面设置")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
         row.addWidget(self.apply_button)
         form.addRow("", controls)
         self._connection_state()
@@ -288,20 +296,17 @@ class StreamWindow(QWidget):
         self.title = self.toolbar.title
         self.pill = self.toolbar.pill
         self.notice = NoticeBar(self)
-        self.panel = QScrollArea(self)
-        self.panel.setObjectName("streamPanel")
-        self.panel.setWidgetResizable(True)
-        self.panel.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        content = QWidget()
-        rows = QVBoxLayout(content)
-        rows.setContentsMargins(12, 12, 12, 12)
-        rows.setSpacing(8)
-        self.session_controls = QWidget()
-        controls = QVBoxLayout(self.session_controls)
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(8)
-        self.picture_button = self._command("画面设置", "settings", self.picture_requested.emit)
-        controls.addWidget(self.picture_button)
+        self.panel = QMenu(self)
+        self.panel.setMinimumWidth(200)
+        self.picture_menu = self.panel.addMenu(icons.icon("settings"), "画面设置")
+        self.picture_button = self.picture_menu.menuAction()
+        self.picture_menu.addAction("画面设置").setEnabled(False)
+        self.picture_menu.aboutToShow.connect(self.picture_requested.emit)
+        self.picture_menu.aboutToHide.connect(self._discard_picture)
+        self._picture_editor = None
+        self.mouse_menu = self.panel.addMenu(icons.icon("mouse"), "鼠标")
+        mouse = QWidget()
+        controls = QVBoxLayout(mouse)
         form = QFormLayout()
         self.mouse_mode = QComboBox()
         for text, mode in MOUSE_MODES:
@@ -330,8 +335,12 @@ class StreamWindow(QWidget):
         sensitivity.addWidget(self.sensitivity_value)
         sensitivity.addWidget(reset)
         controls.addLayout(sensitivity)
+        self._menu_widget(self.mouse_menu, mouse)
+        self.sr_menu = self.panel.addMenu(icons.icon("monitor"), "超分")
+        sr_content = QWidget()
+        controls = QVBoxLayout(sr_content)
         self.preferences = {}
-        for name, text in (("sr_enabled", "超分辨率"), ("muted", "静音")):
+        for name, text in (("sr_enabled", "超分辨率"),):
             check = QCheckBox(text)
             check.toggled.connect(lambda checked, name=name: self.preference_changed.emit(name, checked))
             self.preferences[name] = check
@@ -380,18 +389,24 @@ class StreamWindow(QWidget):
         self.sr_status = label("")
         self.sr_status.setWordWrap(True)
         controls.addWidget(self.sr_status)
-        rows.addWidget(self.session_controls)
-        self.stats_button = QCheckBox("性能叠加")
+        self._menu_widget(self.sr_menu, sr_content)
+        self.panel.addSeparator()
+        muted = self.panel.addAction(icons.icon("volume-2"), "静音")
+        muted.setCheckable(True)
+        muted.toggled.connect(lambda checked: self.preference_changed.emit("muted", checked))
+        self.preferences["muted"] = muted
+        self.stats_button = self.panel.addAction(icons.icon("activity"), "性能叠加")
+        self.stats_button.setCheckable(True)
         self.stats_button.toggled.connect(self.stats_toggled.emit)
-        rows.addWidget(self.stats_button)
-        rows.addWidget(self._command("全屏", "maximize", self.toggle_fullscreen))
-        disconnect = self._command("断开连接", "power", self.close)
-        disconnect.setObjectName("danger")
-        rows.addWidget(disconnect)
-        rows.addStretch()
-        self.panel.setWidget(content)
-        self.panel.hide()
-        self.session_controls.setEnabled(False)
+        self.panel.addSeparator()
+        self.panel.addAction(icons.icon("maximize"), "全屏").triggered.connect(self.toggle_fullscreen)
+        self.panel.addAction(icons.icon("power"), "断开连接").triggered.connect(self.close)
+        self._session_actions = [self.picture_button, self.mouse_menu.menuAction(),
+                                 self.sr_menu.menuAction(), muted]
+        for menu in (self.picture_menu, self.mouse_menu, self.sr_menu):
+            menu.aboutToShow.connect(self._fit_submenu)
+        for action in self._session_actions:
+            action.setEnabled(False)
         self._handles = []
         left, right, top, bottom = Qt.Edge.LeftEdge, Qt.Edge.RightEdge, Qt.Edge.TopEdge, Qt.Edge.BottomEdge
         for edges, cursor in (
@@ -409,11 +424,53 @@ class StreamWindow(QWidget):
             shortcut.activated.connect(callback)
             self._shortcuts.append(shortcut)
 
-    def _command(self, text, icon, callback) -> QPushButton:
-        button = QPushButton(text)
-        button.setIcon(icons.icon(icon))
-        button.clicked.connect(callback)
-        return button
+    def _menu_widget(self, menu, content):
+        scroll = QScrollArea(menu)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        content.adjustSize()
+        scroll.setFixedWidth(max(320, content.sizeHint().width() + 18))
+        scroll.setFixedHeight(min(content.sizeHint().height() + 16,
+                                  self.screen().availableGeometry().height() - 80))
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(scroll)
+        menu.addAction(action)
+        for widget in (content, *content.findChildren(QWidget)):
+            widget.installEventFilter(self)
+        return action
+
+    def set_picture_editor(self, editor):
+        self._picture_editor = editor
+        for action in self.picture_menu.actions():
+            if isinstance(action, QWidgetAction):
+                self.picture_menu.removeAction(action)
+                action.deleteLater()
+        self._menu_widget(self.picture_menu, editor)
+        editor.finished.connect(self._picture_done)
+
+    def _fit_submenu(self):
+        for action in self.sender().actions():
+            if isinstance(action, QWidgetAction):
+                scroll = action.defaultWidget()
+                content = scroll.widget()
+                height = max(content.sizeHint().height(), content.heightForWidth(scroll.width() - 4))
+                scroll.setFixedHeight(min(height + 4, self.screen().availableGeometry().height() - 80))
+
+    def _picture_done(self, _result):
+        self._picture_editor = None
+        self.panel.close()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            self.panel.close()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _discard_picture(self):
+        editor, self._picture_editor = self._picture_editor, None
+        if editor is not None:
+            editor.reject()
 
     def apply_settings(self, settings) -> None:
         widgets = [self.mouse_mode, self.sensitivity, self.sr_mode,
@@ -457,7 +514,12 @@ class StreamWindow(QWidget):
 
     def set_session_active(self, active: bool) -> None:
         self._active = active
-        self.session_controls.setEnabled(active)
+        for action in self._session_actions:
+            action.setEnabled(active)
+        self.mouse_mode.parentWidget().setEnabled(active)
+        self.sr_mode.parentWidget().setEnabled(active)
+        if not active:
+            self.panel.close()
         self._sync_input()
 
     def set_input_available(self, available: bool) -> None:
@@ -494,8 +556,11 @@ class StreamWindow(QWidget):
 
     def toggle_controls(self) -> None:
         self.release_input()
-        self.panel.setVisible(not self.panel.isVisible())
-        self._layout()
+        if self.panel.isVisible():
+            self.panel.close()
+        else:
+            self.panel.popup(self.toolbar.controls.mapToGlobal(
+                QPoint(self.toolbar.controls.width() - self.panel.sizeHint().width(), TITLE_HEIGHT)))
 
     def toggle_fullscreen(self) -> None:
         self.release_input()
@@ -531,12 +596,8 @@ class StreamWindow(QWidget):
         video_top = 0 if self.isFullScreen() else TITLE_HEIGHT
         self.preview.setGeometry(0, video_top, self.width(), max(0, self.height() - video_top))
         self.preview.stats_top = TITLE_HEIGHT if self.isFullScreen() and show_title else 0
-        self.preview.stats_right = 324 if self.panel.isVisible() else 0
+        self.preview.stats_right = 0
         self.preview.update()
-        self.panel.setGeometry(max(0, self.width() - 324), top + 8, 312,
-                               max(0, min(self.panel.widget().sizeHint().height() + 2,
-                                          self.height() - top - 20)))
-        self.panel.raise_()
         self.notice.setGeometry(16, top + 8, max(0, self.width() - 32), self.notice.sizeHint().height())
         self.notice.raise_()
         w, h, edge = self.width(), self.height(), 5
@@ -564,6 +625,7 @@ class StreamWindow(QWidget):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
+        self.panel.close()
         self.upscale_cancel.emit()
         if not self._closed:
             self._closed = True

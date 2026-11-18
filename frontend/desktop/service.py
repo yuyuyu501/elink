@@ -350,6 +350,7 @@ class SessionService(QObject):
         self._upscale_checked = 0.0
         self._rtc_inbox = queue.Queue(maxsize=8)
         self._rtc_ready = threading.Event()
+        self._expected_stop = threading.Event()
         self._audio_output = None
         self._session_audio = None
         from backend.control_channel.udp_motion import MotionSender
@@ -575,9 +576,11 @@ class SessionService(QObject):
         )
         self._worker.start()
 
-    def expect_stop(self) -> None:
+    def expect_stop(self, *, stop_media=True) -> None:
+        self._expected_stop.set()
         self.set_input_focus(False)
-        self._stop.set()
+        if stop_media:
+            self._stop.set()
         self._clear_frames()
 
     def stop(self) -> None:
@@ -606,6 +609,7 @@ class SessionService(QObject):
         self.failure_details = {}
         self._input_error_id = ""
         self._mode = mode
+        self._expected_stop.clear()
         self._stop.clear()
         self._clear_frames()
         self._presented = 0
@@ -734,7 +738,8 @@ class SessionService(QObject):
             asyncio.run(run())
         except Exception as exc:
             # Runtime failures set the stop event to wake its loop.
-            if runtime is not None and runtime._failure or not self._stop.is_set():
+            if not self._expected_stop.is_set() and (
+                    runtime is not None and runtime._failure or not self._stop.is_set()):
                 self.record_failure(exc)
                 self.log.emit(f"WebRTC 会话失败：{exc}", "error")
                 self.state_changed.emit("error", str(exc))
