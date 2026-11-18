@@ -36,7 +36,8 @@ jobs:
           python -m scripts.check 2>&1 | Tee-Object -FilePath out/regression.log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
-            $details = (Get-Content out/regression.log -Tail 150) -join "`n"
+            $details = (Select-String -Path out/regression.log -Pattern '^FAIL:|^ERROR:|^Traceback|^AssertionError' -Context 0,12 | Out-String)
+            if (-not $details.Trim()) { $details = (Get-Content out/regression.log -Tail 150) -join "`n" }
             $details = $details.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
             Write-Output "::error title=Regression failure::$details"
           }
