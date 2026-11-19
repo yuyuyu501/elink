@@ -2,6 +2,8 @@
 
 from collections import deque
 from fractions import Fraction
+from concurrent.futures import Future
+import queue
 import sys
 import time
 
@@ -116,6 +118,12 @@ class InprocessEncoder(BaseEncoder):
         self._context = self._proc = None
         self.force_keyframe = False
         self.target_bitrate = config.bitrate_kbps * 1000
+        self._updates = queue.Queue(maxsize=1)
+
+    def request_update(self, stream, config):
+        future = Future()
+        self._updates.put_nowait((stream, config, future))
+        return future
 
     def open(self):
         try:
@@ -159,6 +167,30 @@ class InprocessEncoder(BaseEncoder):
             raise CodecOpenError(f"无法打开 {self.name}", detail=str(exc)) from exc
 
     def encode(self, frame):
+        try:
+            stream, config, future = self._updates.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            if future.set_running_or_notify_cancel():
+                replacement = InprocessEncoder(stream, config)
+                try:
+                    replacement.open()
+                    replacement.force_keyframe = True
+                    packets = replacement.encode(frame)
+                    if not packets or not any(p.keyframe for p in packets):
+                        raise RuntimeError("新编码器未生成关键帧")
+                except Exception as exc:
+                    replacement.close()
+                    future.set_exception(exc)
+                else:
+                    self.close()
+                    self._context = replacement._context
+                    self.config, self.stream, self.name = config, stream, config.encoder
+                    self.target_bitrate = config.bitrate_kbps * 1000
+                    self._opened = True
+                    future.set_result(None)
+                    return packets
         image = frame.to_av().reformat(width=self.stream.width, height=self.stream.height,
                                        format=self._context.pix_fmt)
         if int(image.colorspace) in (1, 5, 6):
@@ -187,6 +219,9 @@ class InprocessEncoder(BaseEncoder):
     def close(self):
         self._context = None
         self._opened = False
+        while not self._updates.empty():
+            _, _, future = self._updates.get_nowait()
+            future.cancel()
 
     def diagnostics(self):
         return {"backend": self.name, "implementation": "pyav", "bitrate": self.target_bitrate}

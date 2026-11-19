@@ -15,6 +15,7 @@ from __future__ import annotations
 import socket
 import sys
 import time
+import threading
 from collections import deque
 from dataclasses import replace
 from pathlib import Path
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
 )
 
 from .. import __version__, icons, settings as user_settings, startup
@@ -64,6 +66,8 @@ class MainWindow(QMainWindow):
     """应用主窗口。"""
 
     shutdown_complete = Signal()
+    update_result = Signal(object, str)
+    update_progress = Signal(int, int)
 
     def __init__(self, root: Path | None = None, *, auto_refresh: bool = True) -> None:
         super().__init__()
@@ -84,6 +88,13 @@ class MainWindow(QMainWindow):
         self._recent_logs: deque[tuple[str, str, str]] = deque(maxlen=20)
         self._stream_window: StreamWindow | None = None
         self._picture_dialog: PictureDialog | None = None
+        self._update_worker = None
+        self._update_cancel = threading.Event()
+        self._update_stage = ""
+        self._update_release = None
+        self._update_workspace = None
+        self.update_result.connect(self._update_finished)
+        self.update_progress.connect(self._download_progress)
         self.ui_settings = user_settings.load_ui()
         self.discovery = DiscoveryService(self)
         self.discovery.peers_changed.connect(self._on_peers)
@@ -302,6 +313,15 @@ class MainWindow(QMainWindow):
         settings = self.settings_page
         settings.startup_changed.connect(self._change_startup)
         settings.tray_changed.connect(self._change_tray)
+        settings.admin_changed.connect(self._change_admin)
+        settings.gamepad_changed.connect(self._change_gamepad_backend)
+        settings.check_update_requested.connect(self._check_updates)
+        settings.cancel_update_requested.connect(self._update_cancel.set)
+        settings.previews_changed.connect(self._change_previews)
+        settings.gamepad_backend.blockSignals(True)
+        settings.gamepad_backend.setCurrentIndex(
+            max(0, settings.gamepad_backend.findData(self._host_settings.gamepad_backend)))
+        settings.gamepad_backend.blockSignals(False)
         settings.open_data_requested.connect(lambda: self._open_dir(self.root))
         settings.open_logs_requested.connect(lambda: self._open_dir(self.root / "logs"))
         settings.copy_diagnostics_requested.connect(self._copy_diagnostics)
@@ -604,14 +624,14 @@ class MainWindow(QMainWindow):
                 self._stream_window.apply_settings(self._viewer_settings)
         self._on_peers(self.discovery.peers())
         if self._stream_window:
-            self._stream_window.set_session_active(phase == "active")
+            self._stream_window.set_session_active(
+                phase == "active" or self.connection._live is not None or self.connection._live_committing,
+                settings_ready=phase == "active")
             self._stream_window.set_status(
                 "已连接" if phase == "active" else "调整中" if phase in {"updating", "validating", "negotiating"} else "连接中",
                 "ok" if phase == "active" else "busy",
             )
-            if phase == "updating":
-                self._stream_window.preview.clear()
-            elif phase in {"stopping", "idle"}:
+            if phase in {"stopping", "idle"}:
                 self._close_stream_window()
         if phase in {"connecting", "preparing", "receiving", "updating"}:
             self.notice_bar.show_message("正在调整画面…" if phase == "updating" else "正在建立桌面连接…", "info")
@@ -658,6 +678,8 @@ class MainWindow(QMainWindow):
             self._stream_window.set_input_available(available)
 
     def _viewer_preference(self, name: str, value) -> None:
+        if name.startswith("sr_") and self.connection.phase not in {"active", "idle"}:
+            return
         if self._stream_window is not None:
             self._stream_window.release_input()
         if name not in {"mouse_mode", "mouse_sensitivity", "clipboard_enabled", "gamepad_enabled",
@@ -686,7 +708,10 @@ class MainWindow(QMainWindow):
                 self._viewer_settings = previous
         if self._stream_window is not None:
             self._stream_window.apply_settings(self._viewer_settings)
-            self._stream_window.set_session_active(self.connection.phase == "active")
+            self._stream_window.set_session_active(
+                self.connection.phase == "active" or self.connection._live is not None
+                or self.connection._live_committing,
+                settings_ready=self.connection.phase == "active")
         if name == "mouse_mode":
             if self._stream_window is not None:
                 self._stream_window.preview.request_mouse_mode()
@@ -738,6 +763,95 @@ class MainWindow(QMainWindow):
             dialog.deleteLater()
 
     # ---- 设置 / 托盘 / 发现开关 ----
+
+    def _change_previews(self, enabled):
+        self.ui_settings.update_previews = enabled
+        self._persist_ui()
+
+    def _change_admin(self, enabled):
+        from ..privileges import is_elevated, restart_elevated
+        if enabled and not is_elevated():
+            try:
+                restart_elevated(self.root)
+            except OSError as exc:
+                self.settings_page.admin_row.toggle.blockSignals(True)
+                self.settings_page.admin_row.toggle.setChecked(False)
+                self.settings_page.admin_row.toggle.blockSignals(False)
+                self.notice_bar.show_message(str(exc), "warn")
+                return
+            self.ui_settings.admin_startup = True
+            self._persist_ui()
+            self.request_exit()
+            return
+        self.ui_settings.admin_startup = enabled
+        self._persist_ui()
+
+    def _change_gamepad_backend(self, backend):
+        if self.connection.busy:
+            box = self.settings_page.gamepad_backend
+            box.blockSignals(True)
+            box.setCurrentIndex(box.findData(self._host_settings.gamepad_backend))
+            box.blockSignals(False)
+            self.notice_bar.show_message("请先结束当前会话再切换手柄后端。", "warn")
+            return
+        self._host_settings.gamepad_backend = backend
+        self._persist_ui()
+
+    def _run_update_task(self, stage, action):
+        if self._update_worker is not None and self._update_worker.is_alive():
+            return
+        self._update_stage = stage
+        def run():
+            try:
+                result, error = action(), ""
+            except Exception as exc:
+                result, error = None, str(exc)
+            self.update_result.emit(result, error)
+        self._update_worker = threading.Thread(target=run, name="application-update", daemon=True)
+        self._update_worker.start()
+
+    def _check_updates(self):
+        from .. import updates
+        self.settings_page.set_update_busy("正在检测更新…")
+        self._run_update_task("check", lambda: updates.check_release(self.ui_settings.update_previews))
+
+    def _download_progress(self, received, total):
+        self.settings_page.update_progress.setValue(round(received / max(total, 1) * 100))
+
+    def _update_finished(self, result, error):
+        from .. import updates
+        self._update_worker = None
+        if self._exit_requested:
+            return
+        if error:
+            self.settings_page.set_update_busy(error)
+            return
+        if self._update_stage == "check":
+            if result is None:
+                self.settings_page.set_update_busy("当前已是最新版本。")
+                return
+            self._update_release = result
+            self.settings_page.set_update_busy(f"发现新版本 {result['version']}")
+            if QMessageBox.question(self, "Elink 更新", f"发现 {result['version']}，是否更新？") != QMessageBox.StandardButton.Yes:
+                return
+            target = updates.installation_dir()
+            if target is None:
+                QDesktopServices.openUrl(QUrl(result["page"]))
+                return
+            self._update_cancel = threading.Event()
+            self.settings_page.set_update_busy("正在下载更新…", downloading=True)
+            self.settings_page.update_progress.setValue(0)
+            self._run_update_task("download", lambda: updates.prepare_update(
+                result, target, self._update_cancel, self.update_progress.emit))
+        elif self._update_stage == "download":
+            self._update_workspace = result
+            target = updates.installation_dir()
+            self.settings_page.set_update_busy("正在准备更新…")
+            self._run_update_task("handoff", lambda: updates.launch_helper(result, target, self.root))
+        else:
+            self._update_helper = result
+            (self._update_workspace / "armed").write_text("ready", encoding="ascii")
+            self.request_exit()
     def _apply_ui_settings(self) -> None:
         tray_available = QSystemTrayIcon.isSystemTrayAvailable()
         if not tray_available:
@@ -1016,6 +1130,7 @@ class MainWindow(QMainWindow):
                     2500,
                 )
             return
+        self._update_cancel.set()
         self.connection.close()
         deadline = time.monotonic() + 4.0
         while self.connection.busy and time.monotonic() < deadline:

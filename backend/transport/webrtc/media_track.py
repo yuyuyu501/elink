@@ -138,6 +138,7 @@ class DesktopTrack(MediaStreamTrack):
         self.capture_ms = deque(maxlen=4096)
         self.frames = 0
         self.origin_pts = None
+        self._updates = queue.Queue(maxsize=1)
         self._worker = threading.Thread(target=self._capture, name="rtc-capture", daemon=True)
         self._worker.start()
 
@@ -148,6 +149,19 @@ class DesktopTrack(MediaStreamTrack):
             clock = FrameClock(self.capture.config.fps)
             started = time.perf_counter()
             while not self._closed.is_set():
+                try:
+                    picture, future = self._updates.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    if future.set_running_or_notify_cancel():
+                        try:
+                            self.capture.reconfigure(picture["width"], picture["height"], picture["fps"])
+                            clock = FrameClock(picture["fps"])
+                        except Exception as exc:
+                            future.set_exception(exc)
+                        else:
+                            future.set_result(None)
                 clock.wait()
                 begin = time.perf_counter()
                 frame = self.capture.read()
@@ -179,6 +193,12 @@ class DesktopTrack(MediaStreamTrack):
                 frame = frame.with_data(frame.data, pts=frame.pts - self.origin_pts)
                 return frame.to_av()
         raise MediaStreamError
+
+    def request_update(self, picture):
+        from concurrent.futures import Future
+        future = Future()
+        self._updates.put_nowait((picture, future))
+        return future
 
     def stop(self):
         if not self._closed.is_set():
@@ -325,6 +345,9 @@ def tune_receiver(receiver, adapter, failure, stats):
     from aiortc import rtcrtpreceiver
     from aiortc.jitterbuffer import JitterBuffer
     from backend.media.packet import Packet
+    from backend.media.video.codec.base import SwitchableDecoder
+    adapter.native_output = True
+    adapter = SwitchableDecoder(adapter)
     loop = asyncio.get_running_loop()
     if not getattr(rtcrtpreceiver.decoder_worker, "_elink", False):
         original = rtcrtpreceiver.decoder_worker
@@ -342,7 +365,6 @@ def tune_receiver(receiver, adapter, failure, stats):
         worker._elink = True
         rtcrtpreceiver.decoder_worker = worker
 
-    adapter.native_output = True
     opened = False
     closed = False
     last_request = float("-inf")
@@ -356,7 +378,9 @@ def tune_receiver(receiver, adapter, failure, stats):
             if not opened:
                 adapter.open()
                 opened = True
-            packet = Packet(data=encoded.data, pts=encoded.timestamp)
+            from backend.media.packet import is_keyframe
+            packet = Packet(data=encoded.data, pts=encoded.timestamp,
+                            keyframe=is_keyframe(encoded.data, codec=adapter.stream.codec))
             if getattr(encoded, "_elink_reset", False):
                 adapter.reset(packet)
             frames = adapter.decode(packet)
@@ -421,6 +445,8 @@ def tune_receiver(receiver, adapter, failure, stats):
         closed = True
         timer.cancel()
 
+    cleanup.decoder = adapter
+    cleanup.request_keyframe = request
     return cleanup
 
 

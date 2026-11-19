@@ -395,5 +395,27 @@ class RuntimeTests(unittest.TestCase):
             receiver.close()
 
 
+class LiveSelectionTests(unittest.TestCase):
+    def test_same_format_encoder_switch_keeps_monotonic_pts(self):
+        from dataclasses import replace
+        from backend.media.video.codec.inprocess import InprocessEncoder
+        from backend.config.schema import VideoEncodeConfig
+        stream = StreamInfo(width=320, height=240, framerate=30)
+        config = VideoEncodeConfig(encoder="libx264", realtime=True)
+        encoder = InprocessEncoder(stream, config)
+        encoder.open()
+        try:
+            frame = Frame(data=bytes((0, 0, 255, 255)) * (320 * 240), width=320, height=240)
+            before = encoder.encode(frame)[0]
+            future = encoder.request_update(stream.copy_with(framerate=120),
+                                            replace(config, bitrate_kbps=8000))
+            after = encoder.encode(frame.with_data(frame.data, pts=3000))[0]
+            self.assertIsNone(future.result())
+            self.assertTrue(after.keyframe)
+            self.assertGreater(after.pts, before.pts)
+        finally:
+            encoder.close()
+
+
 if __name__ == "__main__":
     unittest.main()

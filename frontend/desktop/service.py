@@ -79,6 +79,7 @@ class HostSettings:
     srt_latency_ms: int = 120
     session_token: str = ""
     motion_port: int = 0
+    gamepad_backend: str = "vigem"
 
 
 @dataclass
@@ -166,8 +167,11 @@ class _QtRenderer:
         self.frames = 0
         self._condition = threading.Condition()
         self._pending = None
+        self._last_source = None
         self._closed = False
         self._worker = None
+        self._update_factory = None
+        self._update_done = None
         self.prepare_ms = deque(maxlen=4096)
 
     def open(self) -> None:
@@ -206,10 +210,31 @@ class _QtRenderer:
     def _prepare_frames(self) -> None:
         while True:
             with self._condition:
-                self._condition.wait_for(lambda: self._closed or self._pending is not None)
+                self._condition.wait_for(lambda: self._closed or self._pending is not None
+                                        or self._update_factory is not None)
                 if self._closed:
                     return
+                factory, done = self._update_factory, self._update_done
+                self._update_factory = self._update_done = None
                 frame, self._pending = self._pending, None
+            if frame is not None:
+                self._last_source = frame
+            if factory is not None and done.set_running_or_notify_cancel():
+                replacement = None
+                try:
+                    replacement = factory()
+                    if replacement is not None and self._last_source is not None:
+                        replacement.upscale(self._last_source)
+                except Exception as exc:
+                    if replacement is not None:
+                        replacement.close()
+                    done.set_exception(exc)
+                else:
+                    self._close_upscaler()
+                    self._upscaler = replacement
+                    done.set_result(None)
+            if frame is None:
+                continue
             started = time.perf_counter()
             if self._upscaler is not None:
                 try:
@@ -222,10 +247,23 @@ class _QtRenderer:
             self.prepare_ms.append((time.perf_counter() - started) * 1000)
             self._emit(frame)
 
+    def update_upscaler(self, factory):
+        from concurrent.futures import Future
+        done = Future()
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("显示线程已退出")
+            if self._update_factory is not None:
+                raise RuntimeError("正在更新显示设置")
+            self._update_factory, self._update_done = factory, done
+            self._condition.notify()
+        return done
+
     def close(self) -> None:
         with self._condition:
             self._closed = True
             self._pending = None
+            self._last_source = None
             self._condition.notify()
         if self._worker is not None:
             self._worker.join(timeout=5)
@@ -301,6 +339,7 @@ class SessionService(QObject):
     codec_validated = Signal(int, str)
     upscale_changed = Signal()
     rtc_signal = Signal(dict)
+    live_updated = Signal(int, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -353,6 +392,9 @@ class SessionService(QObject):
         self._expected_stop = threading.Event()
         self._audio_output = None
         self._session_audio = None
+        self._rtc_runtime = None
+        self._renderer = None
+        self._live_worker = None
         from backend.control_channel.udp_motion import MotionSender
         self._motion_sender = MotionSender()
 
@@ -725,6 +767,7 @@ class SessionService(QObject):
             renderer = (_QtRenderer(self._frame_sink(), upscaler_factory=lambda: self._create_upscaler(settings),
                                     failure=self._upscale_failure) if self._mode == "viewer" else None)
             runtime = RtcSession(self, config, settings, renderer)
+            self._rtc_runtime, self._renderer = runtime, renderer
             if ((self._mode == "host" and settings.allow_inject)
                     or (self._mode == "viewer" and settings.control_enabled)):
                 self._start_clipboard()
@@ -744,6 +787,7 @@ class SessionService(QObject):
                 self.log.emit(f"WebRTC 会话失败：{exc}", "error")
                 self.state_changed.emit("error", str(exc))
         finally:
+            self._rtc_runtime = self._renderer = None
             self._finish("WebRTC 已停止")
 
     def _run_host(self, config: AppConfig, filters: list, settings: HostSettings) -> None:
@@ -810,6 +854,7 @@ class SessionService(QObject):
             pipeline.renderer = _QtRenderer(
                 self._frame_sink(), upscaler_factory=lambda: self._create_upscaler(settings),
                 failure=self._upscale_failure)
+            self._renderer = pipeline.renderer
 
             self._start_control_client(settings)
             if settings.control_enabled and settings.clipboard_enabled:
@@ -831,12 +876,105 @@ class SessionService(QObject):
                 self.log.emit(f"观看模式失败：{exc}", "error")
                 self.state_changed.emit("error", str(exc))
         finally:
+            self._renderer = None
             if runtime is not None:
                 transport = runtime.get("srt")
                 if transport is not None:
                     transport.abort()
                 runtime.close()
             self._finish("接收已停止")
+
+    def update_live(self, revision, picture, selection, viewer=None):
+        if self._live_worker is not None and self._live_worker.is_alive():
+            raise RuntimeError("正在应用上一组设置")
+        runtime, pipeline, renderer = self._rtc_runtime, self._pipeline, self._renderer
+        mode = self._mode
+        snapshot = {key: picture[key] for key in ("width", "height", "fps", "bitrate_kbps")}
+
+        def wait(future):
+            try:
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    if self._stop.is_set() or pipeline is not self._pipeline:
+                        future.cancel()
+                        raise RuntimeError("会话已结束")
+                    try:
+                        return future.result(timeout=.1)
+                    except TimeoutError:
+                        if future.done():
+                            raise
+                raise TimeoutError()
+            except TimeoutError:
+                future.cancel()
+                raise RuntimeError("会话内设置更新超时")
+
+        def run():
+            reason = ""
+            try:
+                if mode == "host":
+                    unchanged = (self._host_live is not None
+                                 and all(getattr(self._host_live, k) == v for k, v in snapshot.items())
+                                 and self._host_live.encoder == selection["encoder"])
+                    if unchanged:
+                        pass
+                    elif runtime is not None:
+                        import asyncio
+                        wait(asyncio.run_coroutine_threadsafe(runtime.reconfigure(snapshot, selection), runtime.loop))
+                    else:
+                        previous = self._host_live
+                        old = {k: getattr(previous, k) for k in snapshot}
+                        capture_changed = any(old[k] != snapshot[k] for k in ("width", "height", "fps"))
+                        try:
+                            if capture_changed:
+                                wait(pipeline.request_update(snapshot))
+                            stream = pipeline.stream.copy_with(
+                                width=snapshot["width"], height=snapshot["height"], framerate=snapshot["fps"])
+                            config = replace(pipeline.encode_config, width=snapshot["width"],
+                                             height=snapshot["height"], framerate=snapshot["fps"],
+                                             bitrate_kbps=snapshot["bitrate_kbps"], encoder=selection["encoder"])
+                            wait(pipeline.encoder.request_update(stream, config))
+                        except Exception:
+                            if capture_changed:
+                                wait(pipeline.request_update(old))
+                            raise
+                        pipeline.stream, pipeline.encode_config = stream, config
+                        pipeline.stats.extra["encoder"] = selection["encoder"]
+                        self._host_live = replace(previous, **snapshot, encoder=selection["encoder"])
+                else:
+                    current = self._viewer_live
+                    switched = None
+                    if selection["decoder"] != current.decoder:
+                        from backend.registry.codec_registry import build_default_registry
+                        registry = build_default_registry(current.ffmpeg_path)
+                        decoder = (runtime._receiver_cleanup.decoder if runtime is not None else pipeline._decoder)
+                        config = replace(decoder.config, decoder=selection["decoder"])
+                        future = decoder.request_switch(lambda: registry.create_decoder(
+                            current.stream_codec, selection["decoder"], decoder.stream, config))
+                        if runtime is not None:
+                            runtime._receiver_cleanup.request_keyframe()
+                        wait(future)
+                        switched = decoder
+                    try:
+                        if renderer is not None:
+                            wait(renderer.update_upscaler(lambda: self._create_upscaler(viewer)))
+                    except Exception:
+                        if switched is not None:
+                            old_config = replace(switched.config, decoder=current.decoder)
+                            future = switched.request_switch(lambda: registry.create_decoder(
+                                current.stream_codec, current.decoder, switched.stream, old_config))
+                            if runtime is not None:
+                                runtime._receiver_cleanup.request_keyframe()
+                            wait(future)
+                        raise
+                    self._viewer_live = viewer
+                    if runtime is not None:
+                        runtime.settings = viewer
+            except Exception as exc:
+                reason = str(exc)
+                self.log.emit(f"设置未应用，保留原参数：{exc}", "warn")
+            self.live_updated.emit(revision, reason)
+        self._live_worker = threading.Thread(target=run, name="session-settings", daemon=True)
+        self._live_worker.start()
 
     def _create_upscaler(self, settings: ViewerSettings):
         if not settings.sr_enabled:
@@ -1143,6 +1281,13 @@ class SessionService(QObject):
         if not sys.platform.startswith("win") or self._pads is not None:
             return
         try:
+            if self._host_live is not None and self._host_live.gamepad_backend == "elinkpad":
+                from backend.input_injection.windows.elinkpad import ElinkPads
+                self._pads = ElinkPads(
+                    feedback=lambda value: self._gamepad_feedback(value["index"], value["left"], value["right"]),
+                    notify=lambda message: self.log.emit(message, "info"))
+                self.log.emit("手柄注入使用 ElinkPad 实验后端（单手柄）", "info")
+                return
             from backend.input_injection.windows.vigem import VirtualPads
 
             self._pads = VirtualPads(

@@ -512,12 +512,13 @@ class StreamWindow(QWidget):
             details.append(f"{name.upper()}：{message}")
         self.sr_status.setText(status or "\n".join(details))
 
-    def set_session_active(self, active: bool) -> None:
+    def set_session_active(self, active: bool, *, settings_ready: bool = True) -> None:
         self._active = active
         for action in self._session_actions:
             action.setEnabled(active)
         self.mouse_mode.parentWidget().setEnabled(active)
-        self.sr_mode.parentWidget().setEnabled(active)
+        self.sr_mode.parentWidget().setEnabled(active and settings_ready)
+        self.picture_button.setEnabled(active and settings_ready)
         if not active:
             self.panel.close()
         self._sync_input()

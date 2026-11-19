@@ -44,8 +44,12 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
         def read(self):
             from backend.media.frame import Frame
             self.cursor_applied_mode = self.cursor_mode
-            return Frame(data=bytes((32, 64, 192, 255)) * (width * height),
-                         width=width, height=height)
+            w, h = self.config.width or width, self.config.height or height
+            return Frame(data=bytes((32, 64, 192, 255)) * (w * h), width=w, height=h)
+
+        def reconfigure(self, width, height, fps):
+            from dataclasses import replace
+            self.config = replace(self.config, width=width, height=height, fps=fps)
 
         def close(self):
             pass
@@ -94,12 +98,17 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             if host.phase != "active" or viewer.phase != "active":
                 break
             before, count = len(frames), len(applied)
+            error_count = len(errors)
+            old_transport = host_service._rtc_runtime.pc if transport == "webrtc" else host_service._transport
+            old_control = host_service._control
+            old_audio = (tuple(host_service._rtc_runtime.tracks) if host_service._rtc_runtime
+                         else host_service._session_audio)
             viewer.configure({"width": new_width, "height": new_height,
                               "fps": new_fps, "bitrate_kbps": 12000})
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 app.processEvents()
-                if (len(applied) > count and host.phase == viewer.phase == "active"
+                if ((len(applied) > count or len(errors) > error_count) and host.phase == viewer.phase == "active"
                         and len(frames) >= before + 10):
                     break
                 if viewer.phase in {"idle", "stopping", "selection"}:
@@ -111,6 +120,14 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
                 "last_frame_size": list(frames[-1][2:]) if frames else None,
                 "frames": len(frames) - before,
                 "phases": [host.phase, viewer.phase],
+                "transport_preserved": old_transport is (
+                    host_service._rtc_runtime.pc if transport == "webrtc" and host_service._rtc_runtime
+                    else host_service._transport),
+                "control_preserved": old_control is host_service._control,
+                "audio_preserved": (old_audio == tuple(host_service._rtc_runtime.tracks)
+                                    if host_service._rtc_runtime else old_audio is host_service._session_audio),
+                "pts_monotonic": all(b[1] > a[1] for a, b in zip(frames[max(0, before - 1):],
+                                                                frames[max(0, before - 1) + 1:])),
             })
         result = {
             "transport": transport, "resolution": [width, height], "requested_fps": fps,
@@ -167,6 +184,8 @@ def main():
         [change["applied"][k] for k in ("width", "height", "fps")] == change["requested"] and
         change["last_frame_size"] == change["requested"][:2] and
         change["frames"] >= 10 and change["phases"] == ["active", "active"]
+        and change["transport_preserved"] and change["control_preserved"]
+        and change["audio_preserved"] and change["pts_monotonic"]
         for change in result["updates"])
     return int(bool(result["errors"]) or not result["frames"] or
                not result["closed_cleanly"] or not result["workers_stopped"] or not updates_ok)

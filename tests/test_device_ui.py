@@ -294,14 +294,14 @@ class WindowConnectionTests(unittest.TestCase):
             disconnect.assert_called_once()
         self.assertIsNone(self.window._stream_window)
 
-    def test_picture_restart_preserves_window_and_clears_old_frame(self):
+    def test_picture_restart_preserves_window_and_last_frame(self):
         from frontend.desktop.diagnostics import _synthetic_frame
         self.window._session_connected(ViewerSettings(control_enabled=True))
         stream = self.window._stream_window
         stream.set_frame(_synthetic_frame(0))
         self.window.connection.phase = "updating"
         self.window._connection_changed()
-        self.assertFalse(stream.preview.has_frame)
+        self.assertTrue(stream.preview.has_frame)
         self.window._on_state("idle", "")
         self.assertIs(stream, self.window._stream_window)
         self.window._session_connected(ViewerSettings(control_enabled=True))
@@ -581,6 +581,21 @@ class WindowConnectionTests(unittest.TestCase):
         self.window.connection.phase = "idle"
         self.window._connection_changed()
         self.assertEqual(self.window.notice_bar._message, "桌面已断开")
+
+    def test_live_update_serializes_settings_without_disabling_session(self):
+        self.window._session_connected(ViewerSettings())
+        stream = self.window._stream_window
+        stream.set_session_active(True, settings_ready=False)
+        self.assertTrue(stream._active)
+        self.assertFalse(stream.picture_button.isEnabled())
+        self.assertFalse(stream.sr_mode.parentWidget().isEnabled())
+        self.window.connection.phase = "updating"
+        previous = self.window._viewer_settings.sr_percent
+        self.window._viewer_preference("sr_percent", 50)
+        self.assertEqual(self.window._viewer_settings.sr_percent, previous)
+        stream.set_session_active(True)
+        self.assertTrue(stream.picture_button.isEnabled())
+        self.assertTrue(stream.sr_mode.parentWidget().isEnabled())
 
     def test_removed_switches_and_manual_host_entry_are_absent(self):
         self.assertFalse(hasattr(self.window.settings_page, "discovery_row"))

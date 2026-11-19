@@ -33,6 +33,62 @@ from backend.media.timebase import Timebase
 logger = get_logger(__name__)
 
 
+class SwitchableDecoder:
+    """Keep the current decoder until a replacement produces a keyframe."""
+
+    def __init__(self, decoder):
+        from .probe import RecoveryPoint
+        self.current = decoder
+        self._pending = queue.Queue(maxsize=1)
+        self._recovery = RecoveryPoint()
+
+    def __getattr__(self, name):
+        return getattr(self.current, name)
+
+    def request_switch(self, factory):
+        from concurrent.futures import Future
+        future = Future()
+        self._pending.put_nowait((factory, future))
+        return future
+
+    def decode(self, packet):
+        self._recovery.observe(packet)
+        if not self._pending.empty() and self._recovery.recover(packet) is not None:
+            factory, future = self._pending.get_nowait()
+            if future.set_running_or_notify_cancel():
+                replacement = None
+                try:
+                    replacement = factory()
+                    replacement.native_output = getattr(self.current, "native_output", False)
+                    replacement.open()
+                    frames = replacement.decode(self._recovery.recover(packet) or packet)
+                    if not frames:
+                        raise DecodeError("新解码器未解出关键帧")
+                except Exception as exc:
+                    if replacement is not None:
+                        replacement.close()
+                    future.set_exception(exc)
+                else:
+                    callback = getattr(self.current, "output_callback", None)
+                    self.current.close()
+                    self.current = replacement
+                    if hasattr(replacement, "output_callback"):
+                        replacement.output_callback = callback
+                    future.set_result(None)
+                    if callback is not None:
+                        for frame in frames:
+                            callback(frame)
+                        return []
+                    return frames
+        return self.current.decode(packet)
+
+    def close(self):
+        self.current.close()
+        while not self._pending.empty():
+            _, future = self._pending.get_nowait()
+            future.cancel()
+
+
 def _process_diagnostics(codec) -> dict:
     proc = codec._proc
     if proc is None:

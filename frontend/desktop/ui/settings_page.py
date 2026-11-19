@@ -1,9 +1,4 @@
-"""设置页：窗口行为、设备发现、数据目录与关于。
-
-行为参考 ``E:\\elink`` 的设置/关于页：用分组卡片 + 开关行呈现「本机行为」，
-把日志目录、数据目录、版本与诊断入口集中在一处；不假装支持尚未实现的
-在线更新或账号功能。
-"""
+"""Settings for local behavior, input backends, diagnostics and application updates."""
 
 from __future__ import annotations
 
@@ -17,6 +12,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QComboBox,
+    QCheckBox,
+    QProgressBar,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -61,6 +59,11 @@ class SettingsPage(QWidget):
     open_data_requested = Signal()
     open_logs_requested = Signal()
     copy_diagnostics_requested = Signal()
+    admin_changed = Signal(bool)
+    gamepad_changed = Signal(str)
+    check_update_requested = Signal()
+    cancel_update_requested = Signal()
+    previews_changed = Signal(bool)
 
     def __init__(self, root: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -93,6 +96,16 @@ class SettingsPage(QWidget):
         general.body().addWidget(self.startup_row)
         general.add(divider())
         general.body().addWidget(self.tray_row)
+        general.add(divider())
+        self.admin_row = SettingRow("shield", "以管理员身份启动", "控制被控端的高权限窗口时使用")
+        self.admin_row.toggle.setEnabled(sys.platform == "win32")
+        general.body().addWidget(self.admin_row)
+        self.gamepad_backend = QComboBox()
+        self.gamepad_backend.addItem("ViGEm（兼容模式）", "vigem")
+        self.gamepad_backend.addItem("ElinkPad（实验，单手柄）", "elinkpad")
+        self.gamepad_backend.setEnabled(sys.platform == "win32")
+        general.add(label("本机手柄注入后端"))
+        general.add(self.gamepad_backend)
         content.addWidget(general)
 
         discovery = Card("设备发现", "通过各网络接口自动寻找运行 Elink 的机器")
@@ -145,22 +158,52 @@ class SettingsPage(QWidget):
             row.addWidget(value, 1)
             about.body().addLayout(row)
         about.add(hint("界面参考网易 UU 远程 4.x，并吸收 E:\\elink 的设备发现与设置逻辑。"))
+        self.update_previews = QCheckBox("包含预览版本")
+        about.add(self.update_previews)
+        update_buttons = QHBoxLayout()
+        self.check_update = QPushButton("检测更新")
+        self.cancel_update = QPushButton("取消下载")
+        self.cancel_update.hide()
+        update_buttons.addWidget(self.check_update)
+        update_buttons.addWidget(self.cancel_update)
+        update_buttons.addStretch()
+        about.body().addLayout(update_buttons)
+        self.update_progress = QProgressBar()
+        self.update_progress.hide()
+        about.add(self.update_progress)
+        self.update_status = hint("")
+        self.update_status.setWordWrap(True)
+        about.add(self.update_status)
         content.addWidget(about)
         content.addStretch(1)
 
         self.startup_row.toggle.toggled.connect(self.startup_changed.emit)
         self.tray_row.toggle.toggled.connect(self.tray_changed.emit)
+        self.admin_row.toggle.toggled.connect(self.admin_changed.emit)
+        self.gamepad_backend.currentIndexChanged.connect(
+            lambda: self.gamepad_changed.emit(self.gamepad_backend.currentData()))
+        self.check_update.clicked.connect(self.check_update_requested.emit)
+        self.cancel_update.clicked.connect(self.cancel_update_requested.emit)
+        self.update_previews.toggled.connect(self.previews_changed.emit)
 
     # ---- 状态 ----
     def set_ui(self, ui: UiSettings) -> None:
         widgets = (
             (self.startup_row.toggle, ui.start_on_login),
             (self.tray_row.toggle, ui.close_to_tray),
+            (self.admin_row.toggle, ui.admin_startup),
+            (self.update_previews, ui.update_previews),
         )
         for widget, checked in widgets:
             widget.blockSignals(True)
             widget.setChecked(checked)
             widget.blockSignals(False)
+
+    def set_update_busy(self, text, *, downloading=False):
+        self.update_status.setText(text)
+        self.check_update.setEnabled(not text or text not in {"正在检测更新…", "正在下载更新…", "正在准备更新…"})
+        self.cancel_update.setVisible(downloading)
+        self.update_progress.setVisible(downloading)
 
     def set_tray_available(self, available: bool) -> None:
         self.tray_row.toggle.setEnabled(available)

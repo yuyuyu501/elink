@@ -499,5 +499,89 @@ class StreamLatencyTests(unittest.TestCase):
                 decoder.close()
 
 
+class LiveCodecTests(unittest.TestCase):
+    def test_encoder_replaces_on_keyframe_and_failed_switch_keeps_previous(self):
+        from dataclasses import replace
+        from backend.config.schema import VideoEncodeConfig
+        from backend.media.video.codec.inprocess import InprocessEncoder, InprocessDecoder
+        stream = StreamInfo(width=320, height=240, framerate=30)
+        config = VideoEncodeConfig(encoder="libx264", realtime=True)
+        encoder = InprocessEncoder(stream, config)
+        decoder = InprocessDecoder(stream)
+        encoder.open()
+        decoder.open()
+        try:
+            first = Frame(data=bytes((0, 0, 255, 255)) * (320 * 240), width=320, height=240)
+            self.assertTrue(decoder.decode(encoder.encode(first)[0]))
+            changed = stream.copy_with(width=640, height=360, framerate=120)
+            future = encoder.request_update(changed, replace(config, bitrate_kbps=6000))
+            frame = Frame(data=bytes((0, 255, 0, 255)) * (640 * 360),
+                          width=640, height=360, pts=3000)
+            packets = encoder.encode(frame)
+            self.assertIsNone(future.result())
+            self.assertTrue(packets[0].keyframe)
+            decoded = decoder.decode(packets[0])
+            self.assertEqual((decoded[0].width, decoded[0].height), (640, 360))
+            previous = encoder._context
+            future = encoder.request_update(stream, replace(config, encoder="does_not_exist"))
+            self.assertTrue(encoder.encode(frame.with_data(frame.data, pts=6000)))
+            self.assertIs(encoder._context, previous)
+            with self.assertRaises(Exception):
+                future.result()
+        finally:
+            encoder.close()
+            decoder.close()
+
+    def test_decoder_failure_preserves_original_and_success_waits_for_idr(self):
+        from backend.media.video.codec.inprocess import InprocessDecoder
+        from backend.media.video.codec.base import SwitchableDecoder
+        stream = StreamInfo(width=320, height=240)
+        original = InprocessDecoder(stream)
+        original.open()
+        decoder = SwitchableDecoder(original)
+        packets = _sample_packets("h264")
+        try:
+            self.assertTrue(decoder.decode(packets[0]))
+            future = decoder.request_switch(lambda: (_ for _ in ()).throw(RuntimeError("unavailable")))
+            self.assertTrue(decoder.decode(packets[0]))
+            self.assertIs(decoder.current, original)
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                future.result()
+            future = decoder.request_switch(lambda: InprocessDecoder(stream))
+            self.assertTrue(decoder.decode(packets[1]))
+            self.assertFalse(future.done())
+            self.assertTrue(decoder.decode(packets[0]))
+            self.assertTrue(future.done())
+            self.assertIsNot(decoder.current, original)
+        finally:
+            decoder.close()
+
+
+class PacingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_install_updates_budget_and_priority_bypasses_debt(self):
+        import struct
+        from backend.qos.pacing import install_rtp_pacer
+        from unittest.mock import Mock
+        transport = Mock()
+        transport._send_rtp = AsyncMock()
+        transport._elink_pacer = None
+        original = transport._send_rtp
+        senders = [SimpleNamespace(kind="video", _ssrc=1, _rtx_ssrc=3, transport=transport),
+                   SimpleNamespace(kind="audio", _ssrc=2, transport=transport)]
+        pc = SimpleNamespace(getTransceivers=lambda: [
+            SimpleNamespace(kind=s.kind, sender=s) for s in senders])
+        install_rtp_pacer(pc, 4_000_000, 60)
+        wrapper = transport._send_rtp
+        install_rtp_pacer(pc, 8_000_000, 120)
+        self.assertIs(transport._send_rtp, wrapper)
+        self.assertEqual(transport._elink_pacer.rate, 8_000_000 * 1.08)
+        packet = b"\x80\x60\0\1" + struct.pack("!II", 0, 2)
+        with patch("backend.qos.pacing.wait_until") as wait:
+            transport._elink_pacer.due = time.perf_counter() + 100
+            await wrapper(packet)
+            wait.assert_not_called()
+        original.assert_awaited_once_with(packet)
+
+
 if __name__ == "__main__":
     unittest.main()

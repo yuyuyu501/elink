@@ -25,6 +25,9 @@ SUITES = (
     "tests/test_codec_selection.py",
     "tests/test_error_report.py",
     "tests/test_packaging.py",
+    "tests/test_updates.py",
+    "tests/test_windows_privileges.py",
+    "tests/test_elinkpad.py",
 )
 
 

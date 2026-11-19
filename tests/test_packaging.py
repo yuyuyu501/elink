@@ -17,6 +17,11 @@ from scripts.package_windows import run_self_test
 
 
 class PackagingTests(unittest.TestCase):
+    def test_update_helper_is_in_existing_collected_resources(self):
+        from frontend.desktop.paths import resource_dir
+        self.assertTrue((resource_dir() / "apply-update.ps1").is_file())
+        source = (Path(__file__).resolve().parents[1] / "scripts/build.py").read_text(encoding="utf-8")
+        self.assertIn('f"{resources}{os.pathsep}frontend/desktop/resources"', source)
     def test_windows_runtime_imports_initialize_capture_before_audio(self):
         from frontend.desktop.diagnostics import _runtime_imports
 

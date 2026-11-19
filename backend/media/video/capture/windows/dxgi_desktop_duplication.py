@@ -266,6 +266,20 @@ class DesktopCapture:
         self._retry_at = 0.0
         self._gpu = None
 
+    def reconfigure(self, width, height, fps):
+        from dataclasses import replace
+        previous = self.config
+        previous_start = self._start
+        self.config = replace(previous, width=width, height=height, fps=fps)
+        try:
+            self.open()
+        except Exception:
+            self.config = previous
+            self.open()
+            raise
+        finally:
+            self._start = previous_start
+
     def open(self):
         self._start = time.perf_counter()
         self.close()

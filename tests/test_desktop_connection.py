@@ -621,7 +621,7 @@ class CodecConnectionTests(unittest.TestCase):
                               "revision": self.viewer._revision - 1})
         self.assertEqual(self.viewer.phase, "active")
         self.viewer_media.delay_validation = True
-        self.viewer.configure(self.applied[-1])
+        self.viewer.configure({**self.applied[-1], "fps": 90})
         self.assertEqual(self.viewer.phase, "validating")
         revision = self.viewer._revision
         self.viewer.disconnect()
@@ -655,6 +655,67 @@ class CodecConnectionTests(unittest.TestCase):
         self.assertEqual(self.host_media.starts[-1].encoder, "h264_nvenc")
 
 
+class LiveMedia(CapableMedia):
+    live_updated = Signal(int, str)
+
+    def __init__(self):
+        super().__init__()
+        self.updates = []
+        self.fail_update = False
+
+    def update_live(self, revision, picture, selection, viewer=None):
+        from types import SimpleNamespace
+        self.updates.append((dict(picture), dict(selection), viewer))
+        reason = "live update rejected" if self.fail_update else ""
+        self.fail_update = False
+        QTimer.singleShot(0, lambda: self.live_updated.emit(revision, reason))
+        if self.mode == "viewer":
+            QTimer.singleShot(20, lambda: self.frame_ready.emit(SimpleNamespace(
+                width=viewer.output_width, height=viewer.output_height)))
+
+
+class LiveConnectionTests(unittest.TestCase):
+    connect = ConnectionTests.connect
+    tearDown = ConnectionTests.tearDown
+
+    def setUp(self):
+        with patch(f"{__name__}.Media", LiveMedia):
+            ConnectionTests.setUp(self)
+
+    def test_unchanged_picture_does_nothing_and_live_update_keeps_media(self):
+        self.connect()
+        self.viewer.configure(self.applied[-1])
+        self.assertFalse(self.viewer_media.updates)
+        picture = dict(self.applied[-1], width=640, height=360, fps=120)
+        self.viewer.configure(picture)
+        wait_until(lambda: len(self.applied) == 2)
+        self.assertEqual(self.applied[-1], picture)
+        self.assertEqual(len(self.host_media.starts), 1)
+        self.assertEqual(len(self.viewer_media.starts), 1)
+        self.assertEqual(len(self.host_media.updates), 1)
+        self.assertFalse(self.errors)
+
+    def test_host_failure_restores_viewer_and_keeps_connection(self):
+        self.connect()
+        previous = dict(self.applied[-1])
+        self.host_media.fail_update = True
+        self.viewer.configure(dict(previous, fps=120))
+        wait_until(lambda: bool(self.errors) and self.viewer.phase == "active")
+        self.assertEqual(self.viewer._picture, previous)
+        self.assertEqual(len(self.viewer_media.updates), 2)
+        self.assertTrue(self.viewer_media.running and self.host_media.running)
+        self.assertEqual(len(self.host_media.starts), 1)
+
+    def test_local_decoder_switch_does_not_restart_media(self):
+        self.connect()
+        self.viewer.configure(dict(self.applied[-1], codec="h264", encoder="h264_nvenc", decoder="h264"))
+        wait_until(lambda: len(self.applied) == 2)
+        self.assertEqual(self.viewer._selection["decoder"], "h264")
+        self.assertEqual(len(self.host_media.starts), 1)
+        self.assertEqual(len(self.viewer_media.starts), 1)
+        self.assertFalse(self.errors)
+
+
 class MediaIntegrationTests(unittest.TestCase):
     def test_webrtc_reconfigures_real_media_and_recovers_failed_encoder(self):
         from scripts.benchmark_remote import run
@@ -672,6 +733,10 @@ class MediaIntegrationTests(unittest.TestCase):
             self.assertEqual(change["phases"], ["active", "active"], change)
             self.assertEqual(change["last_frame_size"], size)
             self.assertGreaterEqual(change["frames"], 10)
+            self.assertTrue(change["transport_preserved"])
+            self.assertTrue(change["control_preserved"])
+            self.assertTrue(change["audio_preserved"])
+            self.assertTrue(change["pts_monotonic"])
         self.assertTrue(result["closed_cleanly"])
         self.assertTrue(result["workers_stopped"])
         self.assertTrue(any("injected encoder failure" in error for error in result["errors"]),
@@ -703,6 +768,10 @@ class MediaIntegrationTests(unittest.TestCase):
 
             def open(self):
                 pass
+
+            def reconfigure(self, width, height, fps):
+                from dataclasses import replace
+                self.config = replace(self.config, width=width, height=height, fps=fps)
 
             def read(self):
                 self.cursor_applied_mode = self.cursor_mode

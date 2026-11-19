@@ -163,5 +163,30 @@ class UpscaleTests(unittest.TestCase):
         self.assertEqual(states, [("fsr", "bypass")])
 
 
+class LiveRendererTests(unittest.TestCase):
+    def test_local_update_uses_renderer_worker_and_keeps_old_on_failure(self):
+        import threading
+        from unittest.mock import Mock
+        from frontend.desktop.service import _QtRenderer
+        renderer = _QtRenderer(lambda _: None)
+        renderer.open()
+        current = Mock()
+        try:
+            names = []
+            def create():
+                names.append(threading.current_thread().name)
+                return current
+            renderer.update_upscaler(create).result(timeout=2)
+            self.assertEqual(names, ["preview-prepare"])
+            future = renderer.update_upscaler(lambda: (_ for _ in ()).throw(RuntimeError("not available")))
+            with self.assertRaisesRegex(RuntimeError, "not available"):
+                future.result(timeout=2)
+            self.assertIs(renderer._upscaler, current)
+            current.close.assert_not_called()
+        finally:
+            renderer.close()
+        current.close.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

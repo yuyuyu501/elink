@@ -19,7 +19,7 @@ import threading
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile
+from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -77,6 +77,11 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_self_test(Path(argv[index + 1]).resolve())
 
+    if "--elevated-restart" in argv:
+        from .privileges import wait_for_previous
+        index = argv.index("--elevated-restart")
+        os.environ["ELINK_DATA_DIR"] = str(Path(argv[index + 2]).resolve())
+        wait_for_previous(int(argv[index + 1]))
     root = data_dir()
     ensure_dirs(root)
     _configure_logging(os.environ.get("ELINK_LOG_LEVEL", "INFO"))
@@ -95,6 +100,16 @@ def main(argv: list[str] | None = None) -> int:
     if not lock.tryLock(100):
         QMessageBox.information(None, APP_NAME, "此数据目录已有 elink 桌面端在运行。")
         return 1
+    from . import settings
+    from .privileges import is_elevated, restart_elevated
+    if sys.platform == "win32" and settings.load_ui().admin_startup and not is_elevated():
+        try:
+            restart_elevated(root)
+        except OSError:
+            pass
+        else:
+            lock.unlock()
+            return 0
 
     try:
         window = MainWindow(root)
@@ -114,6 +129,11 @@ def main(argv: list[str] | None = None) -> int:
     sys.excepthook = exception_hook
 
     window.show()
+    ready = os.environ.pop("ELINK_UPDATE_READY", None)
+    if ready:
+        target = Path(ready)
+        if target.name == "app-ready" and target.parent.name.startswith(".Elink-update-"):
+            QTimer.singleShot(0, lambda: target.write_text(__version__, encoding="ascii"))
     icons.clear_cache()  # 让首次渲染后缓存失效，避免主题切换残留旧色
     logger.info("界面已启动，版本 %s，数据目录 %s", __version__, root)
     return app.exec()

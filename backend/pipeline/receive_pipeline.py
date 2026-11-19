@@ -305,9 +305,19 @@ class ReceivePipeline:
                 exc.process_diagnostics = decoder.diagnostics()
             decoder.close()
             raise
-        return decoder
+        from backend.media.video.codec.base import SwitchableDecoder
+        return SwitchableDecoder(decoder) if self.encode_config.realtime else decoder
 
     def _decode(self, decoder: BaseDecoder, packet: Packet) -> None:
+        dimensions = detect_video_dimensions(packet.data, packet.codec)
+        stream = getattr(decoder, "stream", self.stream)
+        if self.encode_config.realtime and dimensions and dimensions != (stream.width, stream.height):
+            from dataclasses import replace
+            stream = stream.copy_with(width=dimensions[0], height=dimensions[1])
+            if decoder._pending.empty():
+                config = replace(self.encode_config, width=dimensions[0], height=dimensions[1])
+                decoder.request_switch(lambda: self.decoder_factory(stream, config))
+            self.stream = stream
         begin = time.perf_counter()
         frames = decoder.decode(packet)
         elapsed_ms = (time.perf_counter() - begin) * 1000.0

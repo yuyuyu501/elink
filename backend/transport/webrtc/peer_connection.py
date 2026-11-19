@@ -204,6 +204,8 @@ class RtcSession:
         if self.pc.connectionState == "connected":
             self._connected = True
             from backend.transport.webrtc.ice import describe_runtime_ice
+            from backend.qos.pacing import mark_rtc_sockets
+            mark_rtc_sockets(self.pc)
             self.service.stats.extra["ice_routes"] = describe_runtime_ice(self.pc)
         elif self.pc.connectionState in {"failed", "closed"} and not self._closing:
             self.fail(NetworkError("WebRTC 连接已断开"))
@@ -297,6 +299,7 @@ class RtcSession:
             self.adapter = registry.create_decoder("h264", self.settings.decoder, stream, self.config.encode)
             self.adapter.output_callback = None
             self._receiver_cleanup = tune_receiver(transceiver.receiver, self.adapter, self.fail, stats)
+            self.adapter = self._receiver_cleanup.decoder
             self.renderer.open()
             if hasattr(self.renderer, "prepare_ms"):
                 stats.extra["display_prepare_ms"] = self.renderer.prepare_ms
@@ -340,6 +343,35 @@ class RtcSession:
         if value["type"] == "offer":
             await self.pc.setLocalDescription(await self.pc.createAnswer())
             self.service.rtc_signal.emit({"type": "answer", "sdp": self.pc.localDescription.sdp})
+
+    async def reconfigure(self, picture, selection):
+        import asyncio
+        from dataclasses import replace
+        from backend.qos.pacing import install_rtp_pacer
+        previous = {key: getattr(self.settings, key) for key in ("width", "height", "fps", "bitrate_kbps")}
+        track = next(t for t in self.tracks if t.kind == "video")
+        capture_changed = any(picture[k] != previous[k] for k in ("width", "height", "fps"))
+        try:
+            if capture_changed:
+                await asyncio.wrap_future(track.request_update(picture))
+            stream = self.encoder.stream.copy_with(
+                width=picture["width"], height=picture["height"], framerate=picture["fps"])
+            config = replace(self.config.encode, width=picture["width"], height=picture["height"],
+                             framerate=picture["fps"], bitrate_kbps=picture["bitrate_kbps"],
+                             encoder=selection["encoder"])
+            await asyncio.wrap_future(self.encoder.request_update(stream, config))
+        except Exception:
+            if capture_changed:
+                await asyncio.wrap_future(track.request_update(previous))
+            raise
+        self.config.encode = config
+        self.settings = replace(self.settings, **picture, encoder=selection["encoder"])
+        self.service._host_live = self.settings
+        self.service._pipeline.stream = stream
+        self.service._pipeline.stats.extra["encoder"] = selection["encoder"]
+        if hasattr(self, "_congestion"):
+            del self._congestion
+        install_rtp_pacer(self.pc, picture["bitrate_kbps"] * 1000, picture["fps"])
 
     async def run(self):
         import asyncio
@@ -407,9 +439,9 @@ class RtcSession:
                     if self.encoder:
                         self.encoder.target_bitrate = rate
                     for transceiver in self.pc.getTransceivers():
-                        budget = getattr(transceiver.sender.transport, "_elink_budget", None)
+                        budget = getattr(transceiver.sender.transport, "_elink_pacer", None)
                         if budget:
-                            budget["rate"] = rate * 1.08
+                            budget.rate = rate * 1.08
         now = time.monotonic()
         interval = now - self._last_stats
         pipeline_stats = self.service._pipeline.stats

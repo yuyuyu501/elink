@@ -29,6 +29,8 @@ class UiSettings:
 
     start_on_login: bool = False
     close_to_tray: bool = False
+    admin_startup: bool = False
+    update_previews: bool = True
 
 
 def _read() -> dict:
@@ -48,6 +50,7 @@ def load() -> tuple[HostSettings, ViewerSettings]:
     host = _merge(HostSettings, data.get("host"))
     viewer = _merge(ViewerSettings, data.get("viewer"))
     host.clipboard_enabled = host.gamepad_enabled = True
+    host.gamepad_backend = host.gamepad_backend if host.gamepad_backend in {"vigem", "elinkpad"} else "vigem"
     viewer.clipboard_enabled = viewer.gamepad_enabled = True
     viewer.decoder = "h264" if viewer.decoder == "h264_pyav" else viewer.decoder
     protocols = viewer.protocol_preferences

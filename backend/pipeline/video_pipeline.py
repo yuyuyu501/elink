@@ -87,6 +87,14 @@ class VideoPipeline:
         self._timebase = Timebase.mpegts()
         self._capture_error: Exception | None = None
         self.process_diagnostics: dict = {}
+        self._updates = queue.Queue(maxsize=1)
+        self.encoder = None
+
+    def request_update(self, picture):
+        from concurrent.futures import Future
+        future = Future()
+        self._updates.put_nowait((picture, future))
+        return future
 
     # ---- 主入口 ----
     def run(self, duration_s: float | None = None, max_frames: int = 0) -> VideoPipelineStats:
@@ -118,6 +126,7 @@ class VideoPipeline:
             self.stream = self._build_stream_info(frame)
             encoder = self.encoder_factory(self.stream, self.encode_config)
             encoder.open()
+            self.encoder = encoder
             self.stats.extra["encoder"] = encoder.name
             self.muxer.open([self.stream])
 
@@ -146,6 +155,7 @@ class VideoPipeline:
                 self._capture_thread.join(timeout=5)
             if encoder is not None:
                 encoder.close()
+            self.encoder = None
             self.capture.close()
             self.muxer.close()
             for video_filter in self.filters:
@@ -165,11 +175,29 @@ class VideoPipeline:
         interval = 1.0 / fps
         deadline = time.perf_counter() + duration_s if duration_s else None
         next_deadline = time.perf_counter()
-        frame_index = 0
+        elapsed = 0.0
         from backend.qos.pacing import wait_until
 
         try:
             while not self._stop_event.is_set():
+                try:
+                    picture, future = self._updates.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    if future.set_running_or_notify_cancel():
+                        try:
+                            self.capture.reconfigure(picture["width"], picture["height"], picture["fps"])
+                            fps = picture["fps"]
+                            interval = 1 / fps
+                            for video_filter in self.filters:
+                                if video_filter.name == "scaler":
+                                    video_filter.width = picture["width"]
+                                    video_filter.height = picture["height"]
+                        except Exception as exc:
+                            future.set_exception(exc)
+                        else:
+                            future.set_result(None)
                 now = time.perf_counter()
                 if deadline is not None and now >= deadline:
                     break
@@ -185,14 +213,14 @@ class VideoPipeline:
                 # 采集节拍由本管线控制，因此按帧率栅格重新打时间戳：
                 # 把线程调度抖动写进 PTS 会让下游（封装/播放器）看到长短不一的
                 # 帧间隔，进而触发重复 DTS 之类的重排问题。
-                grid_pts = self._timebase.ticks(frame_index / fps)
+                grid_pts = self._timebase.ticks(elapsed)
                 frame = frame.with_data(frame.data, pts=grid_pts)
                 if hasattr(self.capture, "cursor_applied_mode"):
                     self.capture.cursor_state = {
                         "mode": self.capture.cursor_applied_mode,
                         "visible": self.capture.cursor_visible, "pts": grid_pts,
                     }
-                frame_index += 1
+                elapsed += interval
 
                 self.stats.frames_captured += 1
                 self._offer((frame, time.perf_counter()))
