@@ -664,14 +664,10 @@ class LiveMedia(CapableMedia):
         self.fail_update = False
 
     def update_live(self, revision, picture, selection, viewer=None):
-        from types import SimpleNamespace
         self.updates.append((dict(picture), dict(selection), viewer))
         reason = "live update rejected" if self.fail_update else ""
         self.fail_update = False
         QTimer.singleShot(0, lambda: self.live_updated.emit(revision, reason))
-        if self.mode == "viewer":
-            QTimer.singleShot(20, lambda: self.frame_ready.emit(SimpleNamespace(
-                width=viewer.output_width, height=viewer.output_height)))
 
 
 class LiveConnectionTests(unittest.TestCase):
@@ -682,13 +678,21 @@ class LiveConnectionTests(unittest.TestCase):
         with patch(f"{__name__}.Media", LiveMedia):
             ConnectionTests.setUp(self)
 
+    def deliver_live_frame(self, width, height):
+        from types import SimpleNamespace
+
+        wait_until(lambda: self.viewer.phase == "receiving", detail=lambda: self.errors)
+        self.viewer_media.frame_ready.emit(SimpleNamespace(width=width, height=height))
+        self.assertEqual(self.viewer.phase, "active")
+
     def test_unchanged_picture_does_nothing_and_live_update_keeps_media(self):
         self.connect()
         self.viewer.configure(self.applied[-1])
         self.assertFalse(self.viewer_media.updates)
         picture = dict(self.applied[-1], width=640, height=360, fps=120)
         self.viewer.configure(picture)
-        wait_until(lambda: len(self.applied) == 2)
+        self.deliver_live_frame(640, 360)
+        self.assertEqual(len(self.applied), 2)
         self.assertEqual(self.applied[-1], picture)
         self.assertEqual(len(self.host_media.starts), 1)
         self.assertEqual(len(self.viewer_media.starts), 1)
@@ -708,8 +712,10 @@ class LiveConnectionTests(unittest.TestCase):
 
     def test_local_decoder_switch_does_not_restart_media(self):
         self.connect()
-        self.viewer.configure(dict(self.applied[-1], codec="h264", encoder="h264_nvenc", decoder="h264"))
-        wait_until(lambda: len(self.applied) == 2)
+        picture = self.applied[-1]
+        self.viewer.configure(dict(picture, codec="h264", encoder="h264_nvenc", decoder="h264"))
+        self.deliver_live_frame(picture["width"], picture["height"])
+        self.assertEqual(len(self.applied), 2)
         self.assertEqual(self.viewer._selection["decoder"], "h264")
         self.assertEqual(len(self.host_media.starts), 1)
         self.assertEqual(len(self.viewer_media.starts), 1)
