@@ -720,10 +720,17 @@ class MainWindow(QMainWindow):
             self._persist_ui()
 
     def _picture_applied(self, picture: dict) -> None:
-        for name in ("sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness"):
-            setattr(self._viewer_settings, name, getattr(self.connection._viewer, name))
-        for name, value in picture.items():
-            setattr(self._viewer_settings, f"stream_{name}", value)
+        if self.connection._peer:
+            self._viewer_settings = replace(self.connection._viewer)
+            user_settings.remember_device_picture(
+                self._viewer_settings,
+                str(self.connection._peer["id"]),
+                self.connection._viewer,
+            )
+        else:
+            self._viewer_settings = replace(self._viewer_settings)
+            for name, value in picture.items():
+                setattr(self._viewer_settings, f"stream_{name}", value)
         self._persist_ui()
         self.notice_bar.show_message("桌面已连接", "info")
 

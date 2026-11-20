@@ -19,6 +19,7 @@ from .network_candidates import network_candidates
 from .network_interfaces import network_interfaces
 
 DISCOVERY_PORT = 49320
+DISCOVERY_PORTS = (DISCOVERY_PORT, 39220, 43220)
 PROTOCOL = "elink-discovery-v1"
 PEER_TTL_S = 15.0
 QUERY_INTERVAL_S = 4.0
@@ -40,7 +41,7 @@ class DiscoveryService(QObject):
         instance_id: str | None = None,
     ) -> None:
         super().__init__(parent)
-        self._port = port
+        self._ports = DISCOVERY_PORTS if port == DISCOVERY_PORT else (port,)
         self._id = instance_id or _machine_id()
         self._name = socket.gethostname() or "elink"
         self._platform = f"{platform.system()} {platform.release()}".strip()
@@ -85,9 +86,13 @@ class DiscoveryService(QObject):
     def start(self) -> bool:
         if self._running:
             return True
-        flags = QAbstractSocket.BindFlag.ShareAddress | QAbstractSocket.BindFlag.ReuseAddressHint
-        if not self._socket.bind(QHostAddress("0.0.0.0"), self._port, flags):
-            message = f"设备发现不可用：UDP {self._port} 无法监听（{self._socket.errorString()}）"
+        flags = QAbstractSocket.BindFlag.DontShareAddress
+        for port in self._ports:
+            if self._socket.bind(QHostAddress("0.0.0.0"), port, flags):
+                break
+        else:
+            ports = "/".join(map(str, self._ports))
+            message = f"设备发现不可用：UDP {ports} 无法监听（{self._socket.errorString()}）"
             self.status_changed.emit(message)
             return False
         self._running = True
@@ -175,8 +180,7 @@ class DiscoveryService(QObject):
                 self._bindings[ip] = (self._bindings[ip][0], interface)
                 continue
             bound = QUdpSocket(self)
-            flags = QAbstractSocket.BindFlag.ShareAddress | QAbstractSocket.BindFlag.ReuseAddressHint
-            if bound.bind(QHostAddress(ip), self._port, flags):
+            if bound.bind(QHostAddress(ip), 0):
                 bound.readyRead.connect(lambda bound=bound: self._read_datagrams(bound))
                 self._bindings[ip] = (bound, interface)
             else:
@@ -191,7 +195,7 @@ class DiscoveryService(QObject):
         self._publish_status()
 
     def _publish_status(self) -> None:
-        message = f"自动发现 · {len(self._bindings)} 个网络地址"
+        message = f"自动发现 · UDP {self._socket.localPort()} · {len(self._bindings)} 个网络地址"
         if not self._bindings:
             message += " · 等待网络连接"
         if message != self._status:
@@ -206,7 +210,7 @@ class DiscoveryService(QObject):
             if size <= 0 or size > MAX_DATAGRAM:
                 receiver.readDatagram(size)
                 continue
-            data, sender, _port = receiver.readDatagram(size)
+            data, sender, source_port = receiver.readDatagram(size)
             try:
                 message = json.loads(bytes(data).decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
@@ -220,7 +224,8 @@ class DiscoveryService(QObject):
             interface = self._bindings.get(receiver.localAddress().toString())
             source = interface[1]["name"] if interface else self._source_for(ip)
             if message.get("kind") == "query":
-                self._announce(sender, receiver)
+                reply = json.dumps(self._payload("announce"), ensure_ascii=False).encode("utf-8")
+                receiver.writeDatagram(reply, sender, source_port)
             else:
                 self._remember(message, ip, source)
             self._publish()
@@ -239,24 +244,23 @@ class DiscoveryService(QObject):
             bound = bindings.get(candidate["interface_index"])
             if bound is None or now - self._last_targeted_queries.get(target, 0) < QUERY_INTERVAL_S:
                 continue
-            bound.writeDatagram(data, QHostAddress(candidate["ip"]), self._port)
+            self._send_to_ports(bound, data, QHostAddress(candidate["ip"]))
             self._last_targeted_queries[target] = now
 
-    def _announce(self, target: QHostAddress | None = None, sender: QUdpSocket | None = None) -> None:
+    def _announce(self) -> None:
         self._last_announce = time.monotonic()
-        payload = self._payload("announce")
-        if target is None:
-            self._broadcast(payload)
-            return
-        data = QByteArray(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-        (sender or self._socket).writeDatagram(data, target, self._port)
+        self._broadcast(self._payload("announce"))
+
+    def _send_to_ports(self, bound: QUdpSocket, data: QByteArray, target: QHostAddress) -> None:
+        for port in self._ports:
+            bound.writeDatagram(data, target, port)
 
     def _broadcast(self, payload: dict[str, Any]) -> None:
         data = QByteArray(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         for bound, interface in self._bindings.values():
             # /31 and /32 tunnels have no usable subnet broadcast.
             if interface["can_broadcast"] and interface["broadcast"] and 0 <= interface["prefix"] < 31:
-                bound.writeDatagram(data, QHostAddress(interface["broadcast"]), self._port)
+                self._send_to_ports(bound, data, QHostAddress(interface["broadcast"]))
 
     def _payload(self, kind: str, **extra: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {

@@ -10,6 +10,7 @@ from dataclasses import replace
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
+from . import settings as user_settings
 from .service import HostSettings, SessionService, ViewerSettings
 from .error_report import remote_details, save_error
 from backend.media.video.codec.probe import (
@@ -43,40 +44,7 @@ def stream_picture(picture, viewer):
     return picture_settings(result)
 
 
-def picture_settings(values: dict) -> dict:
-    """Accept only supported numeric picture parameters."""
-    if not isinstance(values, dict):
-        raise ValueError("画面参数格式错误")
-    result = {}
-    for name, low, high, cast in (
-        ("width", 320, 7680, int), ("height", 240, 4320, int),
-        ("fps", 5, 120, float), ("bitrate_kbps", 300, 50000, int),
-    ):
-        value = values.get(name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"画面参数无效：{name}")
-        if name in {"width", "height"} and "upscale" in values:
-            low = 2
-        if not low <= value <= high:
-            raise ValueError(f"画面参数超出范围：{name}")
-        result[name] = cast(value)
-    if result["width"] % 2 or result["height"] % 2:
-        raise ValueError("分辨率必须为偶数")
-    if "upscale" in values:
-        sr = values["upscale"]
-        if not isinstance(sr, dict) or set(sr) != {"width", "height", "percent", "mode", "sharpen", "sharpness"}:
-            raise ValueError("超分参数格式错误")
-        for key, low, high in (("width", 320, 7680), ("height", 240, 4320),
-                               ("percent", 33, 100), ("sharpness", 0, 100)):
-            if type(sr[key]) is not int or not low <= sr[key] <= high:
-                raise ValueError(f"超分参数无效：{key}")
-        if sr["mode"] not in {"fsr", "rtx"} or type(sr["sharpen"]) is not bool:
-            raise ValueError("超分算法或锐化参数无效")
-        for axis in ("width", "height"):
-            if sr[axis] % 2 or result[axis] > sr[axis]:
-                raise ValueError("超分尺寸无效")
-        result["upscale"] = dict(sr)
-    return result
+picture_settings = user_settings.picture_settings
 
 
 def saved_picture(settings: ViewerSettings) -> dict:
@@ -342,6 +310,7 @@ class DesktopConnection(QObject):
             return
         self._clear_failure()
         try:
+            viewer = user_settings.for_device(viewer, str(peer["id"]))
             picture = saved_picture(viewer)
             port = int(peer["session_port"])
             if not 0 < port <= 65535:

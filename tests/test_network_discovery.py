@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,9 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtNetwork import QHostAddress, QNetworkInterface
+from PySide6.QtNetwork import QHostAddress, QNetworkInterface, QUdpSocket
 
-from frontend.desktop.discovery import DiscoveryService, PEER_TTL_S, PROTOCOL
+from frontend.desktop.discovery import DISCOVERY_PORTS, DiscoveryService, PEER_TTL_S, PROTOCOL
 from frontend.desktop.network_candidates import candidate_addresses, network_candidates
 from frontend.desktop.network_interfaces import network_interfaces
 
@@ -138,6 +139,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_broadcast_uses_each_eligible_subnet_but_not_host_tunnels(self):
         ethernet, wifi, tunnel = MagicMock(), MagicMock(), MagicMock()
+        self.service._ports = DISCOVERY_PORTS
         self.service._bindings = {
             "192.168.1.2": (ethernet, {**interface(), **interface()["addresses"][0]}),
             "10.0.0.2": (wifi, {"can_broadcast": True, "prefix": 24, "broadcast": "10.0.0.255"}),
@@ -146,6 +148,9 @@ class DiscoveryTests(unittest.TestCase):
         self.service._broadcast(PEER)
         self.assertEqual(ethernet.writeDatagram.call_args.args[1].toString(), "192.168.1.255")
         self.assertEqual(wifi.writeDatagram.call_args.args[1].toString(), "10.0.0.255")
+        for sender in (ethernet, wifi):
+            self.assertEqual(tuple(call.args[2] for call in sender.writeDatagram.call_args_list),
+                             DISCOVERY_PORTS)
         tunnel.writeDatagram.assert_not_called()
         self.service._bindings.clear()
 
@@ -178,7 +183,7 @@ class DiscoveryTests(unittest.TestCase):
         receiver.pendingDatagramSize.return_value = 200
         receiver.readDatagram.side_effect = [
             (b'{"proto":"other"}', QHostAddress("192.168.1.10"), 49320),
-            (json.dumps({**PEER, "kind": "query"}).encode(), QHostAddress("192.168.1.10"), 49320),
+            (json.dumps({**PEER, "kind": "query"}).encode(), QHostAddress("192.168.1.10"), 51234),
         ]
         receiver.localAddress.return_value = QHostAddress("192.168.1.2")
         self.service._bindings = {"192.168.1.2": (receiver, {"name": "Ethernet"})}
@@ -186,6 +191,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(self.service.peers(), [])
         reply = json.loads(bytes(receiver.writeDatagram.call_args.args[0]))
         self.assertEqual(reply["kind"], "announce")
+        self.assertEqual(receiver.writeDatagram.call_args.args[2], 51234)
 
         receiver.hasPendingDatagrams.side_effect = [True, False]
         receiver.readDatagram.side_effect = [
@@ -195,6 +201,45 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(len(self.service.peers()), 1)
         self.assertEqual(self.service.peers()[0]["interface"], "Ethernet")
         self.service._bindings.clear()
+
+    def test_primary_and_fallback_listeners_discover_each_other(self):
+        reservations = [QUdpSocket(), QUdpSocket()]
+        for sock in reservations:
+            self.assertTrue(sock.bind(QHostAddress("0.0.0.0"), 0))
+        primary, fallback = ports = tuple(sock.localPort() for sock in reservations)
+        for sock in reservations:
+            sock.close()
+
+        peer = DiscoveryService(instance_id=PEER["id"])
+        self.addCleanup(peer.deleteLater)
+        self.addCleanup(peer.stop)
+        self.service._ports = peer._ports = ports
+        self.service.set_connection(49321, False)
+        peer.set_connection(49322, False)
+        with patch(
+            "frontend.desktop.discovery.network_interfaces",
+            return_value=[interface(ip="127.0.0.1", can_broadcast=False)],
+        ), patch("frontend.desktop.discovery.network_candidates",
+                 return_value=[{"ip": "127.0.0.1", "interface_index": 2}]), patch(
+            "frontend.desktop.discovery._valid_ip", return_value=True,
+        ):
+            self.assertTrue(self.service.start())
+            self.assertTrue(peer.start())
+            self.assertEqual(self.service._socket.localPort(), primary)
+            self.assertEqual(peer._socket.localPort(), fallback)
+            for service in (self.service, peer):
+                (sender, _), = service._bindings.values()
+                self.assertNotIn(sender.localPort(), ports)
+                service._last_targeted_queries.clear()
+                service.refresh()
+            deadline = time.monotonic() + 2
+            while not (self.service.peers() and peer.peers()) and time.monotonic() < deadline:
+                APP.processEvents()
+                time.sleep(.005)
+            self.assertEqual([(p["id"], p["session_port"]) for p in self.service.peers()],
+                             [(peer.identity, 49322)])
+            self.assertEqual([(p["id"], p["session_port"]) for p in peer.peers()],
+                             [(self.service.identity, 49321)])
 
     def test_candidates_are_queried_once_per_interval_through_matching_interface(self):
         first, second = MagicMock(), MagicMock()

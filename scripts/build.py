@@ -30,12 +30,28 @@ def _venv_python() -> str:
 
 def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = False) -> Path:
     dist = (ROOT / (dist_dir or "dist")).resolve()
+    output = dist / APP_NAME
     resources = ROOT / "frontend" / "desktop" / "resources"
     ffmpeg_dir = _ffmpeg_source() if os.name == "nt" else None
     video_library = None
     if os.name == "nt":
         from scripts.build_video import build as build_video
         video_library = build_video()
+    qt_runtime = _find_qt_runtime_dlls() if os.name == "nt" else {}
+    build_env = os.environ.copy()
+    if os.name == "nt":
+        windows = Path(build_env.get("SystemRoot", r"C:\Windows"))
+        build_env["PATH"] = os.pathsep.join(
+            str(path)
+            for path in (
+                Path(sys.executable).resolve().parent,
+                windows / "System32",
+                windows,
+                windows / "System32" / "Wbem",
+            )
+        )
+    if clean and output.exists():
+        shutil.rmtree(output)
 
     args = [
         _venv_python(),
@@ -92,9 +108,9 @@ def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = F
     args.insert(3, "--console" if console else "--windowed")
 
     print("PyInstaller:", " ".join(args))
-    subprocess.run(args, cwd=ROOT, check=True)
+    subprocess.run(args, cwd=ROOT, check=True, env=build_env)
 
-    output = dist / APP_NAME
+    _place_qt_runtime_dlls(output, qt_runtime)
     _copy_extras(output)
     if video_library is not None:
         shutil.copy2(video_library, output / "_internal/frontend/desktop/resources/elink_video.dll")
@@ -104,6 +120,36 @@ def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = F
     executable = output / (f"{APP_NAME}.exe" if os.name == "nt" else APP_NAME)
     print(executable)
     return executable
+
+
+def _find_qt_runtime_dlls() -> dict[str, Path]:
+    """Locate the unsuffixed ICU runtime required by the current QtCore build."""
+    windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    candidates = [
+        windows / "System32" / "icuuc.dll",
+        Path(sys.executable).resolve().parent / "icuuc.dll",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return {"icuuc.dll": candidate.resolve()}
+    return {}
+
+
+def _place_qt_runtime_dlls(output: Path, sources: dict[str, Path]) -> None:
+    """Keep Qt's non-system runtime DLLs beside the Qt binaries that load them."""
+    if not sources:
+        return
+    target = output / "_internal" / "PySide6"
+    target.mkdir(parents=True, exist_ok=True)
+    for name, source in sources.items():
+        if source.is_file():
+            destination = target / name
+            shutil.copyfile(source, destination)
+            destination.chmod(0o666)
+        root_copy = output / "_internal" / name
+        if root_copy.exists() and root_copy.resolve() != (target / name).resolve():
+            root_copy.chmod(0o666)
+            root_copy.unlink()
 
 
 def _ffmpeg_source() -> Path:

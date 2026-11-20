@@ -103,6 +103,7 @@ class ViewerSettings:
     stream_codec: str = "h264"
     decoder: str = "auto"
     codec_preferences: dict = field(default_factory=dict)
+    picture_preferences: dict = field(default_factory=dict)
     clipboard_enabled: bool = True
     gamepad_enabled: bool = True
     scale_percent: int = 100
