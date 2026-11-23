@@ -1,14 +1,12 @@
-"""In-process software and D3D11VA decoding through PyAV."""
+"""In-process video codecs through PyAV."""
 
 from collections import deque
 from fractions import Fraction
 from concurrent.futures import Future
 import queue
-import sys
 import time
 
 import av
-from av.codec.hwaccel import HWAccel
 
 from backend.config.schema import VideoEncodeConfig
 from backend.errors.codec import CodecOpenError, DecodeError
@@ -18,13 +16,14 @@ from .base import BaseDecoder, BaseEncoder
 
 
 class InprocessDecoder(BaseDecoder):
-    def __init__(self, stream, config: VideoEncodeConfig | None = None, *, hardware=False):
+    def __init__(self, stream, config: VideoEncodeConfig | None = None, *, implementation=None):
         super().__init__(stream)
         self.config = config or VideoEncodeConfig()
         self.codec = stream.codec.value
-        self.hardware = hardware
-        self.name = (f"{self.codec}_pyav_d3d11va" if hardware else
-                     "h264" if self.codec == "h264" else f"{self.codec}_pyav")
+        self.name = implementation or ("h264" if self.codec == "h264" else f"{self.codec}_pyav")
+        self.hardware = implementation is not None
+        self.implementation = implementation
+        self._dimensions = (stream.width, stream.height)
         self._context = None
         self._proc = None
         self.output_callback = None
@@ -34,19 +33,15 @@ class InprocessDecoder(BaseDecoder):
 
     def open(self):
         try:
-            options = {}
-            if self.hardware:
-                if sys.platform != "win32":
-                    raise ValueError("D3D11VA requires Windows")
-                options["hwaccel"] = HWAccel("d3d11va", allow_software_fallback=False)
-            implementation = self.codec
+            implementation = self.implementation or self.codec
             if self.codec == "av1" and not self.hardware:
                 implementation = "libdav1d" if "libdav1d" in av.codecs_available else "libaom-av1"
-            context = av.CodecContext.create(implementation, "r", **options)
+            context = av.CodecContext.create(implementation, "r")
             if not self.hardware:
                 context.thread_count = 4
-                # Slice threading does not buffer future frames like frame threading.
                 context.thread_type = "SLICE"
+            elif self.name.endswith("_cuvid"):
+                context.options = {"surfaces": "8", "delay": "0", "deint": "weave"}
             context.flags |= 0x80000
             context.open()
             self._context = context
@@ -57,6 +52,13 @@ class InprocessDecoder(BaseDecoder):
     def decode(self, packet):
         if self._context is None:
             raise DecodeError("解码器尚未打开")
+        if self.hardware and packet.keyframe:
+            from .probe import detect_video_dimensions
+            dimensions = detect_video_dimensions(packet.data, packet.codec)
+            if dimensions and dimensions != self._dimensions:
+                self._context = None
+                self.open()
+                self._dimensions = dimensions
         encoded = av.Packet(packet.data)
         encoded.pts, encoded.dts = packet.pts, packet.dts
         encoded.time_base = Fraction(packet.timebase.num, packet.timebase.den)

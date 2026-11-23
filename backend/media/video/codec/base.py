@@ -41,6 +41,7 @@ class SwitchableDecoder:
         self.current = decoder
         self._pending = queue.Queue(maxsize=1)
         self._recovery = RecoveryPoint()
+        self._candidate = None
 
     def __getattr__(self, name):
         return getattr(self.current, name)
@@ -53,7 +54,9 @@ class SwitchableDecoder:
 
     def decode(self, packet):
         self._recovery.observe(packet)
-        if not self._pending.empty() and self._recovery.recover(packet) is not None:
+        candidate_packet = packet
+        recovery = self._recovery.recover(packet) if self._candidate is None and not self._pending.empty() else None
+        if recovery is not None:
             factory, future = self._pending.get_nowait()
             if future.set_running_or_notify_cancel():
                 replacement = None
@@ -61,29 +64,46 @@ class SwitchableDecoder:
                     replacement = factory()
                     replacement.native_output = getattr(self.current, "native_output", False)
                     replacement.open()
-                    frames = replacement.decode(self._recovery.recover(packet) or packet)
-                    if not frames:
-                        raise DecodeError("新解码器未解出关键帧")
                 except Exception as exc:
                     if replacement is not None:
                         replacement.close()
                     future.set_exception(exc)
                 else:
+                    self._candidate = replacement, future, time.monotonic() + 3
+                    candidate_packet = recovery
+        if self._candidate is not None:
+            replacement, future, deadline = self._candidate
+            try:
+                if time.monotonic() >= deadline:
+                    raise DecodeError("等待新解码器首帧超时")
+                frames = replacement.decode(candidate_packet)
+            except Exception as exc:
+                self._candidate = None
+                replacement.close()
+                future.set_exception(exc)
+            else:
+                if frames:
+                    self._candidate = None
                     callback = getattr(self.current, "output_callback", None)
                     self.current.close()
                     self.current = replacement
                     if hasattr(replacement, "output_callback"):
                         replacement.output_callback = callback
                     future.set_result(None)
-                    if callback is not None:
-                        for frame in frames:
-                            callback(frame)
-                        return []
-                    return frames
+                    if callback is None:
+                        return frames
+                    for frame in frames:
+                        callback(frame)
+                    return []
         return self.current.decode(packet)
 
     def close(self):
         self.current.close()
+        if self._candidate is not None:
+            replacement, future, _ = self._candidate
+            self._candidate = None
+            replacement.close()
+            future.set_exception(DecodeError("解码器切换已停止"))
         while not self._pending.empty():
             _, future = self._pending.get_nowait()
             future.cancel()

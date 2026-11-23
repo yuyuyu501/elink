@@ -46,12 +46,10 @@ class SelectionTests(unittest.TestCase):
     def test_inprocess_names_are_valid_and_describe_actual_backend(self):
         from backend.media.video.codec.probe import codec_label
         for codec in PROBE_SAMPLES:
-            for suffix in ("_pyav", "_pyav_d3d11va"):
-                name = codec + suffix
-                expected = "h264" if name == "h264_pyav" else name
-                self.assertEqual(codec_options({"codec": codec, "decoder": name})["decoder"], expected)
-                self.assertNotIn("NVIDIA", codec_label(name))
-        self.assertIn("D3D11VA", codec_label("h264_pyav_d3d11va"))
+            name = codec + "_pyav"
+            expected = "h264" if name == "h264_pyav" else name
+            self.assertEqual(codec_options({"codec": codec, "decoder": name})["decoder"], expected)
+            self.assertNotIn("NVIDIA", codec_label(name))
 
     def test_inprocess_software_decodes_all_formats_with_separate_timing(self):
         from backend.media.video.codec.inprocess import InprocessDecoder

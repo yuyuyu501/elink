@@ -402,7 +402,7 @@ class SettingsAndTransportTests(unittest.TestCase):
         self.assertTrue(host.clipboard_enabled and host.gamepad_enabled)
         self.assertTrue(viewer.clipboard_enabled and viewer.gamepad_enabled)
         self.assertEqual(viewer.decoder, "h264")
-        self.assertEqual(viewer.codec_preferences["peer"]["decoder"], "h264")
+        self.assertEqual(viewer.codec_preferences["peer"], {"codec": "h264"})
         self.assertEqual(viewer.protocol_preferences, {"peer": "srt"})
 
     def test_legacy_switches_are_ignored(self):
@@ -542,7 +542,7 @@ class CodecConnectionTests(unittest.TestCase):
         self.assertEqual(self.applied[-1], picture)
         self.assertEqual(self.host_media.starts[-1].codec, "hevc")
         self.assertEqual(self.viewer_media.starts[-1].decoder, "hevc")
-        self.assertEqual(self.viewer._viewer.codec_preferences["host"], options)
+        self.assertEqual(self.viewer._viewer.codec_preferences["host"], {"codec": "hevc"})
 
     def test_auto_preflight_failure_tries_next_encoder(self):
         self.host_media.validation_failure = ("encoder", "h264_nvenc")
@@ -571,7 +571,7 @@ class CodecConnectionTests(unittest.TestCase):
         wait_until(lambda: len(self.applied) == 2 and self.host.phase == "active")
         self.assertEqual(self.applied[-1], original)
         self.assertEqual(self.host_media.starts[-1].encoder, "h264_nvenc")
-        self.assertEqual(self.viewer._viewer.codec_preferences["host"]["encoder"], "auto")
+        self.assertEqual(self.viewer._viewer.codec_preferences["host"], {"codec": "h264"})
         self.assertTrue(self.errors)
 
     def test_local_preflight_rejection_keeps_existing_host_and_selection(self):
@@ -753,7 +753,7 @@ class MediaIntegrationTests(unittest.TestCase):
     def test_webrtc_uses_real_media_and_stops_workers(self):
         from scripts.benchmark_remote import run
         result = run(transport="webrtc", seconds=.5, width=320, height=240, fps=60, synthetic=True,
-                     warmup=0, display="cpu")
+                     warmup=0, display="cpu", decoder="h264")
         self.assertFalse(result["errors"])
         self.assertGreater(result["frames"], 10)
         self.assertTrue(result["closed_cleanly"])
@@ -826,7 +826,8 @@ class MediaIntegrationTests(unittest.TestCase):
                 "session_port": host.server.serverPort()}
         settings = ViewerSettings(stream_width=320, stream_height=240,
                                   stream_bitrate_kbps=800, clipboard_enabled=False,
-                                  gamepad_enabled=False, protocol_preferences={"media-host": "srt"})
+                                  gamepad_enabled=False, protocol_preferences={"media-host": "srt"},
+                                  codec_preferences={"media-host": {"codec": "h264", "decoder": "h264"}})
         injected = []
         def state():
             return {

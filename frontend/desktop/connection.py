@@ -331,7 +331,7 @@ class DesktopConnection(QObject):
             self.service.refresh_codecs(viewer.ffmpeg_path)
             self.service.refresh_upscale(force=True) if hasattr(self.service, "refresh_upscale") else None
         try:
-            self._preferences = codec_options(viewer.codec_preferences.get(str(peer["id"]), {}))
+            self._preferences = codec_options(viewer.codec_preferences.get(str(peer["id"]), {"codec": "h264"}))
         except (ValueError, AttributeError):
             self._preferences = codec_options({})
         sock = QTcpSocket(self)
@@ -705,7 +705,7 @@ class DesktopConnection(QObject):
             self._applied_protocol = self._protocol
             if self._codec_enabled and not self._rollback:
                 self._applied_options = dict(self._preferences)
-                self._viewer.codec_preferences[str(self._peer["id"])] = dict(self._preferences)
+                self._viewer.codec_preferences[str(self._peer["id"])] = {"codec": self._selection["codec"]}
                 self._viewer.protocol_preferences[str(self._peer["id"])] = self._protocol
             self._clear_failure()
             self._send("active")

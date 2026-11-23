@@ -968,6 +968,7 @@ class SessionService(QObject):
                             wait(future)
                         raise
                     self._viewer_live = viewer
+                    pipeline.stats.extra["decoder"] = selection["decoder"]
                     if runtime is not None:
                         runtime.settings = viewer
             except Exception as exc:

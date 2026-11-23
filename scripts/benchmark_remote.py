@@ -29,8 +29,8 @@ def frame_counts(host, viewer):
 
 
 def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
-        encoder="libx264", decoder="h264", synthetic=False, updates=(),
-        bitrate=12, warmup=3, display="gpu"):
+        encoder="auto", decoder="auto", synthetic=False, updates=(),
+        bitrate=12, warmup=3, display="gpu", codec="h264"):
     if QApplication.instance() is None:
         QSurfaceFormat.setDefaultFormat(video_surface_format())
     app = QApplication.instance() or QApplication([])
@@ -123,7 +123,7 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
                                   stream_bitrate_kbps=bitrate * 1000,
                                   protocol_preferences={"benchmark-host": transport},
                                   codec_preferences={"benchmark-host": {
-                                      "codec": "h264", "encoder": encoder, "decoder": decoder}})
+                                      "codec": codec, "encoder": encoder, "decoder": decoder}})
         viewer.connect_peer({"id": "benchmark-host", "ip": "127.0.0.1",
                              "session_port": host.server.serverPort()}, settings, False)
         deadline = time.monotonic() + 90
@@ -194,7 +194,7 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
                                                                 frames[max(0, before - 1) + 1:])),
             })
         result = {
-            "transport": transport, "resolution": [width, height], "requested_fps": fps,
+            "transport": transport, "codec": codec, "resolution": [width, height], "requested_fps": fps,
             "synthetic_capture": synthetic, "frames": len(frames), "errors": errors,
             "phases": [host.phase, viewer.phase],
             "host": host_service.performance_report(), "viewer": viewer_service.performance_report(),
@@ -236,8 +236,9 @@ def main():
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--fps", type=int, default=120)
-    parser.add_argument("--encoder", default="libx264")
-    parser.add_argument("--decoder", default="h264")
+    parser.add_argument("--codec", choices=("h264", "hevc", "av1"), default="h264")
+    parser.add_argument("--encoder", default="auto")
+    parser.add_argument("--decoder", default="auto")
     parser.add_argument("--bitrate", type=int, choices=range(1, 51), metavar="Mbps", default=12)
     parser.add_argument("--warmup", type=float, default=3)
     parser.add_argument("--display", choices=("gpu", "cpu", "auto"), default="gpu")

@@ -248,14 +248,15 @@ class RtcSession:
             self.fail(exc)
 
     async def prepare(self):
-        from aiortc import RTCRtpSender
+        from aiortc import RTCRtpSender, rtcrtpreceiver
         from aiortc.codecs import CODECS
+        from aiortc.rtcrtpparameters import RTCRtpCodecParameters, RTCRtcpFeedback
         import copy
         from types import SimpleNamespace
         from backend.bootstrap import build_capture, prepare_environment
         from backend.pipeline.video_pipeline import VideoPipelineStats
         from backend.pipeline.receive_pipeline import ReceivePipelineStats
-        from backend.media.stream import StreamInfo
+        from backend.media.stream import CodecId, StreamInfo
         from backend.media.video.codec.inprocess import InprocessEncoder
         from backend.transport.webrtc.media_track import (
             DesktopTrack, EncodeAhead, LoopbackTrack, SelectedEncoder, tune_receiver,
@@ -269,8 +270,26 @@ class RtcSession:
                 template.payloadType = max(c.payloadType for c in CODECS["video"]) + 1
                 template.parameters["profile-level-id"] = "640034"
                 CODECS["video"].append(template)
+            for subtype in ("H265", "AV1"):
+                if not any(c.mimeType.lower() == f"video/{subtype.lower()}" for c in CODECS["video"]):
+                    CODECS["video"].append(RTCRtpCodecParameters(
+                        mimeType=f"video/{subtype}", clockRate=90000,
+                        payloadType=max(c.payloadType for c in CODECS["video"]) + 1,
+                        rtcpFeedback=[RTCRtcpFeedback("nack"), RTCRtcpFeedback("nack", "pli")]))
+            if not getattr(rtcrtpreceiver.depayload, "_elink", False):
+                original_depayload = rtcrtpreceiver.depayload
+
+                def depayload(codec, payload):
+                    if codec.mimeType.lower() in {"video/h265", "video/av1"}:
+                        return len(payload).to_bytes(2, "big") + payload
+                    return original_depayload(codec, payload)
+
+                depayload._elink = True
+                rtcrtpreceiver.depayload = depayload
         _, registry = prepare_environment(self.config)
-        stream = StreamInfo(width=self.config.encode.width, height=self.config.encode.height,
+        codec = self.config.encode.codec
+        mime = "video/h265" if codec == "hevc" else f"video/{codec}"
+        stream = StreamInfo(codec=CodecId(codec), width=self.config.encode.width, height=self.config.encode.height,
                             framerate=self.config.capture.fps)
         host = self.service.mode == "host"
         stats = VideoPipelineStats() if host else ReceivePipelineStats()
@@ -284,7 +303,7 @@ class RtcSession:
             self.service._pipeline.capture = capture
             video = DesktopTrack(capture, self.fail)
             self.tracks.append(video)
-            self.encoder = registry.create_encoder("h264", self.settings.encoder, stream, self.config.encode)
+            self.encoder = registry.create_encoder(codec, self.settings.encoder, stream, self.config.encode)
             if not isinstance(self.encoder, InprocessEncoder):
                 raise NetworkError("WebRTC 编码器需要可用的进程内实现")
             sender = self.pc.addTrack(video)
@@ -299,7 +318,7 @@ class RtcSession:
             self.control.on_message(lambda event: self.service._on_remote_event(event, self.settings))
             transceiver = self.pc.addTransceiver("video", direction="recvonly")
             self.pc.addTransceiver("audio", direction="recvonly")
-            self.adapter = registry.create_decoder("h264", self.settings.decoder, stream, self.config.encode)
+            self.adapter = registry.create_decoder(codec, self.settings.decoder, stream, self.config.encode)
             self.adapter.output_callback = None
             self._receiver_cleanup = tune_receiver(transceiver.receiver, self.adapter, self.fail, stats)
             self.adapter = self._receiver_cleanup.decoder
@@ -310,7 +329,7 @@ class RtcSession:
             if transceiver.kind == "video":
                 preferences = [
                     c for c in RTCRtpSender.getCapabilities("video").codecs
-                    if c.mimeType.lower() == "video/h264"]
+                    if c.mimeType.lower() == mime]
                 preferences.sort(key=lambda c: c.parameters.get("profile-level-id") != "640034")
                 transceiver.setCodecPreferences(preferences)
         stats.extra["encoder" if host else "decoder"] = (
@@ -457,7 +476,7 @@ class RtcSession:
         stats.frames_out = frames
         stats.elapsed_s = now - self.service._started_at
         self._last_frames, self._last_bytes, self._last_stats = frames, network_bytes, now
-        extra.update(sampled_at=now, codec="h264", **pipeline_stats.extra)
+        extra.update(sampled_at=now, codec=self.config.encode.codec, **pipeline_stats.extra)
         if self.adapter and hasattr(self.adapter, "decode_ms") and self.adapter.decode_ms:
             extra["decode_ms"] = sum(self.adapter.decode_ms) / len(self.adapter.decode_ms)
             extra["decode_label"] = "解码"

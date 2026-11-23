@@ -166,18 +166,9 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
     except ImportError:
         logger.debug("PyAV is unavailable", exc_info=True)
     else:
-        import sys
         for codec in ("h264", "hevc", "av1"):
-            for hardware in (True, False):
-                if hardware and sys.platform != "win32":
-                    continue
-                name = (f"{codec}_pyav_d3d11va" if hardware else
-                        "h264" if codec == "h264" else f"{codec}_pyav")
-                registry.register_decoder(
-                    codec, name,
-                    lambda stream, config, hw=hardware: InprocessDecoder(stream, config, hardware=hw),
-                    priority=30 if hardware else 20,
-                )
+            name = "h264" if codec == "h264" else f"{codec}_pyav"
+            registry.register_decoder(codec, name, InprocessDecoder, priority=20)
 
     def availability(name: str) -> Availability:
         return lambda: probe.has_encoder(name)
@@ -259,6 +250,15 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
         )
 
     for codec, name, module_path, class_name, is_hardware in decoder_specs:
+        if name.endswith(("_cuvid", "_amf", "_qsv")):
+            import av
+            if name in av.codecs_available:
+                registry.register_decoder(
+                    codec, name,
+                    lambda stream, config, n=name: InprocessDecoder(stream, config, implementation=n),
+                    priority=_PRIORITY_HARDWARE,
+                )
+                continue
         try:
             module = __import__(module_path, fromlist=[class_name])
             cls = getattr(module, class_name)

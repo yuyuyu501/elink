@@ -547,10 +547,20 @@ class LiveCodecTests(unittest.TestCase):
             self.assertIs(decoder.current, original)
             with self.assertRaisesRegex(RuntimeError, "unavailable"):
                 future.result()
-            future = decoder.request_switch(lambda: InprocessDecoder(stream))
+            class DelayedDecoder(InprocessDecoder):
+                def decode(self, packet):
+                    frames = super().decode(packet)
+                    if packet.keyframe:
+                        return []
+                    return frames
+
+            future = decoder.request_switch(lambda: DelayedDecoder(stream))
             self.assertTrue(decoder.decode(packets[1]))
             self.assertFalse(future.done())
             self.assertTrue(decoder.decode(packets[0]))
+            self.assertFalse(future.done())
+            self.assertIs(decoder.current, original)
+            self.assertTrue(decoder.decode(packets[1]))
             self.assertTrue(future.done())
             self.assertIsNot(decoder.current, original)
         finally:

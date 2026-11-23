@@ -17,6 +17,8 @@ from backend.control_channel import protocol  # noqa: E402
 from backend.media.container.rtp import (  # noqa: E402
     H264RtpDepacketizer,
     H264RtpPacketizer,
+    depacketize_video,
+    packetize_video,
 )
 from backend.media.packet import Packet  # noqa: E402
 from backend.media.stream import CodecId  # noqa: E402
@@ -150,6 +152,24 @@ def test_control_frame_resync() -> None:
     frames = decoder.push(b"\x00\xff" + data)
     assert len(frames) == 1
     assert decoder.dropped == 2
+
+
+def test_hevc_and_av1_rtp_fragment_roundtrip() -> None:
+    body = bytes(range(1, 256)) * 10
+    for codec, original in (
+        ("hevc", b"\0\0\0\1\x40\x01header\0\0\0\1\x26\x01" + body),
+        ("av1", b"\x0a\x03seq\x32\xf6\x13" + body),
+    ):
+        payloads = list(packetize_video(codec, original))
+        assert len(payloads) > 2
+        framed = b"".join(len(p).to_bytes(2, "big") + p for p in payloads)
+        assert depacketize_video(codec, framed) == original
+        try:
+            depacketize_video(codec, framed[:-1])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("truncated RTP access unit accepted")
 
 
 def main() -> int:

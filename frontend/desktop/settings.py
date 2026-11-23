@@ -77,8 +77,9 @@ def load() -> tuple[HostSettings, ViewerSettings]:
         if not isinstance(peer, str) or len(peer) > 128:
             continue
         try:
-            viewer.codec_preferences[peer] = codec_options(options)
-        except ValueError:
+            codec = codec_options({"codec": options.get("codec", "h264")})["codec"]
+            viewer.codec_preferences[peer] = {"codec": "h264" if codec == "auto" else codec}
+        except (ValueError, AttributeError):
             continue
     viewer.picture_preferences = _load_picture_preferences(
         viewer.picture_preferences, viewer

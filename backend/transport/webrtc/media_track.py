@@ -20,6 +20,8 @@ from backend.media.container.rtp import (
     H264RtpPacketizer,
     RtpPacket,
     RtpSessionState,
+    depacketize_video,
+    packetize_video,
 )
 from backend.media.packet import Packet
 from backend.media.stream import CodecId
@@ -306,6 +308,9 @@ class SelectedEncoder(H264Encoder):
         self.stats.keyframes += sum(p.keyframe for p in packets)
         payloads = []
         for packet in packets:
+            if packet.codec is not CodecId.H264:
+                payloads.extend(packetize_video(packet.codec.value, packet.data))
+                continue
             nals = list(self._split_bitstream(packet.data))
             types = {nal[0] & 31 for nal in nals if nal}
             for nal in nals:
@@ -328,7 +333,7 @@ class LatestQueue(asyncio.Queue):
 class DecodeQueue(queue.Queue):
     """Recover at IDR after overflow; never drop an arbitrary reference frame."""
 
-    def __init__(self, decode, request_keyframe):
+    def __init__(self, decode, request_keyframe, codec=CodecId.H264):
         super().__init__(maxsize=4)
         self.decode = decode
         self.request_keyframe = request_keyframe
@@ -336,7 +341,9 @@ class DecodeQueue(queue.Queue):
         self.generation = 0
         self.recovering_since = None
         self.last_error = None
-        self._parameter_sets = {}
+        from backend.media.video.codec.probe import RecoveryPoint
+        self.codec = codec
+        self._recovery = RecoveryPoint()
 
     def recover(self, error=None):
         with self.mutex:
@@ -356,7 +363,7 @@ class DecodeQueue(queue.Queue):
         with self.mutex:
             if encoded._elink_generation == self.generation and self.recovering_since is not None:
                 self.recovering_since = self.last_error = None
-                logger.info("WebRTC H.264 已在关键帧后恢复解码")
+                logger.info("WebRTC 视频已在关键帧后恢复解码")
 
     def put(self, item, block=True, timeout=None):
         request = False
@@ -366,21 +373,25 @@ class DecodeQueue(queue.Queue):
                 self.queue.clear()
             else:
                 encoded = item[1]
-                nals = list(H264Encoder._split_bitstream(encoded.data))
-                types = {nal[0] & 31 for nal in nals if nal}
-                for nal in nals:
-                    if nal and nal[0] & 31 in (7, 8):
-                        self._parameter_sets[nal[0] & 31] = nal
-                if self._qsize() >= self.maxsize:
+                try:
+                    if self.codec is not CodecId.H264:
+                        encoded.data = depacketize_video(self.codec.value, encoded.data)
+                    packet = Packet(encoded.data, codec=self.codec)
+                    self._recovery.observe(packet)
+                except ValueError:
+                    self._recover()
+                    item = None
+                    request = True
+                if item is not None and self._qsize() >= self.maxsize:
                     logger.warning("WebRTC 解码队列溢出，等待关键帧恢复")
                     self._recover()
                     request = True
-                if self.waiting_keyframe:
-                    if 5 not in types or not all(k in self._parameter_sets for k in (7, 8)):
+                if item is not None and self.waiting_keyframe:
+                    recovered = self._recovery.recover(packet)
+                    if recovered is None:
                         item = None
                     else:
-                        missing = [self._parameter_sets[k] for k in (7, 8) if k not in types]
-                        encoded.data = b"".join(b"\x00\x00\x00\x01" + nal for nal in missing) + encoded.data
+                        encoded.data = recovered.data
                         self.waiting_keyframe = False
                         encoded._elink_reset = True
                 encoded._elink_generation = self.generation
@@ -432,9 +443,7 @@ def tune_receiver(receiver, adapter, failure, stats):
             if not opened:
                 adapter.open()
                 opened = True
-            from backend.media.packet import is_keyframe
-            packet = Packet(data=encoded.data, pts=encoded.timestamp,
-                            keyframe=is_keyframe(encoded.data, codec=adapter.stream.codec))
+            packet = Packet(data=encoded.data, pts=encoded.timestamp, codec=adapter.stream.codec)
             if getattr(encoded, "_elink_reset", False):
                 adapter.reset(packet)
             frames = adapter.decode(packet)
@@ -451,7 +460,7 @@ def tune_receiver(receiver, adapter, failure, stats):
             from backend.errors.codec import DecodeError
             if (isinstance(exc, av.error.InvalidDataError) or
                     isinstance(exc, DecodeError) and isinstance(exc.__cause__, av.error.InvalidDataError)):
-                logger.warning("WebRTC H.264 码流无效，等待关键帧恢复: %s", exc)
+                logger.warning("WebRTC 视频码流无效，等待关键帧恢复: %s", exc)
                 input_q.recover(exc)
                 return []
             failure(exc)
@@ -472,7 +481,7 @@ def tune_receiver(receiver, adapter, failure, stats):
                     failure(exc)
         loop.call_soon_threadsafe(lambda: asyncio.create_task(pli()))
 
-    input_q = DecodeQueue(decode, request)
+    input_q = DecodeQueue(decode, request, adapter.stream.codec)
     receiver._RTCRtpReceiver__decoder_queue = input_q
     receiver._RTCRtpReceiver__jitter_buffer = JitterBuffer(capacity=2048, is_video=True)
 
@@ -485,7 +494,7 @@ def tune_receiver(receiver, adapter, failure, stats):
         if since is not None:
             if time.monotonic() - since >= 5:
                 from backend.errors.codec import DecodeError
-                error = DecodeError("WebRTC H.264 关键帧恢复超时")
+                error = DecodeError("WebRTC 视频关键帧恢复超时")
                 error.__cause__ = cause
                 failure(error)
                 return

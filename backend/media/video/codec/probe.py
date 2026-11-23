@@ -141,8 +141,8 @@ VIDEO_ENCODERS: dict[str, str] = {
 }
 
 VIDEO_DECODERS: dict[str, str] = {
-    **{f"{codec}_pyav{suffix}": codec for codec in ("h264", "hevc", "av1")
-       for suffix in ("", "_d3d11va") if codec != "h264" or suffix},
+    "hevc_pyav": "hevc",
+    "av1_pyav": "av1",
     "h264": "h264",
     "h264_cuvid": "h264",
     "h264_amf": "h264",
@@ -285,7 +285,7 @@ def codec_label(name: str) -> str:
     vendor = next((label for suffix, label in (
         ("nvenc", "NVIDIA"), ("cuvid", "NVIDIA"), ("amf", "AMD"),
         ("qsv", "Intel"), ("vaapi", "VAAPI"), ("mediacodec", "MediaCodec"),
-        ("d3d11va", "D3D11VA"), ("pyav", "PyAV 软件")
+        ("pyav", "PyAV 软件")
     ) if name.endswith("_" + suffix)), "软件")
     return f"{vendor} · {name}"
 
@@ -316,10 +316,12 @@ def checked_capabilities(value: dict) -> dict:
     result = {}
     for kind, mapping in (("encoders", VIDEO_ENCODERS), ("decoders", VIDEO_DECODERS)):
         items = value.get(kind, {})
-        if not isinstance(items, dict) or len(items) > len(mapping) + (kind == "decoders"):
+        if not isinstance(items, dict) or len(items) > len(mapping) + (4 if kind == "decoders" else 0):
             raise ValueError("能力信息过长")
         result[kind] = {}
         for name, item in items.items():
+            if kind == "decoders" and name in {"h264_pyav_d3d11va", "hevc_pyav_d3d11va", "av1_pyav_d3d11va"}:
+                continue
             if kind == "decoders" and name == "h264_pyav":
                 name = "h264"
             if name not in mapping or not isinstance(item, dict) or item.get("codec") != mapping[name]:
@@ -342,16 +344,18 @@ def compatible_choices(remote: dict, local: dict, preference: dict, transport="s
     encoders, decoders = remote.get("encoders", {}), local.get("decoders", {})
     result = []
     for codec in ("h264", "hevc", "av1"):
-        if transport == "webrtc" and codec != "h264":
-            continue
         if options["codec"] not in ("auto", codec):
             continue
-        for encoder, enc in encoders.items():
+        for encoder in sorted(encoders, key=lambda n: n.startswith("lib")):
+            enc = encoders[encoder]
             if transport == "webrtc" and encoder.endswith(("_vaapi", "_mediacodec")):
                 continue
             if enc["codec"] != codec or options["encoder"] not in ("auto", encoder):
                 continue
-            for decoder, dec in decoders.items():
+            for decoder in sorted(decoders, key=lambda n: (
+                    not n.endswith(("_cuvid", "_amf", "_qsv", "_vaapi", "_mediacodec")),
+                    n in {"hevc", "av1"})):
+                dec = decoders[decoder]
                 if dec["codec"] == codec and options["decoder"] in ("auto", decoder):
                     result.append({"codec": codec, "encoder": encoder, "decoder": decoder})
     if not result:

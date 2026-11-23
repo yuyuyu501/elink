@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from backend.input_capture.mouse import MOUSE_MODES
-from backend.media.video.codec.probe import VIDEO_ENCODERS, codec_label, compatible_choices
+from backend.media.video.codec.probe import compatible_choices
 from .. import icons
 from .preview import PreviewWidget
 from .widgets import NoticeBar, StatusPill, label
@@ -88,30 +88,21 @@ class PictureDialog(QDialog):
         self.transport.currentIndexChanged.connect(lambda _: self._update_codecs()
                                                    if self.connection is not None else None)
         self.codec = QComboBox()
-        self.encoder = QComboBox()
-        self.decoder = QComboBox()
-        for box in (self.codec, self.encoder, self.decoder):
-            box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        for name, value in (("AV1", "av1"), ("H.264", "h264"), ("H.265", "hevc")):
+            self.codec.addItem(name, value)
+        self.codec.setCurrentIndex(1)
         self.codec_status = label("")
         if connection is not None and connection._codec_enabled:
             form.addRow("视频格式", self.codec)
-            form.addRow("被控端编码器", self.encoder)
-            form.addRow("本机解码器", self.decoder)
             form.addRow("", self.codec_status)
-            self.codec.currentIndexChanged.connect(self._backend_options)
-            self.encoder.currentIndexChanged.connect(self._decoder_options)
+            self.codec.currentIndexChanged.connect(self._connection_state)
             connection.capabilities_changed.connect(self._update_codecs)
             connection.changed.connect(self._connection_state)
-            self._update_codecs()
             options = connection._preferences if connection.phase == "selection" else connection._applied_options
-            for key in ("codec", "encoder", "decoder"):
-                box = getattr(self, key)
-                index = box.findData(options[key])
-                if index >= 0:
-                    box.setCurrentIndex(index)
-            self.codec_status.setText(
-                "" if all(getattr(self, k).findData(v) >= 0 for k, v in options.items())
-                else "保存的选项当前不可用，请重新选择")
+            index = self.codec.findData(options["codec"])
+            if index >= 0:
+                self.codec.setCurrentIndex(index)
+            self._update_codecs()
         self.apply_button = QToolButton()
         self.apply_button.setIcon(icons.icon("check"))
         self.apply_button.setToolTip("应用画面设置")
@@ -129,68 +120,28 @@ class PictureDialog(QDialog):
         form.addRow("", controls)
         self._connection_state()
 
-    @staticmethod
-    def _fill(box, names, labels=None):
-        selected = box.currentData()
-        box.blockSignals(True)
-        box.clear()
-        box.addItem("自动", "auto")
-        for name in names:
-            box.addItem(labels[name] if labels else codec_label(name), name)
-        index = box.findData(selected)
-        box.setCurrentIndex(max(0, index))
-        box.blockSignals(False)
-
     def _update_codecs(self):
         remote, local = self.connection.codec_capabilities
         if remote is None or local is None:
             self.codec_status.setText("正在检测编解码能力…")
-            return
-        try:
-            choices = compatible_choices(remote, local, {}, self.transport.currentData())
-        except ValueError:
             choices = []
-        names = list(dict.fromkeys(choice["codec"] for choice in choices))
-        self._fill(self.codec, names, {"h264": "H.264", "hevc": "H.265", "av1": "AV1"})
-        self._backend_options()
-        self.codec_status.setText("" if names else "双方没有共同可用的视频格式")
+        else:
+            try:
+                choices = compatible_choices(remote, local, {}, self.transport.currentData())
+            except ValueError:
+                choices = []
+            self.codec_status.setText("" if choices else "双方没有共同可用的视频格式")
+        names = {choice["codec"] for choice in choices}
+        for i in range(self.codec.count()):
+            self.codec.model().item(i).setEnabled(self.codec.itemData(i) in names)
         self._connection_state()
 
-    def _backend_options(self, *_):
-        if self.connection is None:
-            return
-        remote, local = self.connection.codec_capabilities
-        if remote is None or local is None:
-            return
-        codec = self.codec.currentData()
-        dec_formats = {v["codec"] for v in local["decoders"].values()}
-        if self.transport.currentData() == "webrtc":
-            dec_formats &= {"h264"}
-        self._fill(self.encoder, [n for n, v in remote["encoders"].items()
-                                 if v["codec"] in dec_formats and codec in ("auto", v["codec"])])
-        self._decoder_options()
-
-    def _decoder_options(self, *_):
-        if self.connection is None:
-            return
-        remote, local = self.connection.codec_capabilities
-        if remote is None or local is None:
-            return
-        codec = self.codec.currentData()
-        if codec == "auto" and self.encoder.currentData() != "auto":
-            codec = VIDEO_ENCODERS.get(self.encoder.currentData(), "auto")
-        enc_formats = {v["codec"] for v in remote["encoders"].values()}
-        if self.transport.currentData() == "webrtc":
-            enc_formats &= {"h264"}
-        self._fill(self.decoder, [n for n, v in local["decoders"].items()
-                                 if v["codec"] in enc_formats and codec in ("auto", v["codec"])])
-
-    def _connection_state(self):
+    def _connection_state(self, *_):
         if self.connection is not None and hasattr(self, "apply_button"):
             active = self.connection.phase in {"active", "selection"}
-            self.apply_button.setEnabled(active)
-            for box in (self.codec, self.encoder, self.decoder):
-                box.setEnabled(active)
+            available = self.codec.model().item(self.codec.currentIndex()).isEnabled()
+            self.apply_button.setEnabled(active and (available or not self.connection._codec_enabled))
+            self.codec.setEnabled(active)
             self.transport.setEnabled(active)
 
     def picture(self) -> dict:
@@ -199,7 +150,7 @@ class PictureDialog(QDialog):
                   "bitrate_kbps": self.bitrate.value() * 1000,
                   "transport": self.transport.currentData()}
         if self.connection is not None and self.connection._codec_enabled:
-            result.update({name: getattr(self, name).currentData() for name in ("codec", "encoder", "decoder")})
+            result["codec"] = self.codec.currentData()
         return result
 
 

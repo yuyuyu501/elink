@@ -254,6 +254,124 @@ class H264RtpDepacketizer:
         self._fragment = None
 
 
+def packetize_video(codec, data, limit=1200):
+    """Packetize HEVC without DONL, or AV1 with one OBU element per packet."""
+    if codec == "hevc":
+        for nal in split_annexb(data):
+            if len(nal) < 2:
+                raise ValueError("Invalid HEVC NAL")
+            if len(nal) <= limit:
+                yield nal
+                continue
+            header = bytes(((nal[0] & 0x81) | 98, nal[1]))
+            body = nal[2:]
+            step = limit - 3
+            for offset in range(0, len(body), step):
+                flags = (0x80 if offset == 0 else 0) | (0x40 if offset + step >= len(body) else 0)
+                yield header + bytes((flags | ((nal[0] >> 1) & 63),)) + body[offset:offset + step]
+    else:
+        from backend.media.video.codec.framing import sized_av1_obus
+        for kind, body, raw in sized_av1_obus(data):
+            if kind in (2, 8, 15):
+                continue
+            header_size = 2 if raw[0] & 4 else 1
+            obu = bytes((raw[0] & ~2,)) + raw[1:header_size] + body
+            step = limit - 1
+            for offset in range(0, len(obu), step):
+                flags = ((0x80 if offset else 0) | (0x40 if offset + step < len(obu) else 0)
+                         | (8 if kind == 1 and not offset else 0))
+                yield bytes((0x10 | flags,)) + obu[offset:offset + step]
+
+
+def depacketize_video(codec, data):
+    """Convert complete jitter-buffer access units with length-prefixed RTP payloads."""
+    from backend.media.video.codec.framing import MAX_UNIT
+
+    def leb(data, offset):
+        value = 0
+        for shift in range(0, 56, 7):
+            if offset >= len(data):
+                break
+            byte = data[offset]
+            offset += 1
+            value |= (byte & 127) << shift
+            if not byte & 128:
+                return value, offset
+        raise ValueError("Invalid AV1 OBU length")
+
+    out = bytearray()
+    fragment = None
+    offset = 0
+    if len(data) > MAX_UNIT:
+        raise ValueError("RTP access unit too large")
+    while offset < len(data):
+        if len(data) - offset < 2:
+            raise ValueError("Missing RTP payload length")
+        size = int.from_bytes(data[offset:offset + 2], "big")
+        offset += 2
+        if not size or offset + size > len(data):
+            raise ValueError("Invalid RTP payload length")
+        payload = data[offset:offset + size]
+        offset += size
+        if codec == "hevc":
+            if len(payload) < 2:
+                raise ValueError("Truncated HEVC payload")
+            kind = (payload[0] >> 1) & 63
+            if kind == 49 and len(payload) > 3:
+                flags = payload[2]
+                start, end = bool(flags & 0x80), bool(flags & 0x40)
+                if start == (fragment is not None) or (start and end):
+                    raise ValueError("Invalid HEVC fragment")
+                if start:
+                    fragment = bytearray((payload[0] & 0x81 | ((flags & 63) << 1), payload[1]))
+                fragment.extend(payload[3:])
+                if end:
+                    out.extend(b"\x00\x00\x00\x01" + fragment)
+                    fragment = None
+            elif kind < 48 and fragment is None:
+                out.extend(b"\x00\x00\x00\x01" + payload)
+            else:
+                raise ValueError("Unsupported HEVC RTP payload")
+        else:
+            flags, pos = payload[0], 1
+            count = flags >> 4 & 3
+            index = 0
+            while pos < len(payload):
+                index += 1
+                if index == count:
+                    end = len(payload)
+                else:
+                    size, pos = leb(payload, pos)
+                    end = pos + size
+                if not pos < end <= len(payload):
+                    raise ValueError("Invalid AV1 RTP element")
+                if bool(index == 1 and flags & 0x80) != (fragment is not None):
+                    raise ValueError("Invalid AV1 RTP fragment")
+                if fragment is None:
+                    fragment = bytearray()
+                fragment.extend(payload[pos:end])
+                pos = end
+                if pos == len(payload) and flags & 0x40:
+                    continue
+                header_size = 2 if fragment[0] & 4 else 1
+                if len(fragment) < header_size or fragment[0] & 0x83:
+                    raise ValueError("Invalid AV1 OBU header")
+                out.append(fragment[0] | 2)
+                out.extend(fragment[1:header_size])
+                size = len(fragment) - header_size
+                while size >= 128:
+                    out.append(size & 127 | 128)
+                    size >>= 7
+                out.append(size)
+                out.extend(fragment[header_size:])
+                fragment = None
+            if not index or count and index != count:
+                raise ValueError("Invalid AV1 RTP element count")
+    if fragment is not None or not out:
+        raise ValueError("Incomplete RTP access unit")
+    return bytes(out)
+
+
 @dataclass
 class RtpSessionState:
     """对端 RTP 会话的轻量状态（序号/时间戳连续性统计）。"""
