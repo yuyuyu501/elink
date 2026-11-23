@@ -63,16 +63,20 @@ class VideoOverlay(QWidget):
         painter.end()
 
 
+def video_surface_format():
+    fmt = QSurfaceFormat()
+    fmt.setVersion(3, 3)
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
+    fmt.setSwapInterval(0)
+    return fmt
+
+
 class YuvSurface(QOpenGLWidget):
     failed = Signal(str)
 
     def __init__(self, preview):
-        fmt = QSurfaceFormat()
-        fmt.setVersion(3, 3)
-        fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
-        fmt.setSwapInterval(0)
         super().__init__(preview)
-        self.setFormat(fmt)
+        self.setFormat(video_surface_format())
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.preview = preview
         self.frame = None
@@ -116,7 +120,7 @@ class YuvSurface(QOpenGLWidget):
         color_parameters(frame)
         self.frame = frame
         self.pending = True
-        self.update()
+        self.repaint()
 
     def upload(self):
         frame = self.frame
@@ -184,7 +188,7 @@ class YuvSurface(QOpenGLWidget):
             if error:
                 raise RuntimeError(f"Video OpenGL error: {error}")
             if self.pending:
-                self.preview.presented.emit()
+                self.preview.frame_drawn("gpu")
             self.pending = False
         except Exception as exc:
             self.fail(exc)

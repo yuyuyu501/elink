@@ -70,6 +70,33 @@ PEER = {
 }
 
 
+class DisplayModeTests(unittest.TestCase):
+    def test_cpu_draw_counts_new_frames_only_and_gpu_fallback_keeps_frame(self):
+        from backend.media.frame import Frame
+        from frontend.desktop.ui.preview import PreviewWidget
+
+        preview = PreviewWidget()
+        self.addCleanup(preview.close)
+        preview.resize(320, 180)
+        preview.show()
+        drawn = []
+        preview.presented.connect(lambda: drawn.append(preview.actual_display_mode))
+        preview.set_display_mode("cpu")
+        frame = Frame(bytes((32, 64, 192, 255)) * 64, width=8, height=8)
+        preview.set_frame(frame)
+        APP.processEvents()
+        self.assertEqual(drawn, ["cpu"])
+        preview.set_display_mode("gpu")
+        preview._gpu_fallback("test")
+        preview.repaint()
+        self.assertEqual(drawn, ["cpu"])
+        self.assertEqual((preview.display_mode, preview.actual_display_mode), ("gpu", "cpu"))
+        self.assertTrue(preview.has_frame)
+        preview.set_frame(frame.with_data(frame.data, pts=1))
+        APP.processEvents()
+        self.assertEqual(drawn, ["cpu", "cpu"])
+
+
 class DevicePageTests(unittest.TestCase):
     def setUp(self):
         self.page = DevicesPage()

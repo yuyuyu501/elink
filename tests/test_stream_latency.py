@@ -557,6 +557,61 @@ class LiveCodecTests(unittest.TestCase):
             decoder.close()
 
 
+class EncodeAheadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prefetch_is_bounded_and_update_drains_in_order(self):
+        from backend.transport.webrtc.media_track import EncodeAhead
+
+        encode = AsyncMock(side_effect=iter((1, 2, 3, 4)))
+        sender = SimpleNamespace(_next_encoded_frame=encode, _run_rtp=AsyncMock())
+        pipeline = EncodeAhead(sender)
+        self.addAsyncCleanup(pipeline.close)
+        self.assertEqual(await sender._next_encoded_frame(None), 1)
+        await asyncio.sleep(0)
+        self.assertEqual(encode.await_count, 2)
+        entered = asyncio.Event()
+
+        async def update():
+            async with pipeline.ordered_update():
+                entered.set()
+
+        update_task = asyncio.create_task(update())
+        await asyncio.sleep(0)
+        self.assertEqual(await sender._next_encoded_frame(None), 2)
+        self.assertFalse(entered.is_set())
+        self.assertEqual(encode.await_count, 2)
+        self.assertEqual(await sender._next_encoded_frame(None), 3)
+        await update_task
+        self.assertTrue(entered.is_set())
+
+    async def test_rtp_exit_waits_for_encoder_before_cleanup(self):
+        from backend.transport.webrtc.media_track import EncodeAhead
+
+        release = asyncio.Event()
+        encoding = asyncio.Event()
+        exiting = asyncio.Event()
+
+        async def encode(_):
+            if encoding.is_set():
+                await release.wait()
+            encoding.set()
+            return 1
+
+        async def send(codec):
+            await sender._next_encoded_frame(codec)
+            exiting.set()
+
+        sender = SimpleNamespace(_next_encoded_frame=encode, _run_rtp=send)
+        pipeline = EncodeAhead(sender)
+        running = asyncio.create_task(sender._run_rtp(None))
+        try:
+            await asyncio.wait_for(exiting.wait(), 1)
+            self.assertFalse(running.done())
+        finally:
+            release.set()
+            await asyncio.wait_for(running, 1)
+        self.assertIsNone(pipeline._task)
+
+
 class PacingTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeated_install_updates_budget_and_priority_bypasses_debt(self):
         import struct

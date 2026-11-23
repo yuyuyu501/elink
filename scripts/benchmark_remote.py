@@ -7,22 +7,53 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QSurfaceFormat
+from PySide6.QtWidgets import QApplication
 
 from frontend.desktop.connection import DesktopConnection
 from frontend.desktop.service import HostSettings, SessionService, ViewerSettings
+from frontend.desktop.ui.preview import PreviewWidget
+from frontend.desktop.ui.video_surface import video_surface_format
+
+
+def frame_counts(host, viewer):
+    source, sink = host._pipeline, viewer._pipeline
+    sent, received = source.stats, sink.stats
+    rtc = host._rtc_runtime
+    track = next((track for track in rtc.tracks if track.kind == "video"), None) if rtc else None
+    return {
+        "captured": track.frames if track else sent.frames_captured,
+        "encoded": sent.frames_encoded,
+        "decoded": received.frames_decoded,
+    }
 
 
 def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
-        encoder="libx264", decoder="h264", synthetic=False, updates=()):
-    app = QCoreApplication.instance() or QCoreApplication([])
+        encoder="libx264", decoder="h264", synthetic=False, updates=(),
+        bitrate=12, warmup=3, display="gpu"):
+    if QApplication.instance() is None:
+        QSurfaceFormat.setDefaultFormat(video_surface_format())
+    app = QApplication.instance() or QApplication([])
+    if not isinstance(app, QApplication):
+        raise RuntimeError("The rendering benchmark requires QApplication")
+    if display == "gpu" and app.platformName() in {"offscreen", "minimal"}:
+        raise RuntimeError("GPU benchmark requires an interactive desktop")
     host_service, viewer_service = SessionService(), SessionService()
     host = DesktopConnection(host_service, "benchmark-host", HostSettings())
     viewer = DesktopConnection(viewer_service, "benchmark-viewer", HostSettings())
     frames, cursors, errors, applied = [], [], [], []
-    viewer_service.frame_ready.connect(lambda frame: (
-        frames.append((time.perf_counter(), frame.pts, frame.width, frame.height)),
-        viewer_service.frame_presented()))
+    drawn = []
+    preview = PreviewWidget()
+    preview.setWindowTitle("Elink benchmark")
+    preview.resize(800, 490)
+    preview.set_edge_padding(0)
+    preview.set_display_mode(display)
+    preview.show()
+    viewer_service.frame_ready.connect(lambda frame: frames.append(
+        (time.perf_counter(), frame.pts, frame.width, frame.height)))
+    viewer_service.frame_ready.connect(preview.set_frame)
+    preview.presented.connect(lambda: drawn.append(time.perf_counter()))
+    preview.presented.connect(viewer_service.frame_presented)
     viewer.picture_applied.connect(applied.append)
     viewer_service.cursor_changed.connect(cursors.append)
     host.error.connect(errors.append)
@@ -37,6 +68,9 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             self.config = config
             self.cursor_mode = self.cursor_applied_mode = "smart"
             self.cursor_visible = True
+            self.index = 0
+            self.patterns = {}
+            self.backend = "synthetic"
 
         def open(self):
             pass
@@ -45,11 +79,19 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             from backend.media.frame import Frame
             self.cursor_applied_mode = self.cursor_mode
             w, h = self.config.width or width, self.config.height or height
-            return Frame(data=bytes((32, 64, 192, 255)) * (w * h), width=w, height=h)
+            phase = self.index % 4
+            self.index += 1
+            key = (w, h, phase)
+            if key not in self.patterns:
+                offset = (phase * w) // 4
+                row = bytes((32, 64, 192, 255)) * offset + bytes((160, 96, 32, 255)) * (w - offset)
+                self.patterns[key] = row * h
+            return Frame(data=self.patterns[key], width=w, height=h)
 
         def reconfigure(self, width, height, fps):
             from dataclasses import replace
             self.config = replace(self.config, width=width, height=height, fps=fps)
+            self.patterns.clear()
 
         def close(self):
             pass
@@ -78,21 +120,43 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
         else:
             raise RuntimeError("没有可用的测试端口")
         settings = ViewerSettings(stream_width=width, stream_height=height, stream_fps=fps,
-                                  stream_bitrate_kbps=12000,
+                                  stream_bitrate_kbps=bitrate * 1000,
                                   protocol_preferences={"benchmark-host": transport},
                                   codec_preferences={"benchmark-host": {
                                       "codec": "h264", "encoder": encoder, "decoder": decoder}})
         viewer.connect_peer({"id": "benchmark-host", "ip": "127.0.0.1",
                              "session_port": host.server.serverPort()}, settings, False)
         deadline = time.monotonic() + 90
-        active = None
+        active = start = initial = None
         while time.monotonic() < deadline and not errors:
             app.processEvents()
-            if viewer.phase == "active" and active is None:
-                active = time.monotonic()
-            if active is not None and time.monotonic() - active >= seconds:
-                break
+            now = time.perf_counter()
+            if viewer.phase == host.phase == "active":
+                if active is None:
+                    active = now
+                if start is None and now - active >= warmup:
+                    start, initial = now, frame_counts(host_service, viewer_service)
+                if start is not None and now - start >= seconds:
+                    break
             time.sleep(.001)
+        measurement = {}
+        if start is not None and now - start >= seconds and viewer.phase == host.phase == "active":
+            counts = frame_counts(host_service, viewer_service)
+            images = [stamp for stamp in drawn if start < stamp <= now]
+            intervals = sorted((b - a) * 1000 for a, b in zip(images, images[1:]))
+            duration = now - start
+            measurement = {f"{key}_fps": round((counts[key] - initial[key]) / duration, 2)
+                           for key in counts}
+            measurement.update(
+                delivered_fps=round(sum(start < item[0] <= now for item in frames) / duration, 2),
+                drawn_fps=round(len(images) / duration, 2),
+                draw_interval_p95_ms=round(intervals[int(.95 * (len(intervals) - 1))], 3)
+                if intervals else None,
+                capture_backend=getattr(host_service._pipeline.capture, "backend", None),
+                encoder=host_service._host_live.encoder, decoder=viewer_service._viewer_live.decoder,
+                display_mode=preview.actual_display_mode,
+                display_refresh_hz=round(preview.screen().refreshRate(), 2),
+            )
         changes = []
         for new_width, new_height, new_fps in updates:
             if host.phase != "active" or viewer.phase != "active":
@@ -104,7 +168,7 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             old_audio = (tuple(host_service._rtc_runtime.tracks) if host_service._rtc_runtime
                          else host_service._session_audio)
             viewer.configure({"width": new_width, "height": new_height,
-                              "fps": new_fps, "bitrate_kbps": 12000})
+                              "fps": new_fps, "bitrate_kbps": bitrate * 1000})
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 app.processEvents()
@@ -137,9 +201,12 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             "cursor": cursors[-1] if cursors else None,
             "last_frame_pts": frames[-1][1] if frames else None,
             "updates": changes,
+            "bitrate_mbps": bitrate, "requested_display": display, "measurement": measurement,
         }
-        if len(frames) > 1:
-            result["delivered_fps"] = (len(frames) - 1) / (frames[-1][0] - frames[0][0])
+        if measurement:
+            result["delivered_fps"] = measurement["delivered_fps"]
+            result["meets_target"] = (measurement["drawn_fps"] >= .95 * fps
+                                      and (display == "auto" or measurement["display_mode"] == display))
         return result
     finally:
         viewer.disconnect()
@@ -154,6 +221,8 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             result["workers_stopped"] = not host_service.running and not viewer_service.running
         host.deleteLater()
         viewer.deleteLater()
+        preview.close()
+        preview.deleteLater()
         app.processEvents()
         if synthetic:
             capture_patch.stop()
@@ -169,17 +238,35 @@ def main():
     parser.add_argument("--fps", type=int, default=120)
     parser.add_argument("--encoder", default="libx264")
     parser.add_argument("--decoder", default="h264")
+    parser.add_argument("--bitrate", type=int, choices=range(1, 51), metavar="Mbps", default=12)
+    parser.add_argument("--warmup", type=float, default=3)
+    parser.add_argument("--display", choices=("gpu", "cpu", "auto"), default="gpu")
+    parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--update", dest="updates", nargs=3, type=int, action="append",
                         metavar=("WIDTH", "HEIGHT", "FPS"), default=[])
     parser.add_argument("--output", type=Path, default=Path("out/remote-benchmark.json"))
     args = vars(parser.parse_args())
     output = args.pop("output")
-    result = run(**args)
+    matrix = args.pop("matrix")
+    if args["seconds"] <= 0 or args["warmup"] < 0 or (matrix and args["updates"]):
+        parser.error("invalid measurement window or matrix combined with live updates")
+    if matrix:
+        results = [run(**(args | dict(width=w, height=h, fps=fps)))
+                   for w, h in ((1280, 720), (1920, 1080), (2560, 1440), (3840, 2160))
+                   for fps in (30, 60, 90, 120)]
+    else:
+        results = [run(**args)]
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=list), encoding="utf-8")
-    print(json.dumps({k: v for k, v in result.items() if k not in {"host", "viewer"}}, ensure_ascii=False))
-    updates_ok = len(result["updates"]) == len(args["updates"]) and all(
+    output.write_text(json.dumps(results if matrix else results[0], ensure_ascii=False,
+                                 indent=2, default=list), encoding="utf-8")
+    for result in results:
+        print(json.dumps({k: v for k, v in result.items() if k not in {"host", "viewer"}}, ensure_ascii=False))
+    return int(any(not passed(result, args["updates"]) for result in results))
+
+
+def passed(result, updates):
+    updates_ok = len(result["updates"]) == len(updates) and all(
         change["applied"] is not None and
         [change["applied"][k] for k in ("width", "height", "fps")] == change["requested"] and
         change["last_frame_size"] == change["requested"][:2] and
@@ -187,8 +274,8 @@ def main():
         and change["transport_preserved"] and change["control_preserved"]
         and change["audio_preserved"] and change["pts_monotonic"]
         for change in result["updates"])
-    return int(bool(result["errors"]) or not result["frames"] or
-               not result["closed_cleanly"] or not result["workers_stopped"] or not updates_ok)
+    return (not result["errors"] and result.get("meets_target", False)
+            and result["closed_cleanly"] and result["workers_stopped"] and updates_ok)
 
 
 if __name__ == "__main__":

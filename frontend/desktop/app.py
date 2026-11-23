@@ -86,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
     ensure_dirs(root)
     _configure_logging(os.environ.get("ELINK_LOG_LEVEL", "INFO"))
 
+    from PySide6.QtGui import QSurfaceFormat
+    from .ui.video_surface import video_surface_format
+
+    QSurfaceFormat.setDefaultFormat(video_surface_format())
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)

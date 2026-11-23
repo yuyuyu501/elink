@@ -446,6 +446,12 @@ class StreamWindow(QWidget):
             if isinstance(action, QWidgetAction):
                 self.picture_menu.removeAction(action)
                 action.deleteLater()
+        display = QComboBox(editor)
+        for title, mode in (("自动", "auto"), ("GPU 纹理显示", "gpu"), ("CPU 兼容显示", "cpu")):
+            display.addItem(title, mode)
+        display.setCurrentIndex(display.findData(self.preview.display_mode))
+        display.currentIndexChanged.connect(lambda _: self.preview.set_display_mode(display.currentData()))
+        editor.layout().insertRow(3, "显示方式", display)
         self._menu_widget(self.picture_menu, editor)
         editor.finished.connect(self._picture_done)
 

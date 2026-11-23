@@ -82,32 +82,63 @@ class PreviewWidget(QWidget):
         self._native_frame = None
         self._surface = self._overlay = None
         self._gpu_failed = False
+        self.display_mode = "auto"
+        self.actual_display_mode = None
+        self._drawn_frame = None
 
     # ---- 数据 ----
+    def set_display_mode(self, mode):
+        if mode == self.display_mode:
+            return
+        self.display_mode = mode
+        if self._native_frame is not None:
+            self.set_frame(self._native_frame)
+
+    def frame_drawn(self, mode):
+        self.actual_display_mode = mode
+        if self._native_frame is not self._drawn_frame:
+            self._drawn_frame = self._native_frame
+            self.presented.emit()
+
     def set_frame(self, frame: Frame) -> None:
         if frame.width <= 0 or frame.height <= 0:
             return
         self._native_frame = frame
         if (frame.owner is not None and frame.pixel_format.value in {"nv12", "yuv420p"}
+                and self.display_mode != "cpu"
                 and QApplication.platformName() not in {"offscreen", "minimal"} and not self._gpu_failed):
             try:
                 if self._surface is None:
                     from .video_surface import YuvSurface, VideoOverlay
                     self._surface, self._overlay = YuvSurface(self), VideoOverlay(self)
                     self._surface.failed.connect(self._gpu_fallback)
-                self._source_size = QSize(frame.width, frame.height)
+                    QTimer.singleShot(1000, self._check_gpu_context)
+                    self._surface.setGeometry(self.rect())
+                    self._overlay.setGeometry(self.rect())
+                size = QSize(frame.width, frame.height)
+                refresh_overlay = size != self._source_size
+                self._source_size = size
                 self._frame_pts = frame.pts
                 if self._cursor_boundary is not None and frame.pts >= self._cursor_boundary:
                     self._cursor_boundary = None
+                    refresh_overlay = True
                 self._frames += 1
-                self._info = f"{frame.width}×{frame.height} · 第 {self._frames} 帧"
-                self._surface.setGeometry(self.rect())
-                self._overlay.setGeometry(self.rect())
-                self._surface.show()
-                self._overlay.show()
-                self._overlay.raise_()
+                info = f"{frame.width}×{frame.height}"
+                if info != self._info:
+                    self._info = info
+                    refresh_overlay = True
+                self._image = self._pixels = None
+                self._scaled = self._scaled_key = None
+                self._paint_pending = False
+                if self._surface.isHidden():
+                    self._surface.show()
+                    if self._gpu_failed:
+                        return
+                    self._overlay.show()
+                    self._overlay.raise_()
+                if refresh_overlay:
+                    self._overlay.update()
                 self._surface.set_frame(frame.owner)
-                self._overlay.update()
                 return
             except Exception as exc:
                 self._gpu_fallback(str(exc))
@@ -140,6 +171,7 @@ class PreviewWidget(QWidget):
         self.release_input()
         self._image = None
         self._native_frame = None
+        self._drawn_frame = self.actual_display_mode = None
         if self._surface:
             self._surface.frame = None
             self._surface.hide()
@@ -190,7 +222,11 @@ class PreviewWidget(QWidget):
             self._surface.hide()
             self._overlay.hide()
         if self._native_frame is not None:
-            self.set_frame(self._native_frame.bgra())
+            self.set_frame(self._native_frame)
+
+    def _check_gpu_context(self):
+        if self._surface is not None and self._surface.isVisible() and not self._surface.isValid():
+            self._gpu_fallback("OpenGL context creation failed")
 
     @property
     def source_size(self) -> QSize:
@@ -508,7 +544,7 @@ class PreviewWidget(QWidget):
         painter.restore()
         if self._paint_pending:
             self._paint_pending = False
-            self.presented.emit()
+            self.frame_drawn("cpu")
         self._paint_overlays(painter, target)
 
     def _paint_overlays(self, painter, target):

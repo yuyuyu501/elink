@@ -257,7 +257,9 @@ class RtcSession:
         from backend.pipeline.receive_pipeline import ReceivePipelineStats
         from backend.media.stream import StreamInfo
         from backend.media.video.codec.inprocess import InprocessEncoder
-        from backend.transport.webrtc.media_track import DesktopTrack, LoopbackTrack, SelectedEncoder, tune_receiver
+        from backend.transport.webrtc.media_track import (
+            DesktopTrack, EncodeAhead, LoopbackTrack, SelectedEncoder, tune_receiver,
+        )
         from backend.qos.pacing import install_rtp_pacer
         # Keep the negotiated H.264 level consistent with 1080p120/4K60.
         with _capability_lock:
@@ -287,6 +289,7 @@ class RtcSession:
                 raise NetworkError("WebRTC 编码器需要可用的进程内实现")
             sender = self.pc.addTrack(video)
             sender._RTCRtpSender__encoder = SelectedEncoder(self.encoder, stats, self.fail)
+            self._encode_ahead = EncodeAhead(sender)
             self.tracks.append(LoopbackTrack(
                 lambda exc: self.service.log.emit(f"系统声音采集不可用：{exc}", "warn")))
             self.pc.addTrack(self.tracks[-1])
@@ -351,19 +354,20 @@ class RtcSession:
         previous = {key: getattr(self.settings, key) for key in ("width", "height", "fps", "bitrate_kbps")}
         track = next(t for t in self.tracks if t.kind == "video")
         capture_changed = any(picture[k] != previous[k] for k in ("width", "height", "fps"))
-        try:
-            if capture_changed:
-                await asyncio.wrap_future(track.request_update(picture))
-            stream = self.encoder.stream.copy_with(
-                width=picture["width"], height=picture["height"], framerate=picture["fps"])
-            config = replace(self.config.encode, width=picture["width"], height=picture["height"],
-                             framerate=picture["fps"], bitrate_kbps=picture["bitrate_kbps"],
-                             encoder=selection["encoder"])
-            await asyncio.wrap_future(self.encoder.request_update(stream, config))
-        except Exception:
-            if capture_changed:
-                await asyncio.wrap_future(track.request_update(previous))
-            raise
+        async with self._encode_ahead.ordered_update():
+            try:
+                if capture_changed:
+                    await asyncio.wrap_future(track.request_update(picture))
+                stream = self.encoder.stream.copy_with(
+                    width=picture["width"], height=picture["height"], framerate=picture["fps"])
+                config = replace(self.config.encode, width=picture["width"], height=picture["height"],
+                                 framerate=picture["fps"], bitrate_kbps=picture["bitrate_kbps"],
+                                 encoder=selection["encoder"])
+                await asyncio.wrap_future(self.encoder.request_update(stream, config))
+            except Exception:
+                if capture_changed:
+                    await asyncio.wrap_future(track.request_update(previous))
+                raise
         self.config.encode = config
         self.settings = replace(self.settings, **picture, encoder=selection["encoder"])
         self.service._host_live = self.settings
@@ -483,6 +487,8 @@ class RtcSession:
         finally:
             for track in self.tracks:
                 await track.close()
+            if hasattr(self, "_encode_ahead"):
+                await self._encode_ahead.close()
             if self.adapter:
                 self.adapter.close()
             if self.encoder:

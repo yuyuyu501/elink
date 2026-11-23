@@ -18,13 +18,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 from PySide6.QtNetwork import QTcpSocket
+from PySide6.QtWidgets import QApplication
 
 from frontend.desktop.connection import DesktopConnection, PROTOCOL, picture_settings
 from frontend.desktop.service import HostSettings, SessionService, ViewerSettings
 from frontend.desktop.settings import UiSettings, _merge
 from backend.transport.srt import SrtTransport
 
-APP = QCoreApplication.instance() or QCoreApplication([])
+APP = QApplication.instance() or QApplication([])
 
 def setUpModule():
     global _test_data, _test_environment
@@ -733,6 +734,7 @@ class MediaIntegrationTests(unittest.TestCase):
             return original(adapter, frame)
         with patch.object(InprocessEncoder, "encode", encode):
             result = run(seconds=.2, width=320, height=240, fps=60, synthetic=True,
+                         warmup=0, display="cpu",
                          updates=[(640, 360, 120), (352, 240, 90), (320, 240, 30)])
         self.assertEqual(len(result["updates"]), 3, result)
         for change, size in zip(result["updates"], ([640, 360], [640, 360], [320, 240])):
@@ -750,13 +752,18 @@ class MediaIntegrationTests(unittest.TestCase):
 
     def test_webrtc_uses_real_media_and_stops_workers(self):
         from scripts.benchmark_remote import run
-        result = run(transport="webrtc", seconds=.5, width=320, height=240, fps=60, synthetic=True)
+        result = run(transport="webrtc", seconds=.5, width=320, height=240, fps=60, synthetic=True,
+                     warmup=0, display="cpu")
         self.assertFalse(result["errors"])
         self.assertGreater(result["frames"], 10)
         self.assertTrue(result["closed_cleanly"])
         self.assertTrue(result["workers_stopped"])
         self.assertEqual(result["host"]["settings"]["transport"], "webrtc")
         self.assertEqual(result["viewer"]["settings"]["decoder"], "h264")
+        measurement = result["measurement"]
+        self.assertEqual(measurement["display_mode"], "cpu")
+        self.assertGreater(measurement["drawn_fps"], 0)
+        self.assertLessEqual(measurement["drawn_fps"], measurement["delivered_fps"] + 2)
 
     def test_srt_picture_update_and_reconnect_with_real_encoder_decoder(self):
         from types import SimpleNamespace

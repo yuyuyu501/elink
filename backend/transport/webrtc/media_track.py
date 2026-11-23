@@ -115,6 +115,7 @@ import asyncio
 import queue
 import threading
 from collections import deque
+from contextlib import asynccontextmanager
 
 import av
 from aiortc import MediaStreamTrack
@@ -210,6 +211,59 @@ class DesktopTrack(MediaStreamTrack):
     async def close(self):
         self.stop()
         await asyncio.to_thread(self._worker.join, 5)
+
+
+class EncodeAhead:
+    """Keep one encoded frame in flight while aiortc sends the previous one."""
+
+    def __init__(self, sender):
+        self._encode = sender._next_encoded_frame
+        self._task = None
+        self._paused = False
+        self._closed = False
+        self._drained = asyncio.Event()
+        run = sender._run_rtp
+
+        async def run_rtp(codec):
+            try:
+                await run(codec)
+            finally:
+                await self.close()
+
+        sender._next_encoded_frame = self.next_frame
+        sender._run_rtp = run_rtp
+
+    async def next_frame(self, codec):
+        if self._closed:
+            raise MediaStreamError
+        if self._task is None:
+            self._drained.set()
+            self._task = asyncio.create_task(self._encode(codec))
+        frame = await asyncio.shield(self._task)
+        self._task = None if self._paused else asyncio.create_task(self._encode(codec))
+        return frame
+
+    @asynccontextmanager
+    async def ordered_update(self):
+        self._paused = True
+        self._drained.clear()
+        try:
+            await self._drained.wait()
+            if self._closed:
+                raise MediaStreamError
+            yield
+        finally:
+            self._paused = False
+
+    async def close(self):
+        self._closed = True
+        self._drained.set()
+        # aiortc has stopped the track; let an encoder executor call finish
+        # before the session releases the codec context.
+        task = self._task
+        if task is not None:
+            await asyncio.gather(asyncio.shield(task), return_exceptions=True)
+            self._task = None
 
 
 class SelectedEncoder(H264Encoder):
