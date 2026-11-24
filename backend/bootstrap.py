@@ -80,7 +80,8 @@ def prepare_environment(config: AppConfig) -> tuple[ProbeResult, CodecRegistry]:
         config.mode == "receive" and config.transport.kind == "file"
     ):
         kind = "decoders" if field == "decoder" else "encoders"
-        snapshot = probe_video_codecs(config.encode.ffmpeg_path)
+        snapshot = probe_video_codecs(config.encode.ffmpeg_path,
+                                      on_demand_keyframes=config.encode.on_demand_keyframes)
         names = [name for name, item in snapshot[kind].items()
                  if item["codec"] == config.encode.codec and item["state"] == "available"]
         if not names:

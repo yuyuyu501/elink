@@ -41,7 +41,7 @@ def hover_action(menu, action):
 
 def save_menu_view(stream, name):
     widgets = [stream] + [menu for menu in
-                          (stream.panel, stream.picture_menu, stream.mouse_menu, stream.sr_menu)
+                          (stream.panel, stream.picture_menu, stream.mouse_menu)
                           if menu.isVisible()]
     bounds = stream.frameGeometry()
     for widget in widgets[1:]:
@@ -432,28 +432,25 @@ class WindowConnectionTests(unittest.TestCase):
         APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_hover_submenus_switch_keep_slider_input_local_and_fit_screen(self):
-        self.window._session_connected(ViewerSettings(sr_enabled=True))
+        self.window._session_connected(ViewerSettings())
         stream = self.window._stream_window
         stream.set_session_active(True)
         stream.resize(640, 400)
         stream.toggle_controls()
         hover_action(stream.panel, stream.mouse_menu.menuAction())
         self.assertTrue(stream.mouse_menu.isVisible())
-        hover_action(stream.panel, stream.sr_menu.menuAction())
-        self.assertTrue(stream.sr_menu.isVisible())
-        self.assertFalse(stream.mouse_menu.isVisible())
-        QTest.mouseMove(stream.sr_percent, stream.sr_percent.rect().center())
+        QTest.mouseMove(stream.sensitivity, stream.sensitivity.rect().center())
         QTest.qWait(50)
-        self.assertTrue(stream.sr_menu.isVisible())
+        self.assertTrue(stream.mouse_menu.isVisible())
         self.assertFalse(stream.preview.captured)
         available = stream.screen().availableGeometry()
-        for menu in (stream.panel, stream.sr_menu):
+        for menu in (stream.panel, stream.mouse_menu):
             self.assertTrue(available.contains(menu.frameGeometry()), menu.frameGeometry())
-        save_menu_view(stream, "upscale")
-        QTest.keyClick(stream.sr_percent, Qt.Key.Key_Escape)
+        save_menu_view(stream, "mouse")
+        QTest.keyClick(stream.sensitivity, Qt.Key.Key_Escape)
         APP.processEvents()
         self.assertFalse(stream.panel.isVisible())
-        self.assertFalse(stream.sr_menu.isVisible())
+        self.assertFalse(stream.mouse_menu.isVisible())
 
     def test_embedded_picture_applies_once_and_menu_cancel_discards_draft(self):
         self.window._session_connected(ViewerSettings())
@@ -547,31 +544,6 @@ class WindowConnectionTests(unittest.TestCase):
         dialog.close()
         dialog.deleteLater()
 
-    def test_upscale_controls_only_commit_slider_on_release_and_follow_enable(self):
-        self.window._session_connected(ViewerSettings())
-        stream = self.window._stream_window
-        stream.set_session_active(True)
-        events = []
-        stream.preference_changed.connect(lambda *v: events.append(v))
-        stream.apply_settings(ViewerSettings(sr_enabled=False))
-        self.assertFalse(stream.sr_percent.isEnabled())
-        self.assertFalse(stream.sr_sharpen.isEnabled())
-        stream.apply_settings(ViewerSettings(sr_enabled=True, sr_percent=50, sr_sharpen=True))
-        self.assertEqual((stream.sr_percent.minimum(), stream.sr_percent.maximum()), (33, 100))
-        self.assertEqual(stream.sr_percent.value(), 50)
-        self.assertTrue(stream.sr_sharpness.isEnabled())
-        self.assertFalse(events)
-        stream.preference_changed.disconnect(self.window._viewer_preference)
-        stream.sr_percent.setSliderDown(True)
-        stream.sr_percent.setValue(40)
-        self.assertFalse(events)
-        stream.sr_percent.setSliderDown(False)
-        self.assertEqual(events, [("sr_percent", 40)])
-        stream.set_upscale_capabilities({"fsr": {"state": "available", "message": "ok"},
-                                        "rtx": {"state": "unobserved", "message": "not observed"}})
-        self.assertTrue(stream.sr_mode.model().item(1).isEnabled())
-        self.assertIn("not observed", stream.sr_status.text())
-
     def test_overlay_uses_measured_units_expiry_and_shared_persisted_toggle(self):
         from frontend.desktop.service import SessionStats
         self.window._session_connected(ViewerSettings(control_enabled=True))
@@ -613,14 +585,8 @@ class WindowConnectionTests(unittest.TestCase):
         stream.set_session_active(True, settings_ready=False)
         self.assertTrue(stream._active)
         self.assertFalse(stream.picture_button.isEnabled())
-        self.assertFalse(stream.sr_mode.parentWidget().isEnabled())
-        self.window.connection.phase = "updating"
-        previous = self.window._viewer_settings.sr_percent
-        self.window._viewer_preference("sr_percent", 50)
-        self.assertEqual(self.window._viewer_settings.sr_percent, previous)
         stream.set_session_active(True)
         self.assertTrue(stream.picture_button.isEnabled())
-        self.assertTrue(stream.sr_mode.parentWidget().isEnabled())
 
     def test_removed_switches_and_manual_host_entry_are_absent(self):
         self.assertFalse(hasattr(self.window.settings_page, "discovery_row"))
@@ -631,7 +597,7 @@ class WindowConnectionTests(unittest.TestCase):
         stream = self.window._stream_window
         self.assertNotIn("clipboard_enabled", stream.preferences)
         self.assertNotIn("gamepad_enabled", stream.preferences)
-        self.assertFalse(hasattr(stream, "sr_refresh"))
+        self.assertNotIn("超分", [action.text() for action in stream.panel.actions()])
         from PySide6.QtWidgets import QPushButton
         texts = [button.text() for button in stream.findChildren(QPushButton)]
         for text in ("截图", "导出性能报告", "释放键鼠输入"):

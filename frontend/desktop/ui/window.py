@@ -73,7 +73,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.root = root or user_settings.data_dir()
         self.service = SessionService(self)
-        self.service.upscale_changed.connect(self._upscale_capabilities)
         self._auto_refresh = auto_refresh
         self._native_frame_patched = False
         self._active_mode = ""  # 最近一次启动的模式：帧/统计可能晚于 mode 清零到达
@@ -492,8 +491,6 @@ class MainWindow(QMainWindow):
         window.stats_toggled.connect(self._toggle_stats_overlay)
         window.picture_requested.connect(self._edit_picture)
         window.preference_changed.connect(self._viewer_preference)
-        window.upscale_cancel.connect(self.service.cancel_upscale_probe)
-        window.set_upscale_capabilities(self.service.upscale_capabilities, self.service.upscale_status)
         window.preview.bind_input(self.service.send_input, self.service.set_input_focus)
         window.preview.input_error.connect(self.service._input_failure)
         window.preview.presented.connect(self.service.frame_presented)
@@ -502,11 +499,6 @@ class MainWindow(QMainWindow):
         self._stream_window = window
         window.show()
         window.activateWindow()
-
-    def _upscale_capabilities(self):
-        if self._stream_window is not None:
-            self._stream_window.set_upscale_capabilities(
-                self.service.upscale_capabilities, self.service.upscale_status)
 
     def _on_stream_closed(self) -> None:
         self._close_picture_dialog()
@@ -611,11 +603,6 @@ class MainWindow(QMainWindow):
 
     def _connection_changed(self) -> None:
         phase = self.connection.phase
-        if phase == "active" and self.connection.role == "viewer":
-            for name in ("sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness"):
-                setattr(self._viewer_settings, name, getattr(self.connection._viewer, name))
-            if self._stream_window is not None:
-                self._stream_window.apply_settings(self._viewer_settings)
         self._on_peers(self.discovery.peers())
         if self._stream_window:
             self._stream_window.set_session_active(
@@ -635,8 +622,7 @@ class MainWindow(QMainWindow):
         self._sync_discovery_hosting()
 
     def _session_connected(self, settings: ViewerSettings) -> None:
-        self._viewer_settings = replace(settings, stream_width=settings.output_width,
-                                        stream_height=settings.output_height) if settings.sr_enabled else replace(settings)
+        self._viewer_settings = replace(settings)
         self._active_mode = "viewer"
         self._open_stream_window()
         self._stream_window.apply_settings(self._viewer_settings)
@@ -672,34 +658,20 @@ class MainWindow(QMainWindow):
             self._stream_window.set_input_available(available)
 
     def _viewer_preference(self, name: str, value) -> None:
-        if name.startswith("sr_") and self.connection.phase not in {"active", "idle"}:
-            return
         if self._stream_window is not None:
             self._stream_window.release_input()
         if name not in {"mouse_mode", "mouse_sensitivity", "clipboard_enabled", "gamepad_enabled",
-                        "sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness", "muted"}:
+                        "muted"}:
             return
-        previous = replace(self._viewer_settings)
         setattr(self._viewer_settings, name, value)
+        setattr(self.connection._viewer, name, value)
         if name == "muted":
             self.service.set_muted(value)
-        if name.startswith("sr_") and not self._viewer_settings.sr_enabled and name != "sr_enabled":
-            setattr(self.connection._viewer, name, value)
-            self._persist_ui()
-            if self._stream_window is not None:
-                self._stream_window.apply_settings(self._viewer_settings)
-            return
-        if not name.startswith("sr_"):
-            setattr(self.connection._viewer, name, value)
         if name == "clipboard_enabled":
             self.service.set_clipboard_enabled(value and self._viewer_settings.control_enabled)
         elif name == "gamepad_enabled":
             self.service.set_gamepad_enabled(value and self._viewer_settings.control_enabled,
                                             self._viewer_settings)
-        elif name.startswith("sr_") and self.connection.phase == "active":
-            self.connection.configure(saved_picture(self._viewer_settings), upscale=self._viewer_settings)
-            if self.connection.phase == "active":
-                self._viewer_settings = previous
         if self._stream_window is not None:
             self._stream_window.apply_settings(self._viewer_settings)
             self._stream_window.set_session_active(
@@ -710,8 +682,7 @@ class MainWindow(QMainWindow):
             if self._stream_window is not None:
                 self._stream_window.preview.request_mouse_mode()
             self.service.set_mouse_mode(value)
-        if not name.startswith("sr_") or self.connection.phase == "idle":
-            self._persist_ui()
+        self._persist_ui()
 
     def _picture_applied(self, picture: dict) -> None:
         if self.connection._peer:

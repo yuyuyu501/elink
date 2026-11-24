@@ -29,7 +29,6 @@ frontend/desktop/
     ├── pages.py      # 总览 / 主机 / 观看 / 设备与发现 / 日志
     ├── settings_page.py # 设置：常规、发现、数据与诊断、关于
     ├── stream_window.py # 独立全屏播放器 + 悬浮控制栏
-    ├── upscale.py    # FSR 1 / RTX VSR 超分（GL 离屏与 D3D11 原生 DLL）
     ├── preview.py    # 深色预览（BGRA → QImage，状态徽章 + HUD + F10 统计）
     └── widgets.py    # 卡片 / 胶囊 / 开关 / 提示条 / 指标 / 标题栏 / 英雄区
 ```
@@ -47,9 +46,7 @@ python main.py --self-test out/self-test.json
 
 - **远控**：主机按需采集并编码，经 WebRTC 发送画面和声音；控制端用 DataChannel 转发
   键鼠、剪贴板和手柄。观看模式不转发输入。
-- **画面**：接收并解码 WebRTC 视频，
-  开启「超分」后由 `upscale.py` 在 FSR 1（离屏 OpenGL EASU+RCAS）或 RTX VSR
-（`elink_video.dll`）重建，
+- **画面**：接收并解码 WebRTC 视频，按窗口大小缩放显示。
   F11 打开独立全屏播放器，F8 释放输入，F10 叠加连接统计。
 - **主机**：可接收对端剪贴板文本；手柄事件通过 ViGEmBus 注入为虚拟 Xbox 360 手柄
   （需系统安装 ViGEmBus，未安装时不影响键鼠/串流）。

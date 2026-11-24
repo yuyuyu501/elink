@@ -24,26 +24,6 @@ MAX_MESSAGE = 131072
 PICTURE_KEYS = ("width", "height", "fps", "bitrate_kbps")
 
 
-def output_picture(picture):
-    result = {key: picture[key] for key in PICTURE_KEYS}
-    if "upscale" in picture:
-        result.update(width=picture["upscale"]["width"], height=picture["upscale"]["height"])
-    return result
-
-
-def stream_picture(picture, viewer):
-    result = picture_settings(picture)
-    if viewer.sr_enabled:
-        result["upscale"] = {
-            "width": result["width"], "height": result["height"],
-            "percent": viewer.sr_percent, "mode": viewer.sr_mode,
-            "sharpen": viewer.sr_sharpen, "sharpness": viewer.sr_sharpness,
-        }
-        for axis in ("width", "height"):
-            result[axis] = max(2, int(result[axis] * viewer.sr_percent / 100) & ~1)
-    return picture_settings(result)
-
-
 picture_settings = user_settings.picture_settings
 
 
@@ -86,7 +66,6 @@ class DesktopConnection(QObject):
         self._ping_token = None
         self._closing = False
         self._codec_enabled = False
-        self._upscale_enabled = False
         self._peer_caps = None
         self._selection = None
         self._prior_selection = None
@@ -134,7 +113,7 @@ class DesktopConnection(QObject):
             return
         if self.role == "host" and self.phase == "negotiating" and not self._offer_sent:
             self._offer_sent = True
-            self._send("capabilities", capabilities=local, upscale=True,
+            self._send("capabilities", capabilities=local,
                        live_settings=hasattr(self.service, "update_live"))
         elif self.role == "viewer" and self.phase == "negotiating" and self._peer_caps is not None:
             self._begin_choices()
@@ -274,7 +253,6 @@ class DesktopConnection(QObject):
         self._stop_deadline = 0.0
         self._ping_token = None
         self._codec_enabled = False
-        self._upscale_enabled = False
         self._live_enabled = False
         self._live = None
         self._live_committing = False
@@ -313,10 +291,9 @@ class DesktopConnection(QObject):
             self.error.emit(str(exc))
             return
         self._peer, self._viewer = dict(peer), replace(viewer)
-        self._picture, self._previous, self._control = stream_picture(picture, viewer), None, control
+        self._picture, self._previous, self._control = picture, None, control
         if hasattr(self.service, "refresh_codecs"):
             self.service.refresh_codecs(viewer.ffmpeg_path)
-            self.service.refresh_upscale(force=True) if hasattr(self.service, "refresh_upscale") else None
         try:
             self._preferences = codec_options(viewer.codec_preferences.get(str(peer["id"]), {"codec": "h264"}))
         except (ValueError, AttributeError):
@@ -327,8 +304,7 @@ class DesktopConnection(QObject):
             "request", target=peer["id"], control=control, picture=picture,
             codec_selection=hasattr(self.service, "refresh_codecs"),
             transport="webrtc",
-            live_settings=hasattr(self.service, "update_live"),
-            upscale=True, upscale_picture=self._picture)
+            live_settings=hasattr(self.service, "update_live"))
             if sock is self.socket and self.phase == "connecting" else None)
         sock.connectToHost(peer["ip"], port)
 
@@ -421,10 +397,8 @@ class DesktopConnection(QObject):
         elif self.role == "host" and kind == "request" and self.phase == "connecting":
             if message.get("target") != self.identity or not message.get("id"):
                 raise ValueError("目标设备不匹配")
-            self._upscale_enabled = message.get("upscale") is True
             self._live_enabled = message.get("live_settings") is True and hasattr(self.service, "update_live")
-            self._picture = picture_settings(message.get("upscale_picture", message["picture"])
-                                             if self._upscale_enabled else message["picture"])
+            self._picture = picture_settings(message["picture"])
             if not isinstance(message.get("control"), bool):
                 raise ValueError("会话模式无效")
             self._control = message["control"]
@@ -442,11 +416,7 @@ class DesktopConnection(QObject):
                 self._start_host()
         elif kind == "capabilities" and self.role == "viewer" and self.phase in {"connecting", "negotiating"}:
             self._codec_enabled = True
-            self._upscale_enabled = message.get("upscale") is True
             self._live_enabled = message.get("live_settings") is True and hasattr(self.service, "update_live")
-            if not self._upscale_enabled:
-                self._picture = output_picture(self._picture)
-                self._viewer = replace(self._viewer, sr_enabled=False)
             self._peer_caps = checked_capabilities(message["capabilities"])
             self.phase = "negotiating"
             self._capabilities_ready()
@@ -541,7 +511,6 @@ class DesktopConnection(QObject):
             self._picture = picture_settings(message["picture"])
             if message.get("transport") != "webrtc":
                 raise ValueError("对端版本不兼容：仅支持 WebRTC")
-            self._upscale_enabled = message.get("upscale") is True
             if self._codec_enabled:
                 self._selection = codec_options(message["selection"])
                 if self._selection not in compatible_choices(self._peer_caps, self.service.codec_capabilities, self._selection):
@@ -550,17 +519,11 @@ class DesktopConnection(QObject):
             self.phase = "receiving"
             self._started = time.monotonic()
             self._update_error_context()
-            sr = self._picture.get("upscale")
             self._viewer = replace(
                 self._viewer, transport="webrtc", control_enabled=self._control,
                 session_token=self._session_id,
                 clipboard_enabled=True, gamepad_enabled=True,
                 **{f"stream_{key}": self._picture[key] for key in PICTURE_KEYS},
-                output_width=sr["width"] if sr else self._picture["width"],
-                output_height=sr["height"] if sr else self._picture["height"],
-                sr_enabled=sr is not None,
-                **({"sr_percent": sr["percent"], "sr_mode": sr["mode"],
-                    "sr_sharpen": sr["sharpen"], "sr_sharpness": sr["sharpness"]} if sr else {}),
                 **({"stream_codec": self._selection["codec"], "decoder": self._selection["decoder"]}
                    if self._selection else {"decoder": "h264"}),
             )
@@ -647,15 +610,14 @@ class DesktopConnection(QObject):
                 self._picture = {**self._picture, "width": actual.width, "height": actual.height}
             # Older WebRTC clients validate these unused port fields.
             self._send("ready", srt_port=9000, control_port=7000, transport="webrtc",
-                       picture=self._picture, upscale=True, live_settings=hasattr(self.service, "update_live"), **({
+                       picture=self._picture, live_settings=hasattr(self.service, "update_live"), **({
                            "selection": self._selection, "revision": self._revision, "rollback": self._rollback
                        } if self._codec_enabled else {}))
 
     def _frame(self, _frame) -> None:
         if self.role == "viewer" and self.phase == "receiving":
             if self._live_committing:
-                expected = (self._viewer.output_width, self._viewer.output_height) if self._viewer.sr_enabled else (
-                    self._picture["width"], self._picture["height"])
+                expected = (self._picture["width"], self._picture["height"])
                 if (getattr(_frame, "width", expected[0]), getattr(_frame, "height", expected[1])) != expected:
                     return
                 self._live_committing = False
@@ -670,19 +632,16 @@ class DesktopConnection(QObject):
             self._viewer = replace(
                 self._viewer, **{f"stream_{key}": self._picture[key] for key in PICTURE_KEYS}
             )
-            self.picture_applied.emit(output_picture(self._picture))
+            self.picture_applied.emit(dict(self._picture))
             self.changed.emit()
 
-    def configure(self, picture: dict, *, upscale=None) -> None:
+    def configure(self, picture: dict) -> None:
         if self.role != "viewer" or self.phase not in {"active", "selection"}:
             return
         self._clear_failure()
         try:
             options = codec_options(picture) if "codec" in picture else self._applied_options
-            settings = upscale if upscale is not None else self._viewer
-            if settings.sr_enabled and not self._upscale_enabled:
-                raise ValueError("对端版本不支持超分压缩比")
-            picture = stream_picture(picture, settings)
+            picture = picture_settings(picture)
         except ValueError as exc:
             self._report(exc)
             self.error.emit(str(exc))
@@ -698,10 +657,7 @@ class DesktopConnection(QObject):
                 if selection["codec"] == self._selection["codec"]:
                     viewer = replace(
                         self._viewer, decoder=selection["decoder"],
-                        **{f"stream_{key}": picture[key] for key in PICTURE_KEYS},
-                        output_width=output_picture(picture)["width"], output_height=output_picture(picture)["height"],
-                        **{name: getattr(settings, name) for name in (
-                            "sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness")})
+                         **{f"stream_{key}": picture[key] for key in PICTURE_KEYS})
                     self._revision += 1
                     self._live = {"picture": picture, "selection": selection, "options": options,
                                   "viewer": viewer, "stage": "viewer"}
@@ -739,13 +695,13 @@ class DesktopConnection(QObject):
             self._live = None
             self.phase = "active"
             if reason:
-                self.picture_applied.emit(output_picture(self._picture))
+                self.picture_applied.emit(dict(self._picture))
             self._send("live_applied", message=reason, picture=self._picture)
         elif pending["stage"] == "rollback" or reason:
             self.error.emit(reason or pending["error"])
             self._live = None
             self.phase = "active"
-            self.picture_applied.emit(output_picture(self._picture))
+            self.picture_applied.emit(dict(self._picture))
         else:
             pending["stage"] = "host"
             self._started = time.monotonic()

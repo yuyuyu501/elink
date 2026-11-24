@@ -49,6 +49,7 @@ class VideoEncodeConfig:
     width: int = 0
     height: int = 0
     framerate: float = 0.0
+    on_demand_keyframes: bool = False
 
 
 @dataclass

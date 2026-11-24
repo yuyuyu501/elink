@@ -101,13 +101,6 @@ class ViewerSettings:
     clipboard_enabled: bool = True
     gamepad_enabled: bool = True
     scale_percent: int = 100
-    sr_enabled: bool = False
-    sr_mode: str = "fsr"  # fsr / rtx
-    sr_percent: int = 100
-    sr_sharpen: bool = False
-    sr_sharpness: int = 50
-    output_width: int = 1920
-    output_height: int = 1080
     ffmpeg_path: str = "ffmpeg"
     session_token: str = ""
     motion_port: int = 0
@@ -151,20 +144,13 @@ class _QtRenderer:
     name = "qt_preview"
     native_frames = True
 
-    def __init__(self, emit: Callable[[Frame], None], upscaler=None, *, upscaler_factory=None,
-                 failure=None) -> None:
+    def __init__(self, emit: Callable[[Frame], None]) -> None:
         self._emit = emit
-        self._upscaler = upscaler
-        self._upscaler_factory = upscaler_factory
-        self._failure = failure
         self.frames = 0
         self._condition = threading.Condition()
         self._pending = None
-        self._last_source = None
         self._closed = False
         self._worker = None
-        self._update_factory = None
-        self._update_done = None
         self.prepare_ms = deque(maxlen=4096)
 
     def open(self) -> None:
@@ -180,83 +166,23 @@ class _QtRenderer:
         return True
 
     def _loop(self) -> None:
-        try:
-            if self._upscaler_factory is not None:
-                self._upscaler = self._upscaler_factory()
-            self._prepare_frames()
-        except Exception as exc:
-            if self._failure is not None:
-                self._failure(exc)
-            else:
-                logger.exception("画面处理失败")
-        finally:
-            self._close_upscaler()
-
-    def _close_upscaler(self) -> None:
-        upscaler, self._upscaler = self._upscaler, None
-        if upscaler is not None:
-            try:
-                upscaler.close()
-            except Exception as exc:
-                logger.warning("超分辨率资源释放失败: %s", exc)
-
-    def _prepare_frames(self) -> None:
         while True:
             with self._condition:
-                self._condition.wait_for(lambda: self._closed or self._pending is not None
-                                        or self._update_factory is not None)
+                self._condition.wait_for(lambda: self._closed or self._pending is not None)
                 if self._closed:
                     return
-                factory, done = self._update_factory, self._update_done
-                self._update_factory = self._update_done = None
                 frame, self._pending = self._pending, None
-            if frame is not None:
-                self._last_source = frame
-            if factory is not None and done.set_running_or_notify_cancel():
-                replacement = None
-                try:
-                    replacement = factory()
-                    if replacement is not None and self._last_source is not None:
-                        replacement.upscale(self._last_source)
-                except Exception as exc:
-                    if replacement is not None:
-                        replacement.close()
-                    done.set_exception(exc)
-                else:
-                    self._close_upscaler()
-                    self._upscaler = replacement
-                    done.set_result(None)
-            if frame is None:
-                continue
             started = time.perf_counter()
-            if self._upscaler is not None:
-                try:
-                    frame = self._upscaler.upscale(frame)
-                except Exception as exc:
-                    if self._failure is not None:
-                        raise
-                    logger.warning("FSR 超分辨率失败，回退原帧: %s", exc)
-                    self._close_upscaler()
+            try:
+                self._emit(frame)
+            except Exception:
+                logger.exception("画面处理失败")
             self.prepare_ms.append((time.perf_counter() - started) * 1000)
-            self._emit(frame)
-
-    def update_upscaler(self, factory):
-        from concurrent.futures import Future
-        done = Future()
-        with self._condition:
-            if self._closed:
-                raise RuntimeError("显示线程已退出")
-            if self._update_factory is not None:
-                raise RuntimeError("正在更新显示设置")
-            self._update_factory, self._update_done = factory, done
-            self._condition.notify()
-        return done
 
     def close(self) -> None:
         with self._condition:
             self._closed = True
             self._pending = None
-            self._last_source = None
             self._condition.notify()
         if self._worker is not None:
             self._worker.join(timeout=5)
@@ -330,7 +256,6 @@ class SessionService(QObject):
     _frame_pending = Signal(int)
     capabilities_changed = Signal()
     codec_validated = Signal(int, str)
-    upscale_changed = Signal()
     rtc_signal = Signal(dict)
     live_updated = Signal(int, str)
 
@@ -374,60 +299,15 @@ class SessionService(QObject):
         self._capability_worker = None
         self._capability_cancel = threading.Event()
         self._validation_cancel = threading.Event()
-        self.upscale_capabilities = None
-        self.upscale_status = ""
-        self._upscale_worker = None
-        self._upscale_cancel = threading.Event()
-        self._upscale_checked = 0.0
         self._rtc_inbox = queue.Queue(maxsize=8)
         self._rtc_ready = threading.Event()
         self._expected_stop = threading.Event()
         self._audio_output = None
         self._session_audio = None
         self._rtc_runtime = None
-        self._renderer = None
         self._live_worker = None
         from backend.control_channel.udp_motion import MotionSender
         self._motion_sender = MotionSender()
-
-    def refresh_upscale(self, force=False):
-        if self._upscale_worker is not None and self._upscale_worker.is_alive():
-            return
-        if self.running and self._viewer_live is not None and self._viewer_live.sr_enabled:
-            return
-        if not force and self.upscale_capabilities is not None:
-            return
-        from .upscale import probe_native
-        cancel = self._upscale_cancel = threading.Event()
-        self.upscale_status = "正在检测超分能力…"
-        self.upscale_changed.emit()
-
-        def run():
-            try:
-                snapshot = probe_native(cancel)
-                if not cancel.is_set():
-                    self.upscale_capabilities = snapshot
-                    self._upscale_checked = time.monotonic()
-                    self.upscale_status = ""
-            except Exception as exc:
-                if not cancel.is_set():
-                    self.upscale_status = str(exc)
-            finally:
-                if not cancel.is_set():
-                    self.upscale_changed.emit()
-        self._upscale_worker = threading.Thread(target=run, name="upscale-probe", daemon=True)
-        self._upscale_worker.start()
-
-    def cancel_upscale_probe(self):
-        self._upscale_cancel.set()
-
-    def _upscale_actual(self, mode, state):
-        detail = {"unobserved": "未观察到增强", "bypass": "原尺寸，未放大"}.get(state, "处理中")
-        text = mode.upper() + "：" + detail
-        self._stats.extra["upscale"] = mode
-        if self.upscale_status != text:
-            self.upscale_status = text
-            self.upscale_changed.emit()
 
     def refresh_codecs(self, ffmpeg_path="ffmpeg", *, refresh=False):
         if self._capability_worker is not None and self._capability_worker.is_alive():
@@ -442,7 +322,8 @@ class SessionService(QObject):
 
         def run():
             try:
-                snapshot = probe_video_codecs(ffmpeg_path, refresh=refresh, cancel=cancel)
+                snapshot = probe_video_codecs(ffmpeg_path, refresh=refresh, cancel=cancel,
+                                              on_demand_keyframes=True)
                 if not cancel.is_set():
                     self.codec_capabilities = public_capabilities(snapshot)
             except Exception as exc:
@@ -468,12 +349,13 @@ class SessionService(QObject):
                 config = VideoEncodeConfig(
                     codec=selection["codec"], encoder=selection["encoder"], decoder=selection["decoder"],
                     ffmpeg_path=ffmpeg_path, bitrate_kbps=picture["bitrate_kbps"],
-                    preset="ultrafast", realtime=True, gop=max(1, round(picture["fps"] * 2)))
+                    preset="ultrafast", realtime=True, on_demand_keyframes=True)
                 stream = StreamInfo(codec=CodecId(selection["codec"]), width=width, height=height,
                                     framerate=picture["fps"])
                 create = registry.create_encoder if kind == "encoder" else registry.create_decoder
                 adapter = create(selection["codec"], selection[kind], stream, config)
-                reason = verify_backend(adapter, width=width, height=height, cancel=cancel)
+                reason = verify_backend(adapter, width=width, height=height, cancel=cancel,
+                                        on_demand_keyframes=True, cross_period=False)
             except Exception as exc:
                 reason = str(exc)
             if not cancel.is_set():
@@ -748,10 +630,9 @@ class SessionService(QObject):
 
         async def run():
             nonlocal runtime
-            renderer = (_QtRenderer(self._frame_sink(), upscaler_factory=lambda: self._create_upscaler(settings),
-                                    failure=self._upscale_failure) if self._mode == "viewer" else None)
+            renderer = _QtRenderer(self._frame_sink()) if self._mode == "viewer" else None
             runtime = RtcSession(self, config, settings, renderer)
-            self._rtc_runtime, self._renderer = runtime, renderer
+            self._rtc_runtime = runtime
             if ((self._mode == "host" and settings.allow_inject)
                     or (self._mode == "viewer" and settings.control_enabled)):
                 self._start_clipboard()
@@ -771,7 +652,7 @@ class SessionService(QObject):
                 self.log.emit(f"WebRTC 会话失败：{exc}", "error")
                 self.state_changed.emit("error", str(exc))
         finally:
-            self._rtc_runtime = self._renderer = None
+            self._rtc_runtime = None
             self._finish("WebRTC 已停止")
 
     def _run_host(self, config: AppConfig, filters: list, settings: HostSettings) -> None:
@@ -824,10 +705,7 @@ class SessionService(QObject):
             if self._stop.is_set():
                 return
 
-            pipeline.renderer = _QtRenderer(
-                self._frame_sink(), upscaler_factory=lambda: self._create_upscaler(settings),
-                failure=self._upscale_failure)
-            self._renderer = pipeline.renderer
+            pipeline.renderer = _QtRenderer(self._frame_sink())
 
             self.log.emit(f"观看模式已启动：{settings.file_path}", "info")
             self._stats_worker = threading.Thread(
@@ -843,7 +721,6 @@ class SessionService(QObject):
                 self.log.emit(f"观看模式失败：{exc}", "error")
                 self.state_changed.emit("error", str(exc))
         finally:
-            self._renderer = None
             if runtime is not None:
                 runtime.close()
             self._finish("接收已停止")
@@ -851,7 +728,7 @@ class SessionService(QObject):
     def update_live(self, revision, picture, selection, viewer=None):
         if self._live_worker is not None and self._live_worker.is_alive():
             raise RuntimeError("正在应用上一组设置")
-        runtime, pipeline, renderer = self._rtc_runtime, self._pipeline, self._renderer
+        runtime, pipeline = self._rtc_runtime, self._pipeline
         mode = self._mode
         snapshot = {key: picture[key] for key in ("width", "height", "fps", "bitrate_kbps")}
 
@@ -906,7 +783,6 @@ class SessionService(QObject):
                         self._host_live = replace(previous, **snapshot, encoder=selection["encoder"])
                 else:
                     current = self._viewer_live
-                    switched = None
                     if selection["decoder"] != current.decoder:
                         from backend.registry.codec_registry import build_default_registry
                         registry = build_default_registry(current.ffmpeg_path)
@@ -917,19 +793,6 @@ class SessionService(QObject):
                         if runtime is not None:
                             runtime._receiver_cleanup.request_keyframe()
                         wait(future)
-                        switched = decoder
-                    try:
-                        if renderer is not None:
-                            wait(renderer.update_upscaler(lambda: self._create_upscaler(viewer)))
-                    except Exception:
-                        if switched is not None:
-                            old_config = replace(switched.config, decoder=current.decoder)
-                            future = switched.request_switch(lambda: registry.create_decoder(
-                                current.stream_codec, current.decoder, switched.stream, old_config))
-                            if runtime is not None:
-                                runtime._receiver_cleanup.request_keyframe()
-                            wait(future)
-                        raise
                     self._viewer_live = viewer
                     pipeline.stats.extra["decoder"] = selection["decoder"]
                     if runtime is not None:
@@ -941,28 +804,6 @@ class SessionService(QObject):
         self._live_worker = threading.Thread(target=run, name="session-settings", daemon=True)
         self._live_worker.start()
 
-    def _create_upscaler(self, settings: ViewerSettings):
-        if not settings.sr_enabled:
-            return None
-        self.cancel_upscale_probe()
-        if self._upscale_worker is not None:
-            self._upscale_worker.join(timeout=3)
-            if self._upscale_worker.is_alive():
-                raise RuntimeError("超分检测尚未结束")
-        from .upscale import UpscaleProcessor
-        return UpscaleProcessor(
-            settings.sr_mode, (settings.output_width, settings.output_height),
-            settings.sr_sharpness if settings.sr_sharpen else 0, self._upscale_actual)
-
-    def _upscale_failure(self, exc):
-        self.record_failure(exc)
-        self._upscale_checked = 0.0
-        self.upscale_capabilities = None
-        self.upscale_status = f"超分处理失败：{exc}"
-        self.upscale_changed.emit()
-        self.state_changed.emit("error", self.upscale_status)
-
-    # ---- 内部：控制通道 ----
     def _start_control_server(self, settings: HostSettings) -> None:
         def run() -> None:
             try:
@@ -1436,7 +1277,10 @@ def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
     config.encode.realtime = settings.transport != "file"
     config.encode.bitrate_kbps = settings.bitrate_kbps
     config.encode.ffmpeg_path = settings.ffmpeg_path
-    config.encode.gop = max(1, int(settings.fps * 2))
+    if config.encode.realtime:
+        config.encode.on_demand_keyframes = True
+    else:
+        config.encode.gop = max(1, int(settings.fps * 2))
     config.transport.kind = settings.transport
     config.transport.path = settings.file_path
     config.audio.enabled = settings.transport != "file"

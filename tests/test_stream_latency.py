@@ -322,27 +322,19 @@ class StreamLatencyTests(unittest.TestCase):
         APP.processEvents()
         self.assertEqual([item.pts for item in received], [119 * 750, 122 * 750])
 
-    def test_slow_upscale_processes_latest_pending_frame_only(self):
+    def test_slow_preview_processes_latest_pending_frame_only(self):
         entered, resume, done = threading.Event(), threading.Event(), threading.Event()
-        processed, received = [], []
-
-        class Upscale:
-            def upscale(self, item):
-                processed.append(item.pts)
-                if len(processed) == 1:
-                    entered.set()
-                    resume.wait(2)
-                return item
-
-            def close(self):
-                pass
+        received = []
 
         def deliver(item):
             received.append(item.pts)
+            if len(received) == 1:
+                entered.set()
+                resume.wait(2)
             if item.pts == 120 * 750:
                 done.set()
 
-        renderer = _QtRenderer(deliver, Upscale())
+        renderer = _QtRenderer(deliver)
         renderer.open()
         try:
             renderer.render(frame())
@@ -351,54 +343,11 @@ class StreamLatencyTests(unittest.TestCase):
                 renderer.render(frame(index))
             resume.set()
             self.assertTrue(done.wait(2))
-            self.assertEqual(processed, [0, 120 * 750])
-            self.assertEqual(received, processed)
+            self.assertEqual(received, [0, 120 * 750])
         finally:
             resume.set()
             renderer.close()
 
-    def test_upscaler_is_created_used_and_closed_on_its_worker_thread(self):
-        threads = []
-        ready = threading.Event()
-        class Upscale:
-            def __init__(self):
-                threads.append(threading.get_ident())
-
-            def upscale(self, item):
-                threads.append(threading.get_ident())
-                return item
-
-            def close(self):
-                threads.append(threading.get_ident())
-        renderer = _QtRenderer(lambda _: ready.set(), upscaler_factory=Upscale)
-        renderer.open()
-        renderer.render(frame())
-        self.assertTrue(ready.wait(2))
-        renderer.close()
-        self.assertEqual(len(threads), 3)
-        self.assertEqual(len(set(threads)), 1)
-        self.assertNotEqual(threads[0], threading.get_ident())
-
-    def test_upscale_failure_is_reported_without_emitting_unprocessed_frame(self):
-        failed = threading.Event()
-        received, errors = [], []
-        class Upscale:
-            def upscale(self, item):
-                raise RuntimeError("GPU removed")
-            def close(self):
-                pass
-        def failure(exc):
-            errors.append(str(exc))
-            failed.set()
-        renderer = _QtRenderer(received.append, Upscale(), failure=failure)
-        renderer.open()
-        try:
-            renderer.render(frame())
-            self.assertTrue(failed.wait(2))
-            self.assertEqual(errors, ["GPU removed"])
-            self.assertFalse(received)
-        finally:
-            renderer.close()
     def test_capture_pacing_and_pts_support_30_60_120_fps(self):
         for fps in (30, 60, 120):
             capture = SimpleNamespace(config=SimpleNamespace(fps=fps), read=lambda: frame())
@@ -495,7 +444,7 @@ class LiveCodecTests(unittest.TestCase):
         from backend.config.schema import VideoEncodeConfig
         from backend.media.video.codec.inprocess import InprocessEncoder, InprocessDecoder
         stream = StreamInfo(width=320, height=240, framerate=30)
-        config = VideoEncodeConfig(encoder="libx264", realtime=True)
+        config = VideoEncodeConfig(encoder="libx264", realtime=True, on_demand_keyframes=True)
         encoder = InprocessEncoder(stream, config)
         decoder = InprocessDecoder(stream)
         encoder.open()
@@ -507,6 +456,7 @@ class LiveCodecTests(unittest.TestCase):
             future = encoder.request_update(changed, replace(config, bitrate_kbps=6000))
             frame = Frame(data=bytes((0, 255, 0, 255)) * (640 * 360),
                           width=640, height=360, pts=3000)
+            encoder.force_keyframe = True
             packets = encoder.encode(frame)
             self.assertIsNone(future.result())
             self.assertTrue(packets[0].keyframe)
@@ -514,7 +464,8 @@ class LiveCodecTests(unittest.TestCase):
             self.assertEqual((decoded[0].width, decoded[0].height), (640, 360))
             previous = encoder._context
             future = encoder.request_update(stream, replace(config, encoder="does_not_exist"))
-            self.assertTrue(encoder.encode(frame.with_data(frame.data, pts=6000)))
+            delta, = encoder.encode(frame.with_data(frame.data, pts=6000))
+            self.assertFalse(delta.keyframe)
             self.assertIs(encoder._context, previous)
             with self.assertRaises(Exception):
                 future.result()

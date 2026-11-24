@@ -2,7 +2,6 @@
 
 import base64
 import io
-import os
 import socket
 import struct
 import sys
@@ -42,6 +41,19 @@ def available(codec):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_software_encoders_produce_only_requested_recovery_points(self):
+        import av
+        from backend.media.video.codec.inprocess import InprocessEncoder
+
+        for codec, name in (("h264", "libx264"), ("hevc", "libx265"), ("av1", "libsvtav1")):
+            with self.subTest(codec=codec):
+                if name not in av.codecs_available:
+                    self.skipTest(f"{name} unavailable")
+                stream = StreamInfo(codec=CodecId(codec), width=320, height=240, framerate=30)
+                config = VideoEncodeConfig(codec=codec, encoder=name, on_demand_keyframes=True)
+                self.assertIsNone(verify_backend(InprocessEncoder(stream, config),
+                                                 on_demand_keyframes=True))
+
     def test_inprocess_names_are_valid_and_describe_actual_backend(self):
         from backend.media.video.codec.probe import codec_label
         for codec in PROBE_SAMPLES:
@@ -117,7 +129,10 @@ class SelectionTests(unittest.TestCase):
         return recovery.recover(packet)
 
     def test_cross_vendor_negotiation_and_explicit_format(self):
-        remote = caps("encoders", {"h264_nvenc": available("h264"), "libx265": available("hevc")})
+        remote = caps("encoders", {"h264_nvenc": available("h264"), "libx265": available("hevc"),
+                                  "hevc_nvenc": {"codec": "hevc", "state": "unavailable",
+                                                 "reason": "missing recovery point"}})
+        remote = public_capabilities(remote)
         local = caps("decoders", {"h264_qsv": available("h264"), "hevc": available("hevc")})
         self.assertEqual(compatible_choices(remote, local, {})[0],
                          {"codec": "h264", "encoder": "h264_nvenc", "decoder": "h264_qsv"})

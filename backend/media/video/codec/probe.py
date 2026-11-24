@@ -391,7 +391,8 @@ def _sample_packets(codec):
             for index, data in enumerate(units)]
 
 
-def verify_backend(adapter, *, width=320, height=240, cancel=None, timeout=8.0) -> str | None:
+def verify_backend(adapter, *, width=320, height=240, cancel=None, timeout=8.0,
+                   on_demand_keyframes=False, cross_period=True) -> str | None:
     """Exercise the actual adapter with a watchdog, including output validation."""
     from backend.media.frame import Frame
     errors, done, expired = [], threading.Event(), threading.Event()
@@ -405,18 +406,32 @@ def verify_backend(adapter, *, width=320, height=240, cancel=None, timeout=8.0) 
             adapter.open()
             check_cancel()
             if hasattr(adapter, "encode"):
+                if on_demand_keyframes and adapter._proc is not None:
+                    raise RuntimeError("该编码后端不支持会话内请求关键帧")
+                step = round(90000 / (adapter.stream.framerate or 30)) if on_demand_keyframes else 3000
+                request = round(180000 / step) + 2 if on_demand_keyframes and cross_period else 8
+                count = request + 4
                 packets = []
-                for index in range(12):
+                size = 0
+                for index in range(count):
                     check_cancel()
-                    pixels = bytes([index * 8, 32, 200, 255]) * (width * height)
-                    packets.extend(adapter.encode(Frame(data=pixels, width=width, height=height, pts=index * 3000)))
-                    if sum(p.size for p in packets) > 32 * 1024 * 1024:
+                    if on_demand_keyframes:
+                        adapter.force_keyframe = index == request
+                    pixels = bytes([index % 2 * 192, 32, 200, 255]) * (width * height)
+                    output = adapter.encode(Frame(data=pixels, width=width, height=height, pts=index * step))
+                    if on_demand_keyframes and (len(output) != 1 or output[0].pts != index * step):
+                        raise RuntimeError("编码器未立即输出当前帧")
+                    packets.extend(output)
+                    size += sum(p.size for p in output)
+                    if size > 32 * 1024 * 1024:
                         raise RuntimeError("编码输出过大")
                 packets.extend(adapter.flush())
                 if sum(p.size for p in packets) > 32 * 1024 * 1024:
                     raise RuntimeError("编码输出过大")
-                if len(packets) != 12 or not packets[0].keyframe:
+                if len(packets) != count or not packets[0].keyframe:
                     raise RuntimeError("编码未输出完整有效帧")
+                if on_demand_keyframes:
+                    _verify_on_demand_frames(adapter.stream, packets, request * step)
             else:
                 frames = []
                 adapter.output_callback = frames.append
@@ -462,7 +477,34 @@ def verify_backend(adapter, *, width=320, height=240, cancel=None, timeout=8.0) 
     return errors[0][:1500] if errors else None
 
 
-def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, progress=None):
+def _verify_on_demand_frames(stream, packets, requested_pts):
+    from .inprocess import InprocessDecoder
+
+    recovery = RecoveryPoint()
+    recovered_pts = []
+    for packet in packets:
+        recovery.observe(packet)
+        point = recovery.recover(packet)
+        if point is None:
+            if packet.keyframe:
+                raise RuntimeError("编码器输出了不可独立恢复的关键帧")
+            continue
+        decoder = InprocessDecoder(stream)
+        decoder.native_output = True
+        try:
+            decoder.open()
+            frames = decoder.decode(point) + decoder.flush()
+            if not any((f.width, f.height) == (stream.width, stream.height) for f in frames):
+                raise RuntimeError("关键帧无法独立解码")
+        finally:
+            decoder.close()
+        recovered_pts.append(packet.pts)
+    if recovered_pts != [0, requested_pts]:
+        raise RuntimeError(f"关键帧未按请求产生：{recovered_pts}")
+
+
+def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, progress=None,
+                       on_demand_keyframes=False):
     from backend.config.schema import VideoEncodeConfig
     from backend.media.stream import CodecId, StreamInfo
     from backend.registry.codec_registry import build_default_registry
@@ -470,7 +512,7 @@ def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, prog
     resolved = Path(shutil.which(path) or path)
     stat = resolved.stat() if resolved.is_file() else None
     key = (str(resolved.resolve()), stat.st_size if stat else 0,
-           stat.st_mtime_ns if stat else 0, _device_signature())
+           stat.st_mtime_ns if stat else 0, _device_signature(), on_demand_keyframes)
     with _probe_lock:
         if not refresh and key in _video_cache:
             return _video_cache[key]
@@ -491,10 +533,11 @@ def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, prog
                 reason = "当前平台或 FFmpeg 不提供此后端"
                 if platform_ok and entry.is_available():
                     cfg = VideoEncodeConfig(codec=codec, encoder=entry.name, decoder=entry.name,
-                                            ffmpeg_path=path, preset="ultrafast", realtime=True)
+                                            ffmpeg_path=path, preset="ultrafast", realtime=True,
+                                            on_demand_keyframes=on_demand_keyframes)
                     adapter = entry.factory(StreamInfo(codec=CodecId(codec), width=320, height=240,
                                                        framerate=30), cfg)
-                    reason = verify_backend(adapter, cancel=cancel)
+                    reason = verify_backend(adapter, cancel=cancel, on_demand_keyframes=on_demand_keyframes)
                     if not reason and hasattr(adapter, "decode_ms"):
                         # Exclude the cold-start call and EOS flush from the steady-state comparison.
                         decode = list(adapter.decode_ms)[1:-1]
@@ -508,6 +551,8 @@ def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, prog
             snapshot["decoders"].items(),
             key=lambda pair: (pair[1]["codec"], pair[1].get("latency_ms", float("inf"))),
         ))
-        _video_cache.clear()
+        for previous in tuple(_video_cache):
+            if previous[-1] == on_demand_keyframes:
+                del _video_cache[previous]
         _video_cache[key] = snapshot
         return snapshot

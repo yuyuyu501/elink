@@ -119,9 +119,6 @@ python main.py --ui         # 启动桌面端
   F8 释放输入、F10 叠加连接统计、F11 打开独立全屏播放器、Ctrl+Alt+Shift+Q 断开。
 - **全屏播放器**：独立全屏窗口，顶部悬浮控制栏（统计 / 释放输入 / 断开 / 退出），
   鼠标静止后自动隐藏；Esc/F11 退出。
-- **超分辨率**：观看页「超分」开关 + FSR 1 / RTX VSR 引擎 + 1080p/1440p/4K 输出。
-  FSR 1 用 AMD FidelityFX EASU + RCAS（OpenGL 4.2 离屏渲染）；RTX VSR 走
-  `elink_video.dll` 的 D3D11 视频处理器，仅 NVIDIA RTX + 新驱动可用，失败时自动回退 FSR 1。
 - **性能报告**：主机/观看页可导出 JSON，含编码、解码、渲染的 P50/P95/P99 耗时。
 - **我的设备**：枚举有效网卡，通过 UDP 49320 向支持广播的接口逐一发送发现消息。
   同一设备的多个地址合并显示，支持名称/IP 搜索、电脑分组折叠与设备信息。
@@ -222,8 +219,6 @@ python -m scripts.package_linux      # PyInstaller 目录 + tar.gz + elink.deskt
   `E:\elink` 的 ElinkPad 自研驱动没有搬入，安装包也不会替用户安装驱动。
 - **剪贴板**：只同步 Unicode 文本（最多 64000 字符），不同步图片/文件；
   当前实现是 Windows 原生 API，非 Windows 平台不可用。
-- **超分**：FSR 1 与 RTX VSR 都会回读 CPU 再交给 QImage 预览，不是零拷贝上屏；
-  RTX VSR 需要 NVIDIA RTX 显卡和较新驱动，其它 GPU 自动回退 FSR 1。
   每帧增加一次 GPU 处理 + 回读，4K 输出下帧率可能低于 30fps。
 - **性能报告**：统计本机编码/解码/渲染阶段耗时，不包含网络 RTT 或端到端延迟。
 - **发现服务**：无鉴权 UDP 广播，仅适合个人局域网；需防火墙放行 UDP 49320。

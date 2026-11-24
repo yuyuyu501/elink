@@ -174,39 +174,6 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(self.viewer.phase, "active")
         self.assertEqual(len(self.host_media.starts), 1)
 
-    def test_upscale_transmits_half_resolution_and_preserves_output(self):
-        self.viewer.connect_peer(self.peer, ViewerSettings(
-            stream_width=2560, stream_height=1440, sr_enabled=True, sr_percent=50), True)
-        wait_until(lambda: self.viewer.phase == self.host.phase == "active")
-        self.assertEqual((self.host_media.starts[-1].width, self.host_media.starts[-1].height),
-                         (1280, 720))
-        self.assertEqual((self.viewer_media.starts[-1].output_width,
-                          self.viewer_media.starts[-1].output_height), (2560, 1440))
-        self.assertEqual((self.applied[-1]["width"], self.applied[-1]["height"]), (2560, 1440))
-        self.viewer.configure(self.applied[-1], upscale=ViewerSettings(sr_enabled=False))
-        wait_until(lambda: len(self.applied) == 2)
-        self.assertEqual((self.host_media.starts[-1].width, self.host_media.starts[-1].height),
-                         (2560, 1440))
-        self.assertFalse(self.viewer_media.starts[-1].sr_enabled)
-
-    def test_failed_upscale_switch_restores_previous_preferences(self):
-        self.connect()
-        self.host_media.fail_next = True
-        original = dict(self.applied[-1])
-        self.viewer.configure(original, upscale=ViewerSettings(sr_enabled=True, sr_percent=50))
-        wait_until(lambda: len(self.applied) == 2)
-        self.assertEqual(self.applied[-1], original)
-        self.assertFalse(self.viewer._viewer.sr_enabled)
-        self.assertNotIn("upscale", self.host._picture)
-
-    def test_old_peer_rejects_ratio_without_stopping_media(self):
-        self.connect()
-        self.viewer._upscale_enabled = False
-        self.viewer.configure(self.applied[-1], upscale=ViewerSettings(sr_enabled=True, sr_percent=50))
-        self.assertTrue(self.errors)
-        self.assertEqual(self.viewer.phase, "active")
-        self.assertEqual(len(self.host_media.starts), 1)
-
     def test_picture_applies_50_mbps_to_both_sides(self):
         self.connect()
         picture = {"width": 1920, "height": 1080, "fps": 90, "bitrate_kbps": 50000}
@@ -418,6 +385,25 @@ class SettingsAndTransportTests(unittest.TestCase):
         self.assertEqual(viewer.codec_preferences["peer"], {"codec": "h264"})
         self.assertEqual(viewer.transport, "webrtc")
         self.assertFalse(hasattr(viewer, "protocol_preferences"))
+
+    def test_legacy_upscale_fields_are_removed_when_settings_are_saved(self):
+        from frontend.desktop import settings
+        picture = {"width": 2560, "height": 1440, "fps": 120, "bitrate_kbps": 30000}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "desktop.json"
+            path.write_text(json.dumps({"viewer": {"sr_enabled": True, "sr_percent": 50,
+                "picture_preferences": {"peer": {**picture, "sr_mode": "rtx", "sr_percent": 50}},
+                "codec_preferences": {"peer": {"codec": "hevc"}}}}), encoding="utf-8")
+            with patch.object(settings, "settings_file", return_value=path):
+                host, viewer = settings.load()
+                device = settings.for_device(viewer, "peer")
+                self.assertEqual((device.stream_width, device.stream_height, device.stream_fps,
+                                  device.stream_bitrate_kbps), (2560, 1440, 120, 30000))
+                settings.save(host, viewer)
+            saved = json.loads(path.read_text(encoding="utf-8"))["viewer"]
+            self.assertNotIn("sr_enabled", saved)
+            self.assertEqual(saved["picture_preferences"]["peer"], picture)
+            self.assertEqual(saved["codec_preferences"]["peer"], {"codec": "hevc"})
 
     def test_legacy_switches_are_ignored(self):
         settings = _merge(UiSettings, {"allow_discovery": False, "auto_host": True,

@@ -22,9 +22,6 @@ logger = get_logger(__name__)
 DEFAULT_HOST = HostSettings()
 DEFAULT_VIEWER = ViewerSettings()
 PICTURE_KEYS = ("width", "height", "fps", "bitrate_kbps")
-DEVICE_PICTURE_KEYS = PICTURE_KEYS + (
-    "sr_enabled", "sr_mode", "sr_percent", "sr_sharpen", "sr_sharpness",
-)
 
 
 @dataclass
@@ -62,12 +59,6 @@ def load() -> tuple[HostSettings, ViewerSettings]:
     viewer.mouse_mode = mouse_mode(viewer.mouse_mode)
     viewer.mouse_sensitivity = sensitivity_value(viewer.mouse_sensitivity)
     viewer.stats_visible = viewer.stats_visible is True
-    viewer.sr_enabled = viewer.sr_enabled is True
-    viewer.sr_sharpen = viewer.sr_sharpen is True
-    viewer.sr_mode = viewer.sr_mode if viewer.sr_mode in {"fsr", "rtx"} else "fsr"
-    for name, default, low, high in (("sr_percent", 100, 33, 100), ("sr_sharpness", 50, 0, 100)):
-        value = getattr(viewer, name)
-        setattr(viewer, name, max(low, min(high, value)) if type(value) is int else default)
     preferences = viewer.codec_preferences if isinstance(viewer.codec_preferences, dict) else {}
     viewer.codec_preferences = {}
     for peer, options in preferences.items():
@@ -78,9 +69,7 @@ def load() -> tuple[HostSettings, ViewerSettings]:
             viewer.codec_preferences[peer] = {"codec": "h264" if codec == "auto" else codec}
         except (ValueError, AttributeError):
             continue
-    viewer.picture_preferences = _load_picture_preferences(
-        viewer.picture_preferences, viewer
-    )
+    viewer.picture_preferences = _load_picture_preferences(viewer.picture_preferences)
     return host, viewer
 
 
@@ -96,27 +85,11 @@ def picture_settings(values: dict) -> dict:
         value = values.get(name)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"画面参数无效：{name}")
-        if name in {"width", "height"} and "upscale" in values:
-            low = 2
         if not low <= value <= high:
             raise ValueError(f"画面参数超出范围：{name}")
         result[name] = cast(value)
     if result["width"] % 2 or result["height"] % 2:
         raise ValueError("分辨率必须为偶数")
-    if "upscale" in values:
-        sr = values["upscale"]
-        if not isinstance(sr, dict) or set(sr) != {"width", "height", "percent", "mode", "sharpen", "sharpness"}:
-            raise ValueError("超分参数格式错误")
-        for key, low, high in (("width", 320, 7680), ("height", 240, 4320),
-                               ("percent", 33, 100), ("sharpness", 0, 100)):
-            if type(sr[key]) is not int or not low <= sr[key] <= high:
-                raise ValueError(f"超分参数无效：{key}")
-        if sr["mode"] not in {"fsr", "rtx"} or type(sr["sharpen"]) is not bool:
-            raise ValueError("超分算法或锐化参数无效")
-        for axis in ("width", "height"):
-            if sr[axis] % 2 or result[axis] > sr[axis]:
-                raise ValueError("超分尺寸无效")
-        result["upscale"] = dict(sr)
     return result
 
 
@@ -126,16 +99,12 @@ def for_device(viewer: ViewerSettings, peer_id: str) -> ViewerSettings:
     if not isinstance(values, dict):
         return replace(viewer)
     try:
-        picture = picture_settings({key: values[key] for key in PICTURE_KEYS})
-    except (KeyError, ValueError, TypeError):
+        picture = picture_settings(values)
+    except ValueError:
         return replace(viewer)
-    result = replace(viewer, **{
+    return replace(viewer, **{
         f"stream_{key}": picture[key] for key in PICTURE_KEYS
     })
-    for key in DEVICE_PICTURE_KEYS:
-        if key in values and hasattr(result, key):
-            setattr(result, key, values[key])
-    return result
 
 
 def remember_device_picture(viewer: ViewerSettings, peer_id: str,
@@ -144,13 +113,9 @@ def remember_device_picture(viewer: ViewerSettings, peer_id: str,
     values = {
         key: getattr(settings, f"stream_{key}") for key in PICTURE_KEYS
     }
-    values.update({
-        key: getattr(settings, key) for key in DEVICE_PICTURE_KEYS
-        if key not in PICTURE_KEYS
-    })
     try:
-        values = _validated_device_picture(values)
-    except (ValueError, TypeError):
+        values = picture_settings(values)
+    except ValueError:
         return
     viewer.picture_preferences[str(peer_id)] = values
 
@@ -182,7 +147,7 @@ def _merge(cls, values) -> object:
     return cls(**{key: value for key, value in values.items() if key in allowed})
 
 
-def _load_picture_preferences(values, viewer: ViewerSettings) -> dict:
+def _load_picture_preferences(values) -> dict:
     if not isinstance(values, dict):
         return {}
     result = {}
@@ -190,28 +155,9 @@ def _load_picture_preferences(values, viewer: ViewerSettings) -> dict:
         if not isinstance(peer, str) or len(peer) > 128:
             continue
         try:
-            result[peer] = _validated_device_picture(options)
-        except (ValueError, TypeError):
+            result[peer] = picture_settings(options)
+        except ValueError:
             continue
-    return result
-
-
-def _validated_device_picture(values: dict) -> dict:
-    if not isinstance(values, dict):
-        raise ValueError("设备画面设置格式错误")
-    picture = picture_settings({key: values[key] for key in PICTURE_KEYS})
-    result = dict(picture)
-    result["sr_enabled"] = values.get("sr_enabled") is True
-    result["sr_mode"] = values.get("sr_mode", "fsr")
-    result["sr_percent"] = values.get("sr_percent", 100)
-    result["sr_sharpen"] = values.get("sr_sharpen") is True
-    result["sr_sharpness"] = values.get("sr_sharpness", 50)
-    if result["sr_mode"] not in {"fsr", "rtx"}:
-        raise ValueError("超分算法无效")
-    if type(result["sr_percent"]) is not int or not 33 <= result["sr_percent"] <= 100:
-        raise ValueError("超分压缩比无效")
-    if type(result["sr_sharpness"]) is not int or not 0 <= result["sr_sharpness"] <= 100:
-        raise ValueError("超分锐化参数无效")
     return result
 
 

@@ -20,19 +20,6 @@ Windows 发布包在 `ffmpeg/` 中携带 ffmpeg（含 `libx264` 与 `libsrt`）�
 桌面端界面基于 PySide6（LGPLv3）。随包分发时 Qt 库以动态库形式提供，
 并保留其许可证文本。
 
-## AMD FidelityFX FSR 1
-
-`frontend/desktop/resources/fsr/ffx_a.h` 与 `ffx_fsr1.h` 是 AMD FidelityFX
-Super Resolution 1 的未修改头文件（v1.20210629），MIT License，
-Copyright (c) 2021 Advanced Micro Devices, Inc.。许可证见
-`licenses/FSR-LICENSE.txt`。应用在 OpenGL 4.2 上运行 EASU + RCAS 两个 pass。
-
-## elink_video.dll（RTX VSR 原生扩展）
-
-`frontend/desktop/resources/elink_video.dll` 是本项目自己的 D3D11 辅助库，
-通过 NVIDIA VideoProcessor 扩展实现 RTX VSR；不包含 NVIDIA SDK、驱动安装器
-或第三方运行时。没有 NVIDIA RTX 显卡时不会加载/调用该库，自动回退 FSR 1。
-
 ## ViGEmClient / ViGEmBus
 
 `frontend/desktop/resources/ViGEmClient.dll` 来自

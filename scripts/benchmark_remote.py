@@ -18,6 +18,80 @@ from frontend.desktop.ui.preview import PreviewWidget
 from frontend.desktop.ui.video_surface import video_surface_format
 
 
+def direct_quality(seconds, width, height, fps, bitrate, codec, encoder):
+    import numpy as np
+    from statistics import mean
+    from backend.config.schema import VideoEncodeConfig
+    from backend.media.frame import Frame
+    from backend.media.stream import CodecId, StreamInfo
+    from backend.media.video.codec.inprocess import InprocessDecoder
+    from backend.media.video.codec.probe import _verify_on_demand_frames, probe_video_codecs
+    from backend.registry.codec_registry import build_default_registry
+
+    app = QApplication.instance() or QApplication([])
+    if encoder == "auto":
+        backends = probe_video_codecs(on_demand_keyframes=True)["encoders"]
+        encoder = next(n for n, item in backends.items()
+                       if item["codec"] == codec and item["state"] == "available")
+    stream = StreamInfo(codec=CodecId(codec), width=width, height=height, framerate=fps)
+    source = build_default_registry().create_encoder(codec, encoder, stream, VideoEncodeConfig(
+        codec=codec, encoder=encoder, bitrate_kbps=bitrate * 1000, realtime=True,
+        on_demand_keyframes=True))
+    decoder = InprocessDecoder(stream)
+    decoder.native_output = True
+    patterns = [desktop_pattern(width, height, phase) for phase in range(24)]
+    reference = np.frombuffer(patterns[0], dtype=np.uint8).reshape(height, width, 4)[16:160, 16:240, 1]
+    reference = reference.astype(np.int16)
+    packets, samples = [], []
+
+    def sample(image):
+        plane = image.planes[0]
+        roi = np.frombuffer(plane, dtype=np.uint8).reshape(-1, plane.line_size)[16:160, 16:240]
+        roi = roi.astype(np.int16)
+        samples.append({"edge": round(float(np.abs(np.diff(roi, axis=1)).mean()), 4),
+                        "mae": round(float(np.abs(roi - reference).mean()), 4)})
+
+    def decode(encoded):
+        for item in encoded:
+            packets.append(item)
+            for frame in decoder.decode(item):
+                sample(frame.to_av())
+
+    source.open()
+    count = round(seconds * fps)
+    recovery = round((seconds / 2 + 0.5) * fps) * 90000 // fps
+    started = time.perf_counter()
+    try:
+        decoder.open()
+        for i in range(count):
+            pts = i * 90000 // fps
+            phase = i // 4 % 24 if i >= count // 2 else 0
+            source.force_keyframe = pts == recovery
+            decode(source.encode(Frame(data=patterns[phase], width=width, height=height, pts=pts)))
+        decode(source.flush())
+        for frame in decoder.flush():
+            sample(frame.to_av())
+    finally:
+        decoder.close()
+        source.close()
+    processing_fps = count / (time.perf_counter() - started)
+    _verify_on_demand_frames(stream, packets, recovery)
+    keyframes = [packet.pts for packet in packets if packet.keyframe]
+    groups = {}
+    for name, group in (("still", samples[:count // 2]), ("moving", samples[count // 2:])):
+        edges = [frame["edge"] for frame in group]
+        groups[name] = {"mean_edge": mean(edges), "edge_range": [min(edges), max(edges)],
+                        "mean_mae": mean(frame["mae"] for frame in group),
+                        "edge_jumps_over_5pct": sum(abs(a - b) > mean(edges) * .05
+                                                   for a, b in zip(edges, edges[1:]))}
+    return {"codec": codec, "encoder": encoder, "requested_fps": fps,
+            "resolution": [width, height], "target_mbps": bitrate,
+            "processing_fps": processing_fps,
+            "encoded_mbps": sum(packet.size for packet in packets) * 8 / seconds / 1e6,
+            "recovery_request_pts": recovery, "keyframe_pts": keyframes,
+            "verified": len(samples) == count, "quality": groups}
+
+
 def frame_counts(host, viewer):
     source, sink = host._pipeline, viewer._pipeline
     sent, received = source.stats, sink.stats
@@ -27,13 +101,13 @@ def frame_counts(host, viewer):
         "captured": track.frames if track else sent.frames_captured,
         "encoded": sent.frames_encoded,
         "decoded": received.frames_decoded,
+        "encoded_bytes": sent.bytes_written,
     }
 
 
 def run(seconds=5, width=1920, height=1080, fps=120,
         encoder="auto", decoder="auto", synthetic=False, updates=(),
-        bitrate=12, warmup=3, display="gpu", codec="h264", quality=False,
-        nvenc_gop=None, nvenc_vbv=None):
+        bitrate=12, warmup=3, display="gpu", codec="h264", quality=False):
     if QApplication.instance() is None:
         QSurfaceFormat.setDefaultFormat(video_surface_format())
     app = QApplication.instance() or QApplication([])
@@ -47,6 +121,7 @@ def run(seconds=5, width=1920, height=1080, fps=120,
     frames, cursors, errors, applied = [], [], [], []
     quality_samples, encoder_events = [], []
     active = start = initial = None
+    recovery_at = None
     drawn = []
     preview = PreviewWidget()
     preview.setWindowTitle("Elink benchmark")
@@ -106,7 +181,7 @@ def run(seconds=5, width=1920, height=1080, fps=120,
 
     from backend.media.video.codec.inprocess import InprocessEncoder
 
-    encode, open_encoder = InprocessEncoder.encode, InprocessEncoder.open
+    encode = InprocessEncoder.encode
     last_rate = None
 
     def trace_encode(instance, frame):
@@ -125,17 +200,6 @@ def run(seconds=5, width=1920, height=1080, fps=120,
             })
         last_rate = rate
         return packets
-
-    def candidate_open(instance):
-        nvenc = instance.name.endswith("_nvenc")
-        hz = instance.stream.framerate or 30
-        if nvenc and nvenc_gop is not None:
-            instance.config = replace(instance.config, gop=round(hz * nvenc_gop))
-        open_encoder(instance)
-        if nvenc and nvenc_vbv is not None:
-            context = instance._context
-            context.options = {**context.options,
-                               "bufsize": str(max(300000, round(nvenc_vbv * instance.target_bitrate / hz)))}
 
     def sample_quality(frame):
         from backend.media.frame import PixelFormat
@@ -164,8 +228,6 @@ def run(seconds=5, width=1920, height=1080, fps=120,
         if quality:
             patches.enter_context(patch.object(InprocessEncoder, "encode", trace_encode))
             viewer_service.frame_ready.connect(sample_quality)
-        if nvenc_gop is not None or nvenc_vbv is not None:
-            patches.enter_context(patch.object(InprocessEncoder, "open", candidate_open))
         # Reserve a session/control/media/motion group outside ephemeral ports.
         for port in range(24100, 24500, 4):
             try:
@@ -198,6 +260,10 @@ def run(seconds=5, width=1920, height=1080, fps=120,
                     active = now
                 if start is None and now - active >= warmup:
                     start, initial = now, frame_counts(host_service, viewer_service)
+                if (quality and start is not None and recovery_at is None
+                        and now - start >= seconds * .6):
+                    recovery_at = now
+                    viewer_service._rtc_runtime._receiver_cleanup.request_keyframe()
                 if start is not None and now - start >= seconds:
                     break
             time.sleep(.001)
@@ -208,8 +274,10 @@ def run(seconds=5, width=1920, height=1080, fps=120,
             intervals = sorted((b - a) * 1000 for a, b in zip(images, images[1:]))
             duration = now - start
             measurement = {f"{key}_fps": round((counts[key] - initial[key]) / duration, 2)
-                           for key in counts}
+                           for key in ("captured", "encoded", "decoded")}
             measurement.update(
+                encoded_mbps=round((counts["encoded_bytes"] - initial["encoded_bytes"]) * 8
+                                   / duration / 1e6, 2),
                 delivered_fps=round(sum(start < item[0] <= now for item in frames) / duration, 2),
                 drawn_fps=round(len(images) / duration, 2),
                 draw_interval_p95_ms=round(intervals[int(.95 * (len(intervals) - 1))], 3)
@@ -269,9 +337,12 @@ def run(seconds=5, width=1920, height=1080, fps=120,
             result["meets_target"] = (measurement["drawn_fps"] >= .95 * fps
                                       and (display == "auto" or measurement["display_mode"] == display))
         if quality:
+            recovery_delay = next(((event["time"] - recovery_at) * 1000 for event in encoder_events
+                                   if recovery_at is not None and event["time"] >= recovery_at
+                                   and event["requested_keyframe"] and event["keyframe"]), None)
             result["quality"] = {
-                "nvenc_gop_override_seconds": nvenc_gop,
-                "nvenc_vbv_override_frames": nvenc_vbv,
+                "recovery_request_at": recovery_at,
+                "recovery_keyframe_ms": recovery_delay,
                 "measurement_start": start,
                 "encoder_events": encoder_events,
                 "edge_samples": quality_samples,
@@ -330,9 +401,8 @@ def main():
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--quality", action="store_true")
-    parser.add_argument("--nvenc-gop", type=float, metavar="SECONDS")
-    parser.add_argument("--nvenc-vbv", type=int, choices=range(2, 17), metavar="FRAMES")
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--direct", action="store_true", help="Measure quality without WebRTC")
     parser.add_argument("--update", dest="updates", nargs=3, type=int, action="append",
                         metavar=("WIDTH", "HEIGHT", "FPS"), default=[])
     parser.add_argument("--output", type=Path, default=Path("out/remote-benchmark.json"))
@@ -340,15 +410,20 @@ def main():
     output = args.pop("output")
     matrix = args.pop("matrix")
     repeat = args.pop("repeat")
+    if args.pop("direct"):
+        if (args["seconds"] < 5 or args["width"] < 640 or args["height"] < 480
+                or args["fps"] < 1 or repeat < 1 or matrix or args["updates"]):
+            parser.error("direct benchmark requires at least 5 seconds and fixed dimensions of at least 640x480")
+        keys = ("seconds", "width", "height", "fps", "bitrate", "codec", "encoder")
+        results = [direct_quality(**{key: args[key] for key in keys}) for _ in range(repeat)]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        return int(any(not result["verified"] for result in results))
     if args["seconds"] <= 0 or args["warmup"] < 0 or (matrix and args["updates"]):
         parser.error("invalid measurement window or matrix combined with live updates")
     if (repeat < 1 or (matrix and repeat > 1)
             or (args["quality"] and (args["width"] < 640 or args["height"] < 480 or args["updates"]))):
         parser.error("quality benchmark requires stable dimensions of at least 640x480")
-    if args["nvenc_gop"] is not None and (not args["quality"] or args["nvenc_gop"] < 1):
-        parser.error("GOP override is only available in quality benchmarks and must be at least one second")
-    if args["nvenc_vbv"] is not None and not args["quality"]:
-        parser.error("VBV override is only available in quality benchmarks")
     if matrix:
         results = [run(**(args | dict(width=w, height=h, fps=fps)))
                    for w, h in ((1280, 720), (1920, 1080), (2560, 1440), (3840, 2160))
@@ -360,7 +435,13 @@ def main():
                                  indent=2, default=list), encoding="utf-8")
     for result in results:
         print(json.dumps({k: v for k, v in result.items() if k not in {"host", "viewer", "quality"}}, ensure_ascii=False))
-    return int(any(not passed(result, args["updates"]) for result in results))
+    return int(any(not passed(result, args["updates"]) or (
+        args["quality"] and (
+            result["quality"]["recovery_keyframe_ms"] is None
+            or any(event["keyframe"] and not event["requested_keyframe"]
+                   for event in result["quality"]["encoder_events"])
+        )
+    ) for result in results))
 
 
 def passed(result, updates):

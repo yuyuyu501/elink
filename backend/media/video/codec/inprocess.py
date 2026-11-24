@@ -138,7 +138,8 @@ class InprocessEncoder(BaseEncoder):
             context.time_base = Fraction(1, 90000)
             context.framerate = Fraction(self.stream.framerate or 30).limit_denominator(1000)
             context.bit_rate = self.target_bitrate
-            context.gop_size = self.config.gop
+            on_demand = self.config.on_demand_keyframes
+            context.gop_size = 2**31 - 1 if on_demand else self.config.gop
             context.max_b_frames = 0
             rate = max(300000, round(2 * self.target_bitrate / float(context.framerate)))
             options = {"maxrate": str(self.target_bitrate), "bufsize": str(rate)}
@@ -162,6 +163,20 @@ class InprocessEncoder(BaseEncoder):
             elif self.name == "libsvtav1":
                 context.thread_count = 4
                 options.update(preset="12", **{"svtav1-params": "lp=4:pred-struct=1"})
+            if on_demand:
+                if self.name == "libx264":
+                    options["x264-params"] += ":keyint=infinite"
+                    options["forced-idr"] = "1"
+                elif self.name == "libx265":
+                    options["x265-params"] += ":keyint=-1:scenecut=0:open-gop=0:frame-threads=1"
+                    options["forced-idr"] = "1"
+                elif self.name == "libsvtav1":
+                    context.gop_size = -1
+                    options["svtav1-params"] += ":keyint=-1:scd=0:force-key-frames=1"
+                elif self.name.endswith("_amf"):
+                    options["preanalysis"] = "0"
+                elif self.name.endswith("_qsv"):
+                    options.update(adaptive_i="0", forced_idr="1")
             context.options = options
             self._context = context
             self._opened = True
@@ -190,6 +205,7 @@ class InprocessEncoder(BaseEncoder):
                     self._context = replacement._context
                     self.config, self.stream, self.name = config, stream, config.encoder
                     self.target_bitrate = config.bitrate_kbps * 1000
+                    self.force_keyframe = False
                     self._opened = True
                     future.set_result(None)
                     return packets
@@ -201,12 +217,15 @@ class InprocessEncoder(BaseEncoder):
             self._context.color_range = image.color_range
         if not self._context.is_open:
             self._context.open()
-        if self.force_keyframe:
+        requested = self.force_keyframe
+        if requested:
             image.pict_type = av.video.frame.PictureType.I
             self.force_keyframe = False
         else:
             image.pict_type = av.video.frame.PictureType.NONE
-        self._context.bit_rate = min(self.config.bitrate_kbps * 1000, self.target_bitrate)
+        # NVENC reconfigures bitrate by forcing an IDR; combine it with a requested refresh.
+        if requested or not (self.config.on_demand_keyframes and self.name.endswith("_nvenc")):
+            self._context.bit_rate = min(self.config.bitrate_kbps * 1000, self.target_bitrate)
         return self._packets(self._context.encode(image))
 
     def _packets(self, packets):
