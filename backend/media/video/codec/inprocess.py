@@ -110,7 +110,7 @@ class InprocessDecoder(BaseDecoder):
 
 
 class InprocessEncoder(BaseEncoder):
-    """Use the same selected codec for SRT and WebRTC without rawvideo pipes."""
+    """Encode video in-process without rawvideo pipes."""
 
     def __init__(self, stream, config):
         super().__init__(stream)

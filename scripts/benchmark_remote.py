@@ -4,10 +4,12 @@ import argparse
 import json
 import socket
 import time
+from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtGui import QSurfaceFormat
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from frontend.desktop.connection import DesktopConnection
@@ -28,9 +30,10 @@ def frame_counts(host, viewer):
     }
 
 
-def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
+def run(seconds=5, width=1920, height=1080, fps=120,
         encoder="auto", decoder="auto", synthetic=False, updates=(),
-        bitrate=12, warmup=3, display="gpu", codec="h264"):
+        bitrate=12, warmup=3, display="gpu", codec="h264", quality=False,
+        nvenc_gop=None, nvenc_vbv=None):
     if QApplication.instance() is None:
         QSurfaceFormat.setDefaultFormat(video_surface_format())
     app = QApplication.instance() or QApplication([])
@@ -42,6 +45,8 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
     host = DesktopConnection(host_service, "benchmark-host", HostSettings())
     viewer = DesktopConnection(viewer_service, "benchmark-viewer", HostSettings())
     frames, cursors, errors, applied = [], [], [], []
+    quality_samples, encoder_events = [], []
+    active = start = initial = None
     drawn = []
     preview = PreviewWidget()
     preview.setWindowTitle("Elink benchmark")
@@ -79,29 +84,88 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             from backend.media.frame import Frame
             self.cursor_applied_mode = self.cursor_mode
             w, h = self.config.width or width, self.config.height or height
-            phase = self.index % 4
+            moving = start is not None and time.perf_counter() - start >= seconds / 2
+            phase = (self.index // 4 % 24 if moving else 0) if quality else self.index % 4
             self.index += 1
             key = (w, h, phase)
             if key not in self.patterns:
-                offset = (phase * w) // 4
-                row = bytes((32, 64, 192, 255)) * offset + bytes((160, 96, 32, 255)) * (w - offset)
-                self.patterns[key] = row * h
+                if quality:
+                    self.patterns[key] = desktop_pattern(w, h, phase)
+                else:
+                    offset = (phase * w) // 4
+                    row = bytes((32, 64, 192, 255)) * offset + bytes((160, 96, 32, 255)) * (w - offset)
+                    self.patterns[key] = row * h
             return Frame(data=self.patterns[key], width=w, height=h)
 
         def reconfigure(self, width, height, fps):
-            from dataclasses import replace
             self.config = replace(self.config, width=width, height=height, fps=fps)
             self.patterns.clear()
 
         def close(self):
             pass
 
-    capture_patch = patch("backend.bootstrap.build_capture", side_effect=lambda cfg: Capture(cfg.capture))
+    from backend.media.video.codec.inprocess import InprocessEncoder
+
+    encode, open_encoder = InprocessEncoder.encode, InprocessEncoder.open
+    last_rate = None
+
+    def trace_encode(instance, frame):
+        nonlocal last_rate
+        requested = instance.force_keyframe
+        stamp = time.perf_counter()
+        rate = min(instance.target_bitrate, instance.config.bitrate_kbps * 1000)
+        packets = encode(instance, frame)
+        keyframe = any(packet.keyframe for packet in packets)
+        if start is not None and (rate != last_rate or requested or keyframe):
+            encoder_events.append({
+                "time": stamp, "pts": frame.pts, "target_bps": rate,
+                "requested_keyframe": requested,
+                "keyframe": keyframe,
+                "bytes": sum(len(packet.data) for packet in packets),
+            })
+        last_rate = rate
+        return packets
+
+    def candidate_open(instance):
+        nvenc = instance.name.endswith("_nvenc")
+        hz = instance.stream.framerate or 30
+        if nvenc and nvenc_gop is not None:
+            instance.config = replace(instance.config, gop=round(hz * nvenc_gop))
+        open_encoder(instance)
+        if nvenc and nvenc_vbv is not None:
+            context = instance._context
+            context.options = {**context.options,
+                               "bufsize": str(max(300000, round(nvenc_vbv * instance.target_bitrate / hz)))}
+
+    def sample_quality(frame):
+        from backend.media.frame import PixelFormat
+        import numpy as np
+
+        if start is None:
+            return
+        rows = np.frombuffer(frame.data, dtype=np.uint8, count=frame.linesize * 160)
+        rows = rows.reshape(160, frame.linesize)[16:, :]
+        if frame.pixel_format in {PixelFormat.BGRA, PixelFormat.RGBA}:
+            roi = rows[:, 64:960].reshape(144, -1, 4)[:, :, 1]
+        elif frame.pixel_format in {PixelFormat.NV12, PixelFormat.YUV420P}:
+            roi = rows[:, 16:240]
+        else:
+            return
+        score = np.abs(np.diff(roi.astype(np.int16), axis=1)).mean()
+        quality_samples.append((time.perf_counter(), frame.pts, round(float(score), 3)))
+
+    patches = ExitStack()
     result = None
-    if synthetic:
-        region.start()
-        capture_patch.start()
     try:
+        if synthetic or quality:
+            patches.enter_context(region)
+            patches.enter_context(patch("backend.bootstrap.build_capture",
+                                        side_effect=lambda cfg: Capture(cfg.capture)))
+        if quality:
+            patches.enter_context(patch.object(InprocessEncoder, "encode", trace_encode))
+            viewer_service.frame_ready.connect(sample_quality)
+        if nvenc_gop is not None or nvenc_vbv is not None:
+            patches.enter_context(patch.object(InprocessEncoder, "open", candidate_open))
         # Reserve a session/control/media/motion group outside ephemeral ports.
         for port in range(24100, 24500, 4):
             try:
@@ -121,13 +185,11 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             raise RuntimeError("没有可用的测试端口")
         settings = ViewerSettings(stream_width=width, stream_height=height, stream_fps=fps,
                                   stream_bitrate_kbps=bitrate * 1000,
-                                  protocol_preferences={"benchmark-host": transport},
                                   codec_preferences={"benchmark-host": {
                                       "codec": codec, "encoder": encoder, "decoder": decoder}})
         viewer.connect_peer({"id": "benchmark-host", "ip": "127.0.0.1",
                              "session_port": host.server.serverPort()}, settings, False)
         deadline = time.monotonic() + 90
-        active = start = initial = None
         while time.monotonic() < deadline and not errors:
             app.processEvents()
             now = time.perf_counter()
@@ -163,7 +225,7 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
                 break
             before, count = len(frames), len(applied)
             error_count = len(errors)
-            old_transport = host_service._rtc_runtime.pc if transport == "webrtc" else host_service._transport
+            old_transport = host_service._rtc_runtime.pc
             old_control = host_service._control
             old_audio = (tuple(host_service._rtc_runtime.tracks) if host_service._rtc_runtime
                          else host_service._session_audio)
@@ -185,8 +247,7 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
                 "frames": len(frames) - before,
                 "phases": [host.phase, viewer.phase],
                 "transport_preserved": old_transport is (
-                    host_service._rtc_runtime.pc if transport == "webrtc" and host_service._rtc_runtime
-                    else host_service._transport),
+                    host_service._rtc_runtime.pc if host_service._rtc_runtime else None),
                 "control_preserved": old_control is host_service._control,
                 "audio_preserved": (old_audio == tuple(host_service._rtc_runtime.tracks)
                                     if host_service._rtc_runtime else old_audio is host_service._session_audio),
@@ -194,8 +255,8 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
                                                                 frames[max(0, before - 1) + 1:])),
             })
         result = {
-            "transport": transport, "codec": codec, "resolution": [width, height], "requested_fps": fps,
-            "synthetic_capture": synthetic, "frames": len(frames), "errors": errors,
+            "transport": "webrtc", "codec": codec, "resolution": [width, height], "requested_fps": fps,
+            "synthetic_capture": synthetic or quality, "frames": len(frames), "errors": errors,
             "phases": [host.phase, viewer.phase],
             "host": host_service.performance_report(), "viewer": viewer_service.performance_report(),
             "cursor": cursors[-1] if cursors else None,
@@ -207,6 +268,14 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
             result["delivered_fps"] = measurement["delivered_fps"]
             result["meets_target"] = (measurement["drawn_fps"] >= .95 * fps
                                       and (display == "auto" or measurement["display_mode"] == display))
+        if quality:
+            result["quality"] = {
+                "nvenc_gop_override_seconds": nvenc_gop,
+                "nvenc_vbv_override_frames": nvenc_vbv,
+                "measurement_start": start,
+                "encoder_events": encoder_events,
+                "edge_samples": quality_samples,
+            }
         return result
     finally:
         viewer.disconnect()
@@ -224,14 +293,30 @@ def run(transport="webrtc", seconds=5, width=1920, height=1080, fps=120,
         preview.close()
         preview.deleteLater()
         app.processEvents()
-        if synthetic:
-            capture_patch.stop()
-            region.stop()
+        patches.close()
+
+
+def desktop_pattern(width, height, phase):
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    image.fill(QColor("#e8edf2"))
+    painter = QPainter(image)
+    painter.setFont(QFont("Segoe UI", 9))
+    for y in range(12, height, 22):
+        for x in range(12, width, 250):
+            painter.setPen(QColor("#22374b" if y % 4 else "#354961"))
+            painter.drawText(x, y, f"Desktop settings   {x:04d} / {y:04d}")
+            painter.fillRect(x, y + 3, 205, 1, QColor("#8593a0"))
+    x = min(300 + phase * 32, width - 300)
+    painter.fillRect(x, height // 5, width // 3, height // 2, QColor("#44718a"))
+    for y in range(height // 5 + 14, height * 7 // 10, 20):
+        painter.setPen(QColor("#f4f7fa"))
+        painter.drawText(x + 8, y, "Remote desktop window  /  Connection")
+    painter.end()
+    return bytes(image.constBits())
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--transport", choices=("webrtc", "srt"), default="webrtc")
     parser.add_argument("--seconds", type=float, default=5)
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
@@ -244,25 +329,37 @@ def main():
     parser.add_argument("--display", choices=("gpu", "cpu", "auto"), default="gpu")
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--synthetic", action="store_true")
+    parser.add_argument("--quality", action="store_true")
+    parser.add_argument("--nvenc-gop", type=float, metavar="SECONDS")
+    parser.add_argument("--nvenc-vbv", type=int, choices=range(2, 17), metavar="FRAMES")
+    parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--update", dest="updates", nargs=3, type=int, action="append",
                         metavar=("WIDTH", "HEIGHT", "FPS"), default=[])
     parser.add_argument("--output", type=Path, default=Path("out/remote-benchmark.json"))
     args = vars(parser.parse_args())
     output = args.pop("output")
     matrix = args.pop("matrix")
+    repeat = args.pop("repeat")
     if args["seconds"] <= 0 or args["warmup"] < 0 or (matrix and args["updates"]):
         parser.error("invalid measurement window or matrix combined with live updates")
+    if (repeat < 1 or (matrix and repeat > 1)
+            or (args["quality"] and (args["width"] < 640 or args["height"] < 480 or args["updates"]))):
+        parser.error("quality benchmark requires stable dimensions of at least 640x480")
+    if args["nvenc_gop"] is not None and (not args["quality"] or args["nvenc_gop"] < 1):
+        parser.error("GOP override is only available in quality benchmarks and must be at least one second")
+    if args["nvenc_vbv"] is not None and not args["quality"]:
+        parser.error("VBV override is only available in quality benchmarks")
     if matrix:
         results = [run(**(args | dict(width=w, height=h, fps=fps)))
                    for w, h in ((1280, 720), (1920, 1080), (2560, 1440), (3840, 2160))
                    for fps in (30, 60, 90, 120)]
     else:
-        results = [run(**args)]
+        results = [run(**args) for _ in range(repeat)]
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(results if matrix else results[0], ensure_ascii=False,
+    output.write_text(json.dumps(results if matrix or repeat > 1 else results[0], ensure_ascii=False,
                                  indent=2, default=list), encoding="utf-8")
     for result in results:
-        print(json.dumps({k: v for k, v in result.items() if k not in {"host", "viewer"}}, ensure_ascii=False))
+        print(json.dumps({k: v for k, v in result.items() if k not in {"host", "viewer", "quality"}}, ensure_ascii=False))
     return int(any(not passed(result, args["updates"]) for result in results))
 
 

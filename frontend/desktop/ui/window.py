@@ -583,14 +583,8 @@ class MainWindow(QMainWindow):
         if state is None:
             state = "running" if self.service.running else "idle"
         hosting = state in {"running", "stopping"} and self.service.mode == "host"
-        settings = self._host_settings
-        srt_ready = settings.transport == "srt"
-        port = _srt_port(settings.srt_url) if srt_ready else 0
-        self.discovery.set_hosting(hosting, port, settings.control_port)
-        self.devices_page.set_local_state(
-            hosting, settings.srt_url, settings.control_port,
-            srt_ready=self.connection.server.isListening()
-        )
+        self.discovery.set_hosting(hosting)
+        self.devices_page.set_local_state(hosting, ready=self.connection.server.isListening())
         self.discovery.set_connection(
             self.connection.server.serverPort() if self.connection.server.isListening() else 0,
             self.connection.busy,
@@ -1061,13 +1055,10 @@ class MainWindow(QMainWindow):
             page.encoder.setCurrentIndex(ENCODERS.index(host.encoder))
         if host.preset in PRESETS:
             page.preset.setCurrentIndex(PRESETS.index(host.preset))
-        page.transport.setCurrentIndex(0 if host.transport == "srt" else 1)
-        page.srt_url.setText(host.srt_url)
         page.file_path.setText(host.file_path)
         page.control_port.setValue(host.control_port)
         page.allow_inject.setChecked(host.allow_inject)
         page.clipboard_switch.setChecked(host.clipboard_enabled)
-        page.sync_transport()
 
         self._loading_settings = False
 
@@ -1166,11 +1157,3 @@ def _platform_text() -> str:
     if system == "Windows":
         return f"Windows {release}".strip()
     return f"{system} {release}".strip()
-
-
-def _srt_port(url: str, default: int = 9000) -> int:
-    try:
-        port = int(str(url).rsplit(":", 1)[-1].split("/")[0])
-    except (ValueError, IndexError):
-        return default
-    return port if 0 < port <= 65535 else default

@@ -29,7 +29,6 @@ from backend.media.video.codec.probe import (
 from backend.registry.codec_registry import CodecRegistry, build_default_registry
 from backend.errors.codec import CodecNotFoundError
 from backend.pipeline.receive_pipeline import ReceivePipeline
-from backend.transport.srt import SrtTransport
 from backend.media.video.codec.base import write_all
 
 
@@ -337,61 +336,6 @@ class RuntimeTests(unittest.TestCase):
                 decoder.close()
             self.assertEqual(len(frames), 12, name)
             self.assertEqual([f.pts for f in frames], [index * 750 for index in range(12)], name)
-
-    def test_srt_transfers_all_format_payloads_byte_for_byte(self):
-        data = bytearray()
-        for codec in PROBE_SAMPLES:
-            stream = StreamInfo(codec=CodecId(codec), width=320, height=240, framerate=30)
-            sink = io.BytesIO()
-            muxer = MpegTsMuxer(sink)
-            muxer.open([stream])
-            for packet in _sample_packets(codec):
-                muxer.write(packet)
-            data += sink.getvalue()
-        expected = bytes(data) * 50
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reserve:
-            reserve.bind(("127.0.0.1", 0))
-            port = reserve.getsockname()[1]
-        sender = SrtTransport(f"srt://127.0.0.1:{port}", mode="listener", direction="send")
-        receiver = SrtTransport(f"srt://127.0.0.1:{port}", mode="caller", direction="receive")
-        received, failures = bytearray(), []
-        ready = threading.Event()
-
-        def receive():
-            try:
-                while len(received) < len(expected):
-                    chunk = receiver.reader.read(min(65536, len(expected) - len(received)))
-                    if not chunk:
-                        break
-                    received.extend(chunk)
-            except Exception as exc:
-                failures.append(str(exc))
-            finally:
-                ready.set()
-
-        def send():
-            try:
-                write_all(sender.writer, expected)
-            except Exception as exc:
-                failures.append(str(exc))
-        threads = []
-        try:
-            sender.open()
-            receiver.open()
-            threads = [threading.Thread(target=receive), threading.Thread(target=send)]
-            for thread in threads:
-                thread.start()
-            self.assertTrue(ready.wait(10), (len(received), sender.stderr_text(), receiver.stderr_text()))
-            self.assertFalse(failures)
-            self.assertEqual(bytes(received), expected, (sender.stderr_text(), receiver.stderr_text()))
-        finally:
-            sender.abort()
-            receiver.abort()
-            for thread in threads:
-                thread.join(3)
-            sender.close()
-            receiver.close()
-
 
 class LiveSelectionTests(unittest.TestCase):
     def test_same_format_encoder_switch_keeps_monotonic_pts(self):

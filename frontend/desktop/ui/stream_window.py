@@ -79,14 +79,6 @@ class PictureDialog(QDialog):
         form.addRow("帧率", self.fps)
         form.addRow("码率（Mbps）", bitrate)
         self.connection = connection
-        self.transport = QComboBox()
-        self.transport.addItem("WebRTC", "webrtc")
-        self.transport.addItem("SRT", "srt")
-        self.transport.setCurrentIndex(max(0, self.transport.findData(
-            getattr(connection, "_protocol", "webrtc"))))
-        form.addRow("传输协议", self.transport)
-        self.transport.currentIndexChanged.connect(lambda _: self._update_codecs()
-                                                   if self.connection is not None else None)
         self.codec = QComboBox()
         for name, value in (("AV1", "av1"), ("H.264", "h264"), ("H.265", "hevc")):
             self.codec.addItem(name, value)
@@ -127,7 +119,7 @@ class PictureDialog(QDialog):
             choices = []
         else:
             try:
-                choices = compatible_choices(remote, local, {}, self.transport.currentData())
+                choices = compatible_choices(remote, local, {})
             except ValueError:
                 choices = []
             self.codec_status.setText("" if choices else "双方没有共同可用的视频格式")
@@ -142,13 +134,11 @@ class PictureDialog(QDialog):
             available = self.codec.model().item(self.codec.currentIndex()).isEnabled()
             self.apply_button.setEnabled(active and (available or not self.connection._codec_enabled))
             self.codec.setEnabled(active)
-            self.transport.setEnabled(active)
 
     def picture(self) -> dict:
         width, height = map(int, self.resolution.currentText().split("×"))
         result = {"width": width, "height": height, "fps": self.fps.currentData(),
-                  "bitrate_kbps": self.bitrate.value() * 1000,
-                  "transport": self.transport.currentData()}
+                  "bitrate_kbps": self.bitrate.value() * 1000}
         if self.connection is not None and self.connection._codec_enabled:
             result["codec"] = self.codec.currentData()
         return result

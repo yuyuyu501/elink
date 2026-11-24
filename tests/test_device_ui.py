@@ -519,7 +519,6 @@ class WindowConnectionTests(unittest.TestCase):
 
     def test_codec_choices_follow_format_and_apply_state(self):
         connection = self.window.connection
-        connection._protocol = "srt"
         connection._codec_enabled = True
         connection.phase = "active"
         connection._peer_caps = {"encoders": {
@@ -537,8 +536,7 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertFalse(hasattr(dialog, "decoder"))
         self.assertEqual(dialog.picture()["codec"], "hevc")
         self.assertNotIn("encoder", dialog.picture())
-        dialog.transport.setCurrentIndex(dialog.transport.findData("webrtc"))
-        self.assertEqual(dialog.picture()["transport"], "webrtc")
+        self.assertNotIn("transport", dialog.picture())
         self.assertEqual([dialog.codec.itemData(i) for i in range(dialog.codec.count())], ["av1", "h264", "hevc"])
         self.assertFalse(dialog.codec.model().item(0).isEnabled())
         self.assertTrue(dialog.codec.model().item(2).isEnabled())
@@ -652,7 +650,7 @@ class DiscoveryUpdateTests(unittest.TestCase):
         service._remember({**PEER, "srt_port": 9100, "name": "Renamed computer"}, PEER["ip"])
         service._publish()
         self.assertEqual(len(events), 2)
-        self.assertEqual(events[-1][0]["srt_port"], 9100)
+        self.assertNotIn("srt_port", events[-1][0])
         self.assertEqual(events[-1][0]["name"], "Renamed computer")
         service.deleteLater()
 

@@ -85,11 +85,6 @@ class PackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing"):
             run_self_test(self.exe)
 
-    def test_srt_required(self):
-        with patch("scripts.package_windows.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "http", "")):
-            with self.assertRaisesRegex(RuntimeError, "SRT"):
-                run_self_test(self.exe)
-
     def test_runtime_ignores_old_path_only_when_frozen(self):
         with patch.object(sys, "frozen", True, create=True), patch.object(sys, "platform", "win32"), patch.object(sys, "executable", str(self.exe)):
             self.assertEqual(resolve_ffmpeg_path("C:/old/ffmpeg.exe"), str(self.ffmpeg))

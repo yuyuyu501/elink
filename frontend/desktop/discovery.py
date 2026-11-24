@@ -46,8 +46,6 @@ class DiscoveryService(QObject):
         self._name = socket.gethostname() or "elink"
         self._platform = f"{platform.system()} {platform.release()}".strip()
         self._hosting = False
-        self._srt_port = 0
-        self._control_port = 7000
         self._session_port = 0
         self._busy = False
         self._running = False
@@ -120,13 +118,11 @@ class DiscoveryService(QObject):
         self._publish(force=True)
         self.status_changed.emit("设备发现已关闭")
 
-    def set_hosting(self, hosting: bool, srt_port: int = 0, control_port: int = 7000) -> None:
+    def set_hosting(self, hosting: bool) -> None:
         """主机模式启动/停止时更新广播内容。"""
         hosting = bool(hosting)
-        srt_port = int(srt_port) if 0 <= int(srt_port or 0) <= 65535 else 0
-        control_port = int(control_port) if 0 <= int(control_port or 0) <= 65535 else 7000
-        changed = (hosting, srt_port, control_port) != (self._hosting, self._srt_port, self._control_port)
-        self._hosting, self._srt_port, self._control_port = hosting, srt_port, control_port
+        changed = hosting != self._hosting
+        self._hosting = hosting
         if changed and self._running:
             self._announce()
 
@@ -271,8 +267,6 @@ class DiscoveryService(QObject):
             "platform": self._platform,
             "version": __version__,
             "hosting": self._hosting,
-            "srt_port": self._srt_port if self._hosting else 0,
-            "control_port": self._control_port,
             "session_port": self._session_port,
             "busy": self._busy,
         }
@@ -295,8 +289,6 @@ class DiscoveryService(QObject):
             "platform": message.get("platform", ""),
             "version": message.get("version", ""),
             "hosting": bool(message.get("hosting")),
-            "srt_port": int(message.get("srt_port") or 0),
-            "control_port": int(message.get("control_port") or 7000),
             "session_port": int(message.get("session_port") or 0),
             "busy": bool(message.get("busy")),
             "ip": ip,
@@ -361,10 +353,9 @@ def _valid_message(message: Any) -> bool:
         value = message.get(key, "")
         if not isinstance(value, str) or len(value) > limit:
             return False
-    for key in ("srt_port", "control_port"):
-        value = message.get(key, 0)
-        if type(value) is not int or not 0 <= value <= 65535:
-            return False
+    port = message.get("session_port", 0)
+    if type(port) is not int or not 0 <= port <= 65535:
+        return False
     if not isinstance(message.get("hosting"), bool):
         return False
     return message.get("kind") in {"query", "announce"}

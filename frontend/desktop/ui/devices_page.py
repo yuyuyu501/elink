@@ -194,9 +194,7 @@ class DevicesPage(QWidget):
         self._discovery_enabled = True
         self._discovery_message = ""
         self._local_hosting = False
-        self._local_srt = ""
-        self._local_control_port = 7000
-        self._local_srt_ready = True
+        self._local_ready = True
         self.rows: list[ComputerRow] = []
 
         root = QVBoxLayout(self)
@@ -352,13 +350,9 @@ class DevicesPage(QWidget):
         self._update_discovery_hint()
         self._update_detail()
 
-    def set_local_state(
-        self, hosting: bool, srt_text: str = "", control_port: int = 7000, *, srt_ready: bool = True,
-    ) -> None:
+    def set_local_state(self, hosting: bool, *, ready: bool = True) -> None:
         self._local_hosting = hosting
-        self._local_srt = srt_text
-        self._local_control_port = control_port
-        self._local_srt_ready = srt_ready
+        self._local_ready = ready
 
     def set_devices(self, items: list[dict]) -> None:
         self._hardware = [dict(item) for item in items]
@@ -451,11 +445,8 @@ class DevicesPage(QWidget):
         lines = [f"系统：{peer.get('platform') or '未知'}"]
         if local:
             lines.append(f"设备发现：{'已开启' if self._discovery_enabled else '已关闭'}")
-            ready = self._local_srt_ready
+            ready = self._local_ready
             lines.append(f"桌面连接：{'会话运行中' if self._local_hosting else '等待连接' if ready else '监听未就绪'}")
-            if ready:
-                lines.append(f"串流地址：{self._local_srt}")
-                lines.append(f"控制端口：{self._local_control_port}")
             for item in self._hardware:
                 lines.append(str(item.get("name") or item.get("id") or ""))
         else:

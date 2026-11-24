@@ -19,12 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from backend.errors.codec import DecodeError, EncodeError
-from backend.errors.network import TransportClosedError
 from backend.logging.logger import get_logger
 from backend.media.video.codec.base import FfmpegDecoderBase, FfmpegEncoderBase
 from backend.pipeline.receive_pipeline import ReceivePipeline
 from backend.pipeline.video_pipeline import VideoPipeline
-from backend.transport.srt import SrtTransport
 from frontend.desktop import error_report
 from frontend.desktop.paths import error_dir
 from frontend.desktop.service import SessionService, ViewerSettings, _viewer_config
@@ -181,7 +179,7 @@ class ErrorReportTests(unittest.TestCase):
         capture.close.assert_called_once()
         muxer.close.assert_called_once()
 
-    def test_codec_and_srt_diagnostics_survive_cleanup(self):
+    def test_codec_diagnostics_survive_cleanup(self):
         for codec_type in (FfmpegEncoderBase, FfmpegDecoderBase):
             codec = codec_type(Mock())
             proc = Mock(args=["ffmpeg.exe", "-codec", "test"])
@@ -192,16 +190,6 @@ class ErrorReportTests(unittest.TestCase):
             self.assertIsNone(codec._proc)
             self.assertEqual(codec.diagnostics()["exit_code"], 7)
             self.assertIn("codec original", codec.diagnostics()["stderr"])
-        transport = SrtTransport("srt://127.0.0.1:9000")
-        proc = Mock(args=["ffmpeg.exe", "-i", "srt://127.0.0.1:9000"])
-        proc.poll.side_effect = [None, 99]
-        transport._proc = proc
-        transport._stderr_tail.append("srt original")
-        with patch("backend.transport.srt.subprocess.run"):
-            transport.abort()
-        transport.close()
-        self.assertIsNone(transport.diagnostics()["exit_code"])
-        self.assertEqual(transport.diagnostics()["stderr"], "srt original")
 
     def test_decoder_open_error_keeps_diagnostics(self):
         original = DecodeError("decoder original")
@@ -222,14 +210,11 @@ class ErrorReportTests(unittest.TestCase):
         original = DecodeError("decoder original", detail={"reason": "bad input"})
         original.process_diagnostics = {"command": ["ffmpeg.exe"], "exit_code": 9,
                                         "stderr": ["decoder stderr"]}
-        transport = Mock()
-        transport.diagnostics.return_value = {"command": ["srt.exe"], "exit_code": 1,
-                                              "stderr": "srt stderr"}
         pipeline = Mock()
         pipeline.run.side_effect = original
         pipeline.process_diagnostics = original.process_diagnostics
         runtime = Mock()
-        runtime.get.side_effect = {"pipeline": pipeline, "srt": transport}.get
+        runtime.get.side_effect = {"pipeline": pipeline}.get
         runtime.close.side_effect = lambda: self.assertEqual(len(self.entries()), 1)
         service._mode = "viewer"
         service.error_context = {"phase": "receiving", "peer": "100.1.2.3"}
@@ -240,27 +225,12 @@ class ErrorReportTests(unittest.TestCase):
             service._run_viewer(_viewer_config(ViewerSettings()), ViewerSettings())
         entry, = self.entries()
         self.assertEqual(entry["process"]["exit_code"], 9)
-        self.assertEqual(entry["context"]["srt"]["exit_code"], 1)
         self.assertEqual(entry["context"]["codec"]["stderr"], ["decoder stderr"])
         self.assertIn("decoder original", entry["traceback"])
         self.assertEqual(entry["context"]["peer"], "100.1.2.3")
         self.assertEqual(entry["context"]["role"], "viewer")
         self.assertTrue(service.failure_id)
-        transport.abort.assert_called_once()
         runtime.close.assert_called_once()
-
-    def test_unexpected_srt_end_but_not_intentional_stop_or_file_eof(self):
-        service = SessionService()
-        service._check_media_end()
-        service._transport = Mock()
-        service._transport.diagnostics.return_value = {"exit_code": 3}
-        with self.assertRaises(TransportClosedError) as caught:
-            service._check_media_end()
-        self.assertEqual(caught.exception.detail["exit_code"], 3)
-        service._stop.set()
-        service._check_media_end()
-        self.assertFalse(self.entries())
-
 
 if __name__ == "__main__":
     unittest.main()

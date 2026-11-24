@@ -28,7 +28,6 @@ from backend.media.video.codec.encoding.h264.libx264 import Libx264Encoder
 from backend.pipeline.video_pipeline import VideoPipeline
 from backend.pipeline.receive_pipeline import ReceivePipeline
 from backend.media.video.codec.probe import _sample_packets
-from backend.transport.srt import build_srt_url
 from frontend.desktop.service import SessionService, _QtRenderer
 
 APP = QCoreApplication.instance() or QCoreApplication([])
@@ -287,12 +286,10 @@ class StreamLatencyTests(unittest.TestCase):
         self.assertEqual(original.process_diagnostics["exit_code"], 22)
         self.assertFalse(pipeline._receiver.is_alive())
 
-    def test_expected_shutdown_marks_media_end_before_transport_is_aborted(self):
+    def test_expected_shutdown_marks_media_stop(self):
         service = SessionService()
-        service._transport = SimpleNamespace(diagnostics=lambda: {})
         service.expect_stop()
         self.assertTrue(service._stop.is_set())
-        service._check_media_end()
 
     def test_prepare_stop_marks_expectation_without_closing_media_and_new_session_clears_it(self):
         service = SessionService()
@@ -440,13 +437,6 @@ class StreamLatencyTests(unittest.TestCase):
         messages.put(move(30000, "relative"))
         messages.put(move(30000, "relative"))
         self.assertEqual(messages.qsize(), 2)
-
-    def test_srt_latency_converts_ms_to_us_without_duplicate_options(self):
-        url = build_srt_url("srt://localhost:9000?latency=1&streamid=test",
-                            mode="listener", latency_ms=120)
-        self.assertIn("latency=120000", url)
-        self.assertEqual(url.count("latency="), 1)
-        self.assertIn("streamid=test", url)
 
     def test_realtime_decode_feeds_without_waiting_and_assigns_pts_at_output(self):
         decoder = H264Decoder(StreamInfo(width=1, height=1), VideoEncodeConfig(realtime=True))

@@ -15,7 +15,6 @@ PySide6 桌面端，`scripts/` + `packaging/` 提供可验证的打包链路。
 | --- | --- | --- |
 | A | 采集 -> `Frame` -> `libx264` -> `Packet` -> MPEG-TS 写 `.ts` | 已实测 |
 | A | 读 `.ts` -> demux -> `Packet` -> `h264` 解码 -> `Frame` -> 写 PNG | 已实测 |
-| B | 同上，把文件换成 `transport/srt.py` 收发 | 已实测 |
 | C | 音频链路、协议层、协商、控制通道 | 已单测/自测 |
 | D | Qt 桌面端（设备列表/设备详情/远程会话/高级连接/设置）+ 托盘/自启 + 安装包 | 已实测（含冻结产物） |
 
@@ -37,7 +36,6 @@ PySide6 桌面端，`scripts/` + `packaging/` 提供可验证的打包链路。
 | `media/video/hwaccel/*` | 加速层 | D3D11VA/D3D12VA 解码可用；纹理为描述符；零拷贝通路做域/状态校验 |
 | `media/video/cursor/*` | Windows 完整 | 指针位图捕获 + alpha 合成 |
 | `pipeline/*` | 完整 | 视频（有界队列丢旧帧）、音频（背压不丢帧）、接收 |
-| `transport/srt` | 完整 | 借 ffmpeg libsrt 搬字节（`-c copy`） |
 | `transport/webrtc/*` | 协商层完整 | ICE 适配、轨道、DataChannel、PeerConnection（SRTP 加解密依赖底层栈） |
 | `signaling/*` | 完整 | SDP 构造/解析（唯一允许拼 SDP 处）、消息编解码、TCP 客户端/服务端 |
 | `control_channel/*` | 完整 | TCP / WebSocket（RFC 6455 子集）/ DataChannel，统一协议帧 |
@@ -53,13 +51,11 @@ PySide6 桌面端，`scripts/` + `packaging/` 提供可验证的打包链路。
 - Python 3.11+（后端只用标准库，`main.py` 的命令行链路**不需要** `pip install`）
 - **桌面端界面**：`PySide6 >= 6.7`（`pip install -e .` 会一并装上）
 - **打包**：`pyinstaller >= 6.10`（`pip install -e ".[dev]"`），Windows 安装包另需 Inno Setup 6
-- **ffmpeg 在 PATH 中**，需要 `libx264` 编码器与 `libsrt`（SRT 阶段用）
+- **ffmpeg 在 PATH 中**，需要 `libx264` 编码器
   - `ffmpeg -hide_banner -encoders | findstr libx264`
-  - `ffmpeg -hide_banner -protocols | findstr srt`
 - 可选：`cryptography`（E2EE）、`pyjnius`（Android 采集/注入/渲染）
 
-ffmpeg 只承担「算法」与「SRT 收发」：编码/解码走 rawvideo 管道，封解封装与
-时间戳全部由本项目实现，因此 `Frame`/`Packet`/`Timebase` 契约是真的在被验证。
+ffmpeg 用于媒体处理，本地文件的封装、解封装和时间戳处理由项目完成。
 
 ## 运行
 
@@ -76,19 +72,6 @@ python main.py --ui
 ```powershell
 py -3.13 main.py --mode loopback --duration 3 --width 640 --height 360 `
     --out out/demo.ts --frames-dir out/frames
-```
-
-发送端（SRT caller）：
-
-```powershell
-py -3.13 main.py --mode send --srt-url srt://127.0.0.1:9000 `
-    --duration 8 --width 640 --height 360
-```
-
-接收端（SRT listener，先启动）：
-
-```powershell
-py -3.13 main.py --mode receive --srt-url srt://127.0.0.1:9000 --frames-dir out/frames
 ```
 
 只解本地文件：
@@ -131,9 +114,8 @@ pip install -e .            # 安装 PySide6 依赖（或 pip install PySide6）
 python main.py --ui         # 启动桌面端
 ```
 
-- **主机**：采集 → 编码（libx264 / NVENC / QSV / AMF）→ MPEG-TS → SRT/文件，
-  并监听 TCP 控制通道接受远端键鼠、文本剪贴板和手柄。
-- **观看**：SRT/文件 → 解封装 → 解码 → 预览；可转发本机键鼠、剪贴板和 XInput 手柄；
+- **远控**：连接时按需采集、编码并通过 WebRTC 传输；键鼠、文本剪贴板和手柄走 DataChannel。
+- **观看**：通过 WebRTC 接收画面和声音，不发送键鼠、剪贴板或手柄输入；
   F8 释放输入、F10 叠加连接统计、F11 打开独立全屏播放器、Ctrl+Alt+Shift+Q 断开。
 - **全屏播放器**：独立全屏窗口，顶部悬浮控制栏（统计 / 释放输入 / 断开 / 退出），
   鼠标静止后自动隐藏；Esc/F11 退出。
@@ -145,8 +127,6 @@ python main.py --ui         # 启动桌面端
   同一设备的多个地址合并显示，支持名称/IP 搜索、电脑分组折叠与设备信息。
   点设备行只打开详情；「进入桌面」开启键鼠控制，「观看模式」关闭键鼠、剪贴板和手柄转发。
   设备离线或未开放串流时禁用连接。详情封面是默认壁纸，文件传输、终端和端口映射暂未开放。
-  当前协议只交换身份与端口，对方仍需从「高级连接 → 主机配置」开放 SRT 串流，
-  尚不支持远程按需启动采集；手动连接与原有运行总览也保留在高级连接中。
 - **设置**：开机自启、关闭到托盘、启动后自动开启主机、设备发现与同步开关、
   数据/日志目录与诊断信息复制。
 - 界面不直接碰 ffmpeg/socket/Win32：全部经 `frontend/desktop/service.py` 在后台
@@ -209,7 +189,7 @@ py -3.13 -m scripts.build
 > **后端在哪里**：PyInstaller 把 Python 模块压进 `Elink.exe` 内部的 `PYZ.pyz`，
 > 所以磁盘上不会出现独立的 `backend/` 目录，但 backend 确实在 exe 里（本次包内有
 > 222 个 backend 模块）；`_internal/` 放的是 Python 运行时、Qt DLL 与图标等资源。
-> 后端不是独立服务，它和界面在同一个进程里，用后台线程跑采集/编码/SRT/控制通道。
+> 后端和界面在同一进程中，采集、编码和 WebRTC 会话由后台线程运行。
 > Windows 发布包内置 **ffmpeg**，无需目标机器另行安装；源码运行仍需配置 ffmpeg。
 
 **打包必须验证产物本身**：`scripts/package_windows.py` 会用打好的 exe 跑
@@ -234,7 +214,6 @@ python -m scripts.package_linux      # PyInstaller 目录 + tar.gz + elink.deskt
 - **渲染**：D3D11/D3D12 的交换链未接入，目前是 CPU 上屏；接口与之保持一致。
 - **时间戳**：解码器按「第 N 个输出帧对应第 N 个输入包」映射 PTS，要求码流无 B 帧
   重排序（编码端固定 `-bf 0`）。
-- **SRT**：借 ffmpeg 的 libsrt 搬字节（`-c copy`），本项目不做 SRT 协议实现；
   连接建立时前 1~3 帧会因探测窗口被丢弃（实测 5 秒 150 帧收到 149 帧）。
 - **SRTP/E2EE**：密钥派生已实现，实际加解密需要 `cryptography` 或底层 WebRTC 栈。
 - **MPEG-TS**：当前只封装单路视频；音频进 TS 需要扩展 muxer 的 stream_type 表。

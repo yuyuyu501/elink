@@ -68,9 +68,6 @@ class TransportConfig:
 
     kind: str = "file"
     path: str = "out/demo.ts"
-    srt_url: str = "srt://127.0.0.1:9000"
-    srt_mode: str = "caller"
-    srt_latency_ms: int = 120
 
 
 @dataclass

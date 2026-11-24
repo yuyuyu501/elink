@@ -49,13 +49,6 @@ def run_self_test(executable: Path, timeout: float = 180.0) -> dict:
         raise RuntimeError("Bundled ffmpeg.exe is missing")
     windows = Path(env.get("SystemRoot", r"C:\Windows"))
     env["PATH"] = os.pathsep.join(str(windows / part) for part in ("System32", "", "System32/Wbem"))
-    protocols = subprocess.run(
-        [str(bundled_ffmpeg), "-hide_banner", "-protocols"],
-        capture_output=True, text=True, env=env, timeout=15,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if protocols.returncode or "srt" not in protocols.stdout.split():
-        raise RuntimeError("Bundled ffmpeg is missing SRT support or runtime dependencies")
     if env.get("CI") or env.get("ELINK_SELFTEST_HEADLESS") == "1":
         # GitHub Actions 的 Windows runner 没有交互式桌面；真实 windows 平台插件
         # 在服务会话里无法初始化。CI 下强制 offscreen，只验证页面/媒体/后端。
@@ -93,7 +86,6 @@ def run_self_test(executable: Path, timeout: float = 180.0) -> dict:
         raise RuntimeError("Bundled ffmpeg is missing libx264")
     report["exit_code"] = process.returncode
     report["system_ffmpeg_excluded"] = True
-    report["srt_available"] = True
     media = report.get("media", {})
     if media.get("decoded_frames", 0) <= 0:
         raise RuntimeError("产物媒体链路自检失败：没有解出任何帧")
@@ -202,7 +194,6 @@ def package(dist_dir: Path | None = None, *, installer: bool = True, run_tests: 
             "backend_import": report.get("registry", {}).get("module_import"),
             "exit_code": report["exit_code"],
             "system_ffmpeg_excluded": report["system_ffmpeg_excluded"],
-            "srt_available": report["srt_available"],
         },
         "bundled_ffmpeg": {
             "path": "ffmpeg/ffmpeg.exe",

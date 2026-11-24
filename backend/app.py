@@ -2,8 +2,7 @@
 
 三种运行模式对应 PLAN_1 的验证路径：
 - ``loopback``：采集 -> 编码 -> 写 .ts -> 读 .ts -> 解码 -> 写 PNG（本地闭环）
-- ``send``：同上，但字节流写到 SRT
-- ``receive``：从 SRT / 文件读取并解码写图
+- ``receive``：从文件读取并解码写图
 
 ``loopback`` 的目的就是让「抽象是否够用」先于「网络是否通」被验证。
 """
@@ -59,9 +58,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--out", help="发送目标文件路径（file 传输）")
     parser.add_argument("--frames-dir", help="解码帧写图目录")
-    parser.add_argument("--srt-url", help="SRT 地址，如 srt://127.0.0.1:9000")
-    parser.add_argument("--srt-mode", choices=["caller", "listener"], help="SRT 模式")
-    parser.add_argument("--srt-latency", type=int, help="SRT 延迟（毫秒）")
     return parser
 
 
@@ -84,14 +80,8 @@ def config_from_args(args: argparse.Namespace) -> AppConfig:
         "encode.gop": args.gop,
         "encode.ffmpeg_path": args.ffmpeg,
         "transport.path": args.out,
-        "transport.srt_url": args.srt_url,
-        "transport.srt_mode": args.srt_mode,
-        "transport.srt_latency_ms": args.srt_latency,
         "frames_dir": args.frames_dir,
     }
-    if args.srt_url:
-        # 给了 SRT 地址就说明要走网络，否则容易误落到本地文件
-        overrides["transport.kind"] = "srt"
     return merge_cli_overrides(config, overrides)
 
 

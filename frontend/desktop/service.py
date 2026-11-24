@@ -7,10 +7,10 @@
 
 数据流：
 
-    主机模式  采集 → [缩放] → 预览tap → 编码 → MPEG-TS → SRT/文件
+    本地录制  采集 → [缩放] → 预览tap → 编码 → MPEG-TS 文件
               控制通道(TCP 服务端) → 输入注入
 
-    观看模式  SRT/文件 → 解封装 → 解码 → 预览
+    本地播放  MPEG-TS 文件 → 解封装 → 解码 → 预览
               本机输入捕获 → 控制通道(TCP 客户端) → 对方
 """
 
@@ -40,7 +40,6 @@ from backend.control_channel.base import ChannelState
 from backend.control_channel.tcp import TcpControlChannel
 from backend.input_injection.session import InputSession
 from backend.input_capture.mouse import mouse_mode
-from backend.errors.network import TransportClosedError
 from backend.media.device.display import DisplayInfo, list_displays
 from backend.media.device.enumerate import DeviceKind, enumerate_devices
 from backend.media.frame import Frame
@@ -67,16 +66,13 @@ class HostSettings:
     encoder: str = "libx264"
     codec: str = "h264"
     preset: str = "veryfast"
-    transport: str = "srt"  # srt / file
-    srt_url: str = "srt://0.0.0.0:9000"
-    srt_mode: str = "listener"
+    transport: str = "file"
     file_path: str = "out/host.ts"
     control_port: int = 7000
     allow_inject: bool = True
     clipboard_enabled: bool = True
     gamepad_enabled: bool = True
     ffmpeg_path: str = "ffmpeg"
-    srt_latency_ms: int = 120
     session_token: str = ""
     motion_port: int = 0
     gamepad_backend: str = "vigem"
@@ -86,9 +82,7 @@ class HostSettings:
 class ViewerSettings:
     """观看（控制）模式的界面参数。"""
 
-    srt_url: str = "srt://127.0.0.1:9000"
-    transport: str = "srt"  # srt / file
-    srt_mode: str = "caller"
+    transport: str = "webrtc"
     file_path: str = "out/host.ts"
     control_host: str = "127.0.0.1"
     control_port: int = 7000
@@ -115,8 +109,6 @@ class ViewerSettings:
     output_width: int = 1920
     output_height: int = 1080
     ffmpeg_path: str = "ffmpeg"
-    protocol_preferences: dict = field(default_factory=dict)
-    srt_latency_ms: int = 120
     session_token: str = ""
     motion_port: int = 0
     muted: bool = False
@@ -364,7 +356,6 @@ class SessionService(QObject):
         self._mode = ""
         self._started_at = 0.0
         self._devices_loading = False
-        self._transport = None
         self._host_live: HostSettings | None = None
         self._stats_worker: threading.Thread | None = None
         self._control_worker: threading.Thread | None = None
@@ -633,10 +624,7 @@ class SessionService(QObject):
             self._stop_control()
             return
         self._stop.set()
-        transport = self._transport
         pipeline = self._pipeline
-        if transport is not None and not getattr(pipeline, "abort_source", None):
-            threading.Thread(target=transport.abort, name="media-stop", daemon=True).start()
         self.state_changed.emit("stopping", "正在停止…")
         if pipeline is not None and hasattr(pipeline, "stop"):
             try:
@@ -680,7 +668,6 @@ class SessionService(QObject):
             self._injector.close()
             self._injector = None
         self._pipeline = None
-        self._transport = None
         self._session_audio = None
         self._host_live = None
         self._viewer_live = None
@@ -694,7 +681,6 @@ class SessionService(QObject):
         context = {
             **self.error_context, "role": self._mode,
             "settings": self._settings_snapshot,
-            "srt": self._transport.diagnostics() if self._transport else None,
             "codec": getattr(self._pipeline, "process_diagnostics", None),
         }
         self.failure_id = save_error(error, fault_id=self.failure_id, context=context)
@@ -702,9 +688,6 @@ class SessionService(QObject):
             self.failure_message = str(error)
             self.failure_details = error_details(error)
 
-    def _check_media_end(self) -> None:
-        if not self._stop.is_set() and self._transport is not None:
-            raise TransportClosedError("画面传输意外结束", detail=self._transport.diagnostics())
 
     def _stats_loop(self, source, *, is_host: bool) -> None:
         """每秒把管线统计搬到界面（读取失败不影响主流程）。"""
@@ -799,7 +782,6 @@ class SessionService(QObject):
             runtime = build_send_resources(config, registry)
             pipeline = runtime.get("pipeline")
             self._pipeline = pipeline
-            self._transport = runtime.get("srt")
             self._session_audio = runtime.get("audio")
             if self._stop.is_set():
                 return
@@ -807,11 +789,6 @@ class SessionService(QObject):
             tap = _PreviewTap(self._frame_sink())
             pipeline.filters.extend([*filters, tap])
 
-            self._start_control_server(settings)
-            if settings.clipboard_enabled:
-                self._start_clipboard()
-            if settings.gamepad_enabled:
-                self._start_gamepad_host()
             self.log.emit(
                 f"主机模式已启动：{config.transport.kind} · {settings.width}x{settings.height}"
                 f"@{settings.fps:g} · {settings.bitrate_kbps}kbps · 编码器 {config.encode.encoder}",
@@ -824,7 +801,6 @@ class SessionService(QObject):
             self.host_prepared.emit()
 
             stats = pipeline.run()
-            self._check_media_end()
             self.log.emit(f"发送结束：{stats.summary()}", "info")
             self._stats.bytes_out = getattr(stats, "bytes_written", self._stats.bytes_out)
         except Exception as exc:
@@ -834,9 +810,6 @@ class SessionService(QObject):
                 self.state_changed.emit("error", str(exc))
         finally:
             if runtime is not None:
-                transport = runtime.get("srt")
-                if transport is not None:
-                    transport.abort()
                 runtime.close()
             self._finish("发送已停止")
 
@@ -847,7 +820,6 @@ class SessionService(QObject):
             runtime = build_receive_resources(config, registry)
             pipeline = runtime.get("pipeline")
             self._pipeline = pipeline
-            self._transport = runtime.get("srt")
             self._session_audio = runtime.get("audio")
             if self._stop.is_set():
                 return
@@ -857,19 +829,13 @@ class SessionService(QObject):
                 failure=self._upscale_failure)
             self._renderer = pipeline.renderer
 
-            self._start_control_client(settings)
-            if settings.control_enabled and settings.clipboard_enabled:
-                self._start_clipboard()
-            if settings.control_enabled and settings.gamepad_enabled:
-                self._start_gamepad_viewer()
-            self.log.emit(f"观看模式已启动：{settings.srt_url if settings.transport == 'srt' else settings.file_path}", "info")
+            self.log.emit(f"观看模式已启动：{settings.file_path}", "info")
             self._stats_worker = threading.Thread(
                 target=self._stats_loop, args=(pipeline,), kwargs={"is_host": False}, daemon=True
             )
             self._stats_worker.start()
 
             stats = pipeline.run()
-            self._check_media_end()
             self.log.emit(f"接收结束：{stats.summary()}", "info")
         except Exception as exc:
             if not self._stop.is_set():
@@ -879,9 +845,6 @@ class SessionService(QObject):
         finally:
             self._renderer = None
             if runtime is not None:
-                transport = runtime.get("srt")
-                if transport is not None:
-                    transport.abort()
                 runtime.close()
             self._finish("接收已停止")
 
@@ -1475,10 +1438,7 @@ def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
     config.encode.ffmpeg_path = settings.ffmpeg_path
     config.encode.gop = max(1, int(settings.fps * 2))
     config.transport.kind = settings.transport
-    config.transport.srt_url = settings.srt_url
-    config.transport.srt_mode = settings.srt_mode
     config.transport.path = settings.file_path
-    config.transport.srt_latency_ms = settings.srt_latency_ms
     config.audio.enabled = settings.transport != "file"
     config.validate()
 
@@ -1496,8 +1456,6 @@ def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
 def _viewer_config(settings: ViewerSettings) -> AppConfig:
     config = AppConfig(mode="receive")
     config.transport.kind = settings.transport
-    config.transport.srt_url = settings.srt_url
-    config.transport.srt_mode = settings.srt_mode
     config.transport.path = settings.file_path
     config.encode.ffmpeg_path = settings.ffmpeg_path
     config.encode.realtime = settings.transport != "file"
@@ -1508,7 +1466,6 @@ def _viewer_config(settings: ViewerSettings) -> AppConfig:
         config.encode.height = settings.stream_height
         config.encode.framerate = settings.stream_fps
     config.capture.fps = settings.stream_fps
-    config.transport.srt_latency_ms = settings.srt_latency_ms
     config.audio.enabled = settings.transport != "file"
     config.audio.muted = settings.muted
     config.validate()

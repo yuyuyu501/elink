@@ -339,7 +339,7 @@ def public_capabilities(snapshot: dict) -> dict:
     })
 
 
-def compatible_choices(remote: dict, local: dict, preference: dict, transport="srt") -> list[dict]:
+def compatible_choices(remote: dict, local: dict, preference: dict) -> list[dict]:
     options = codec_options(preference)
     encoders, decoders = remote.get("encoders", {}), local.get("decoders", {})
     result = []
@@ -348,7 +348,7 @@ def compatible_choices(remote: dict, local: dict, preference: dict, transport="s
             continue
         for encoder in sorted(encoders, key=lambda n: n.startswith("lib")):
             enc = encoders[encoder]
-            if transport == "webrtc" and encoder.endswith(("_vaapi", "_mediacodec")):
+            if encoder.endswith(("_vaapi", "_mediacodec")):
                 continue
             if enc["codec"] != codec or options["encoder"] not in ("auto", encoder):
                 continue

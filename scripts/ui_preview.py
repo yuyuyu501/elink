@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.demo_peers:
         window.discovery.stop()
         window.devices_page.set_discovery_state(True, "发现 2 台同网设备")
-        window.devices_page.set_local_state(True, "srt://0.0.0.0:9000", 7000)
+        window.devices_page.set_local_state(True)
         window.devices_page.set_peers(
             [
                 {
@@ -60,8 +60,6 @@ def main(argv: list[str] | None = None) -> int:
                     "platform": "Windows 11",
                     "version": __version__,
                     "hosting": True,
-                    "srt_port": 9000,
-                    "control_port": 7000,
                 },
                 {
                     "id": "b" * 16,
@@ -70,8 +68,6 @@ def main(argv: list[str] | None = None) -> int:
                     "platform": "Windows 10",
                     "version": __version__,
                     "hosting": False,
-                    "srt_port": 0,
-                    "control_port": 7000,
                 },
             ]
         )

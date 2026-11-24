@@ -80,7 +80,6 @@ class DesktopConnection(QObject):
         self._control = True
         self._peer: dict = {}
         self._viewer = ViewerSettings()
-        self._srt_port = self._control_port = 0
         self._pending_action = None
         self._session_id = ""
         self._stop_deadline = 0.0
@@ -99,9 +98,6 @@ class DesktopConnection(QObject):
         self._validating = None
         self._rollback = False
         self._host_attempted = False
-        self._protocol = "webrtc"
-        self._prior_protocol = None
-        self._applied_protocol = "webrtc"
         self._live_enabled = False
         self._live = None
         self._live_committing = False
@@ -117,7 +113,7 @@ class DesktopConnection(QObject):
         service.state_changed.connect(self._service_state)
         if hasattr(service, "rtc_signal"):
             service.rtc_signal.connect(lambda value: self._send("rtc", description=value)
-                                       if self._protocol == "webrtc" and self.phase not in {"idle", "stopping"} else None)
+                                       if self.phase not in {"idle", "stopping"} else None)
         if hasattr(service, "refresh_codecs"):
             service.capabilities_changed.connect(self._capabilities_ready)
             service.codec_validated.connect(self._codec_validated)
@@ -160,12 +156,11 @@ class DesktopConnection(QObject):
     def _begin_choices(self):
         try:
             self._choices = compatible_choices(self._peer_caps, self.service.codec_capabilities,
-                                               self._preferences, self._protocol)
+                                               self._preferences)
         except ValueError as exc:
             if self.service.running:
                 if self._previous is not None:
                     self._picture, self._previous = self._previous, None
-                self._protocol, self._prior_protocol = self._prior_protocol or self._protocol, None
                 self.phase = "active"
                 self.error.emit(str(exc))
                 self.changed.emit()
@@ -184,7 +179,6 @@ class DesktopConnection(QObject):
                 if self._previous is not None:
                     self._picture, self._previous = self._previous, None
                 self._selection, self._prior_selection = self._prior_selection, None
-                self._protocol, self._prior_protocol = self._prior_protocol or self._protocol, None
                 self.phase = "active"
                 self.changed.emit()
                 return
@@ -224,7 +218,7 @@ class DesktopConnection(QObject):
             self._host_attempted = True
             self._send("select", picture=self._picture, selection=self._selection,
                        preference=self._preferences, capabilities=self.service.codec_capabilities,
-                       revision=self._revision, transport=self._protocol)
+                       revision=self._revision, transport="webrtc")
         elif self.service.running:
             self.phase = "updating"
             self._request_media_stop()
@@ -238,7 +232,6 @@ class DesktopConnection(QObject):
             return
         self._picture, self._previous = self._previous, None
         self._selection, self._prior_selection = self._prior_selection, None
-        self._protocol, self._prior_protocol = self._prior_protocol or self._protocol, None
         self._rollback = True
         self._send("rollback", message="编解码设置失败，恢复此前参数")
         self.phase = "updating"
@@ -320,12 +313,6 @@ class DesktopConnection(QObject):
             self.error.emit(str(exc))
             return
         self._peer, self._viewer = dict(peer), replace(viewer)
-        protocols = viewer.protocol_preferences if isinstance(viewer.protocol_preferences, dict) else {}
-        self._protocol = protocols.get(str(peer["id"]), "webrtc" if hasattr(self.service, "rtc_signal") else "srt")
-        if self._protocol not in {"webrtc", "srt"}:
-            self._protocol = "webrtc"
-        self._applied_protocol = self._protocol
-        self._prior_protocol = None
         self._picture, self._previous, self._control = stream_picture(picture, viewer), None, control
         if hasattr(self.service, "refresh_codecs"):
             self.service.refresh_codecs(viewer.ffmpeg_path)
@@ -339,7 +326,7 @@ class DesktopConnection(QObject):
         sock.connected.connect(lambda: self._send(
             "request", target=peer["id"], control=control, picture=picture,
             codec_selection=hasattr(self.service, "refresh_codecs"),
-            transport=self._protocol,
+            transport="webrtc",
             live_settings=hasattr(self.service, "update_live"),
             upscale=True, upscale_picture=self._picture)
             if sock is self.socket and self.phase == "connecting" else None)
@@ -409,7 +396,7 @@ class DesktopConnection(QObject):
             # The peer may finish or fail while this attempt is already being replaced.
             return
         if kind == "rtc":
-            if self._protocol != "webrtc" or self.phase not in {"preparing", "receiving", "active"}:
+            if self.phase not in {"preparing", "receiving", "active"}:
                 raise ValueError("WebRTC 信令与当前会话不匹配")
             self.service.receive_rtc(message["description"])
             return
@@ -441,14 +428,11 @@ class DesktopConnection(QObject):
             if not isinstance(message.get("control"), bool):
                 raise ValueError("会话模式无效")
             self._control = message["control"]
-            self._protocol = message.get("transport", "srt")
-            if self._protocol not in {"webrtc", "srt"}:
-                raise ValueError("传输协议无效")
+            if message.get("transport") != "webrtc":
+                raise ValueError("对端版本不兼容：仅支持 WebRTC")
             self._session_id = str(message.get("session", ""))
             self._previous = None
             self._prior_selection = None
-            self._prior_protocol = None
-            self._prior_protocol = None
             self._codec_enabled = message.get("codec_selection") is True and hasattr(self.service, "refresh_codecs")
             if self._codec_enabled:
                 self.phase = "negotiating"
@@ -472,7 +456,7 @@ class DesktopConnection(QObject):
                 return
             picture = picture_settings(message["picture"])
             selection = codec_options(message["selection"])
-            choices = compatible_choices(self.service.codec_capabilities, self._peer_caps, selection, self._protocol)
+            choices = compatible_choices(self.service.codec_capabilities, self._peer_caps, selection)
             if selection not in choices or selection["codec"] != self._selection["codec"]:
                 raise ValueError("会话内编解码组合无效")
             self._revision = revision
@@ -502,17 +486,15 @@ class DesktopConnection(QObject):
             selection = codec_options(message["selection"])
             preference = codec_options(message["preference"])
             peer_caps = checked_capabilities(message["capabilities"])
-            transport = message.get("transport", self._protocol)
-            if transport not in {"webrtc", "srt"}:
-                raise ValueError("传输协议无效")
-            choices = compatible_choices(self.service.codec_capabilities, peer_caps, preference, transport)
+            transport = message.get("transport", "webrtc")
+            if transport != "webrtc":
+                raise ValueError("对端版本不兼容：仅支持 WebRTC")
+            choices = compatible_choices(self.service.codec_capabilities, peer_caps, preference)
             if selection not in choices:
                 raise ValueError("所选编解码器未通过双方能力验证")
             if self.phase == "active" and self._previous is None:
                 self._previous = dict(self._picture)
                 self._prior_selection = dict(self._selection)
-                self._prior_protocol = self._protocol
-            self._protocol = transport
             self._rollback = False
             self._peer_caps = peer_caps
             self._picture, self._selection, self._preferences = picture, selection, preference
@@ -557,32 +539,21 @@ class DesktopConnection(QObject):
             if message.get("id") != self._peer["id"]:
                 raise ValueError("设备标识不匹配")
             self._picture = picture_settings(message["picture"])
-            self._protocol = message.get("transport", "srt")
-            if self._protocol not in {"webrtc", "srt"}:
-                raise ValueError("传输协议无效")
+            if message.get("transport") != "webrtc":
+                raise ValueError("对端版本不兼容：仅支持 WebRTC")
             self._upscale_enabled = message.get("upscale") is True
             if self._codec_enabled:
                 self._selection = codec_options(message["selection"])
-                if self._selection not in compatible_choices(self._peer_caps, self.service.codec_capabilities, self._selection, self._protocol):
+                if self._selection not in compatible_choices(self._peer_caps, self.service.codec_capabilities, self._selection):
                     raise ValueError("对端返回了无效编解码组合")
                 self._rollback = message.get("rollback") is True
-            self._srt_port, self._control_port = int(message["srt_port"]), int(message["control_port"])
-            latency = message.get("srt_latency_ms", 120)
-            if type(latency) is not int or not 20 <= latency <= 2000:
-                raise ValueError("SRT 延迟参数无效")
-            if not all(0 < port <= 65535 for port in (self._srt_port, self._control_port, self._control_port + 2)):
-                raise ValueError("会话端口无效")
             self.phase = "receiving"
             self._started = time.monotonic()
             self._update_error_context()
             sr = self._picture.get("upscale")
             self._viewer = replace(
-                self._viewer, transport=self._protocol, srt_mode="caller",
-                srt_url=f"srt://{self._peer['ip']}:{self._srt_port}",
-                control_host=self._peer["ip"], control_port=self._control_port,
-                control_enabled=self._control,
-                srt_latency_ms=latency,
-                session_token=self._session_id, motion_port=self._control_port + 2,
+                self._viewer, transport="webrtc", control_enabled=self._control,
+                session_token=self._session_id,
                 clipboard_enabled=True, gamepad_enabled=True,
                 **{f"stream_{key}": self._picture[key] for key in PICTURE_KEYS},
                 output_width=sr["width"] if sr else self._picture["width"],
@@ -654,18 +625,9 @@ class DesktopConnection(QObject):
     def _start_host(self) -> None:
         self.phase = "preparing"
         self._started = time.monotonic()
-        # Session requests and input use separate TCP ports; SRT uses UDP.
-        self._control_port = self.server.serverPort() + 1
-        self._srt_port = self.server.serverPort() + 2
-        if self._control_port + 2 > 65535:
-            self._fail("会话端口超出范围")
-            return
         settings = replace(
-            self.host, **{key: self._picture[key] for key in PICTURE_KEYS}, transport=self._protocol, srt_mode="listener",
-            srt_url=f"srt://0.0.0.0:{self._srt_port}",
-            control_port=self._control_port, allow_inject=self._control,
-            srt_latency_ms=max(20, min(2000, int(self.host.srt_latency_ms))),
-            session_token=self._session_id, motion_port=self._control_port + 2,
+            self.host, **{key: self._picture[key] for key in PICTURE_KEYS}, transport="webrtc",
+            allow_inject=self._control, session_token=self._session_id,
             clipboard_enabled=self._control, gamepad_enabled=self._control,
             **({"codec": self._selection["codec"], "encoder": self._selection["encoder"]}
                if self._selection else {}),
@@ -683,9 +645,8 @@ class DesktopConnection(QObject):
             actual = getattr(self.service, "_host_live", None)
             if actual is not None:
                 self._picture = {**self._picture, "width": actual.width, "height": actual.height}
-            self._send("ready", srt_port=self._srt_port, control_port=self._control_port,
-                       transport=self._protocol,
-                       srt_latency_ms=getattr(actual, "srt_latency_ms", self.host.srt_latency_ms),
+            # Older WebRTC clients validate these unused port fields.
+            self._send("ready", srt_port=9000, control_port=7000, transport="webrtc",
                        picture=self._picture, upscale=True, live_settings=hasattr(self.service, "update_live"), **({
                            "selection": self._selection, "revision": self._revision, "rollback": self._rollback
                        } if self._codec_enabled else {}))
@@ -701,12 +662,9 @@ class DesktopConnection(QObject):
             self.phase = "active"
             self._previous = None
             self._prior_selection = None
-            self._prior_protocol = None
-            self._applied_protocol = self._protocol
             if self._codec_enabled and not self._rollback:
                 self._applied_options = dict(self._preferences)
                 self._viewer.codec_preferences[str(self._peer["id"])] = {"codec": self._selection["codec"]}
-                self._viewer.protocol_preferences[str(self._peer["id"])] = self._protocol
             self._clear_failure()
             self._send("active")
             self._viewer = replace(
@@ -721,9 +679,6 @@ class DesktopConnection(QObject):
         self._clear_failure()
         try:
             options = codec_options(picture) if "codec" in picture else self._applied_options
-            protocol = picture.get("transport", self._protocol)
-            if protocol not in {"webrtc", "srt"}:
-                raise ValueError("传输协议无效")
             settings = upscale if upscale is not None else self._viewer
             if settings.sr_enabled and not self._upscale_enabled:
                 raise ValueError("对端版本不支持超分压缩比")
@@ -734,11 +689,11 @@ class DesktopConnection(QObject):
             self._clear_failure()
             return
         if (self.phase == "active" and picture == self._picture
-                and options == self._applied_options and protocol == self._protocol):
+                and options == self._applied_options):
             return
-        if self._live_enabled and self.phase == "active" and protocol == self._protocol:
+        if self._live_enabled and self.phase == "active":
             try:
-                choices = compatible_choices(self._peer_caps, self.service.codec_capabilities, options, protocol)
+                choices = compatible_choices(self._peer_caps, self.service.codec_capabilities, options)
                 selection = self._selection if self._selection in choices else choices[0]
                 if selection["codec"] == self._selection["codec"]:
                     viewer = replace(
@@ -764,8 +719,6 @@ class DesktopConnection(QObject):
         if self._codec_enabled:
             self._previous = dict(self._picture)
             self._prior_selection = dict(self._selection) if self._selection else None
-            self._prior_protocol = self._protocol
-            self._protocol = protocol
             self._picture, self._preferences = picture, options
             self._rollback = False
             self._host_attempted = False

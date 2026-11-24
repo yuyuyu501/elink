@@ -23,7 +23,6 @@ from backend.media.stream import CodecId
 from backend.pipeline.receive_pipeline import ReceivePipeline
 from backend.pipeline.video_pipeline import VideoPipeline
 from backend.registry.codec_registry import CodecRegistry, build_default_registry
-from backend.transport.srt import SrtTransport
 
 logger = get_logger(__name__)
 
@@ -115,7 +114,7 @@ def build_send_resources(
     registry: CodecRegistry,
     bus: EventBus | None = None,
 ) -> Runtime:
-    """组装发送链路：采集 -> 编码 -> MPEG-TS -> sink（文件或 SRT）。"""
+    """组装本地文件链路：采集 -> 编码 -> MPEG-TS。"""
     transport = config.transport
     sink: BinaryIO
     resources: dict[str, object] = {}
@@ -126,18 +125,6 @@ def build_send_resources(
         sink = path.open("wb")
         resources["sink"] = sink
         logger.info("发送目标: 文件 %s", path.resolve())
-    elif transport.kind == "srt":
-        srt = SrtTransport(
-            transport.srt_url,
-            mode=transport.srt_mode,
-            direction="send",
-            latency_ms=transport.srt_latency_ms,
-            ffmpeg_path=config.encode.ffmpeg_path,
-        )
-        srt.open()
-        sink = srt.writer
-        resources["srt"] = srt
-        logger.info("发送目标: %s", srt.url)
     else:
         raise BootstrapError(f"未知传输类型: {transport.kind}", detail=transport.kind)
 
@@ -189,18 +176,6 @@ def build_receive_resources(
             raise BootstrapError(f"输入文件不存在: {path}", detail=str(path))
         source = path.open("rb")
         resources["source"] = source
-    elif config.transport.kind == "srt":
-        srt = SrtTransport(
-            config.transport.srt_url,
-            mode=config.transport.srt_mode,
-            direction="receive",
-            latency_ms=config.transport.srt_latency_ms,
-            ffmpeg_path=config.encode.ffmpeg_path,
-        )
-        srt.open()
-        source = srt.reader
-        resources["srt"] = srt
-        logger.info("接收来源: %s", srt.url)
     else:
         raise BootstrapError(
             f"未知传输类型: {config.transport.kind}", detail=config.transport.kind
@@ -228,8 +203,6 @@ def build_receive_resources(
         bus=bus,
     )
 
-    if "srt" in resources:
-        pipeline.abort_source = resources["srt"].abort
     resources.update({"pipeline": pipeline, "demuxer": demuxer, "renderer": renderer})
     if config.audio.enabled:
         from backend.pipeline.audio_pipeline import SessionAudio

@@ -23,7 +23,6 @@ from PySide6.QtWidgets import QApplication
 from frontend.desktop.connection import DesktopConnection, PROTOCOL, picture_settings
 from frontend.desktop.service import HostSettings, SessionService, ViewerSettings
 from frontend.desktop.settings import UiSettings, _merge
-from backend.transport.srt import SrtTransport
 
 APP = QApplication.instance() or QApplication([])
 
@@ -122,8 +121,8 @@ class ConnectionTests(unittest.TestCase):
         self.assertFalse(self.host_media.starts)
         self.connect()
         self.assertTrue(self.host_media.inject)
-        self.assertEqual(self.host_media.starts[0].srt_mode, "listener")
-        self.assertEqual(self.viewer_media.starts[0].srt_mode, "caller")
+        self.assertEqual(self.host_media.starts[0].transport, "webrtc")
+        self.assertEqual(self.viewer_media.starts[0].transport, "webrtc")
         self.assertEqual(len(self.applied), 1)
 
     def test_watch_switch_changes_host_permission_without_restarting_media(self):
@@ -338,7 +337,7 @@ class ConnectionTests(unittest.TestCase):
         sock.connectToHost("127.0.0.1", self.peer["session_port"])
         wait_until(lambda: self.host.socket is not None)
         payload = json.dumps({"proto": PROTOCOL, "kind": "request", "id": "viewer",
-                              "target": "host", "control": False,
+                              "target": "host", "control": False, "transport": "webrtc",
                               "picture": {"width": 1280, "height": 720, "fps": 30,
                                           "bitrate_kbps": 4000}}).encode() + b"\n"
         sock.write(payload[:18])
@@ -350,6 +349,20 @@ class ConnectionTests(unittest.TestCase):
         sock.write(b"not json\n")
         wait_until(lambda: self.host.phase == "idle")
         self.assertFalse(self.host_media.running)
+        sock.abort()
+
+    def test_srt_only_peer_is_rejected_before_media_starts(self):
+        sock = QTcpSocket()
+        sock.connectToHost("127.0.0.1", self.peer["session_port"])
+        wait_until(lambda: self.host.socket is not None)
+        sock.write(DesktopConnection._encode(
+            "request", id="legacy", target="host", control=False, transport="srt",
+            picture={"width": 1280, "height": 720, "fps": 30, "bitrate_kbps": 4000}))
+        wait_until(lambda: self.host.phase == "idle" and sock.canReadLine())
+        replies = [json.loads(line) for line in bytes(sock.readAll()).splitlines()]
+        reply = next(item for item in replies if item["kind"] == "error")
+        self.assertIn("WebRTC", reply["message"])
+        self.assertFalse(self.host_media.starts)
         sock.abort()
 
     def test_timeout_stops_both_sides(self):
@@ -403,7 +416,8 @@ class SettingsAndTransportTests(unittest.TestCase):
         self.assertTrue(viewer.clipboard_enabled and viewer.gamepad_enabled)
         self.assertEqual(viewer.decoder, "h264")
         self.assertEqual(viewer.codec_preferences["peer"], {"codec": "h264"})
-        self.assertEqual(viewer.protocol_preferences, {"peer": "srt"})
+        self.assertEqual(viewer.transport, "webrtc")
+        self.assertFalse(hasattr(viewer, "protocol_preferences"))
 
     def test_legacy_switches_are_ignored(self):
         settings = _merge(UiSettings, {"allow_discovery": False, "auto_host": True,
@@ -433,31 +447,6 @@ class SettingsAndTransportTests(unittest.TestCase):
         for value in (299, 50001, float("inf")):
             with self.assertRaises(ValueError):
                 picture_settings({**picture, "bitrate_kbps": value})
-
-    def test_srt_direction_is_independent_of_connection_mode(self):
-        with patch("backend.transport.srt.subprocess.Popen") as process:
-            sender = SrtTransport("srt://0.0.0.0:9000", mode="listener", direction="send")
-            sender.open()
-            self.assertIn("pipe:0", process.call_args.args[0])
-            self.assertIn("mode=listener", sender.url)
-            self.assertIs(sender.writer, process.return_value.stdin)
-            receiver = SrtTransport("srt://127.0.0.1:9000", mode="caller", direction="receive")
-            receiver.open()
-            self.assertIn("pipe:1", process.call_args.args[0])
-            self.assertIs(receiver.reader, process.return_value.stdout)
-
-    @unittest.skipUnless(os.name == "nt", "Windows process tree")
-    def test_srt_abort_stops_launcher_children(self):
-        with patch("backend.transport.srt.subprocess.Popen") as process, patch(
-            "backend.transport.srt.subprocess.run"
-        ) as terminate:
-            transport = SrtTransport("srt://127.0.0.1:9000")
-            transport._proc = process.return_value
-            transport._proc.poll.side_effect = [None, 0]
-            transport.abort()
-            self.assertEqual(terminate.call_args.args[0],
-                             ["taskkill", "/PID", str(transport._proc.pid), "/T", "/F"])
-
 
 class CapableMedia(Media):
     capabilities_changed = Signal()
@@ -514,24 +503,6 @@ class CodecConnectionTests(unittest.TestCase):
         self.assertEqual(self.viewer_media.starts[0].decoder, "h264_qsv")
         self.assertEqual(self.host._selection, self.viewer._selection)
         self.assertTrue(self.viewer._codec_enabled)
-
-    def test_protocol_switch_saves_only_after_success_and_rolls_back(self):
-        self.connect()
-        picture = dict(self.applied[-1])
-        self.viewer.configure({**picture, "transport": "webrtc"})
-        wait_until(lambda: len(self.applied) == 2 and self.host.phase == "active")
-        self.assertEqual(self.host_media.starts[-1].transport, "webrtc")
-        self.assertEqual(self.viewer_media.starts[-1].transport, "webrtc")
-        self.assertEqual(self.viewer._viewer.protocol_preferences["host"], "webrtc")
-        self.viewer.configure({**picture, "transport": "srt"})
-        wait_until(lambda: len(self.applied) == 3 and self.host.phase == "active")
-        self.assertEqual(self.viewer._viewer.protocol_preferences["host"], "srt")
-        self.viewer_media.fail_next = True
-        self.viewer.configure({**picture, "transport": "webrtc", "codec": "h264",
-                               "encoder": "libx264", "decoder": "h264"})
-        wait_until(lambda: len(self.applied) == 4 and self.host.phase == "active")
-        self.assertEqual(self.viewer_media.starts[-1].transport, "srt")
-        self.assertEqual(self.viewer._viewer.protocol_preferences["host"], "srt")
 
     def test_explicit_format_and_backends_apply_then_save(self):
         self.connect()
@@ -752,7 +723,7 @@ class MediaIntegrationTests(unittest.TestCase):
 
     def test_webrtc_uses_real_media_and_stops_workers(self):
         from scripts.benchmark_remote import run
-        result = run(transport="webrtc", seconds=.5, width=320, height=240, fps=60, synthetic=True,
+        result = run(seconds=.5, width=320, height=240, fps=60, synthetic=True,
                      warmup=0, display="cpu", decoder="h264")
         self.assertFalse(result["errors"])
         self.assertGreater(result["frames"], 10)
@@ -764,175 +735,6 @@ class MediaIntegrationTests(unittest.TestCase):
         self.assertEqual(measurement["display_mode"], "cpu")
         self.assertGreater(measurement["drawn_fps"], 0)
         self.assertLessEqual(measurement["drawn_fps"], measurement["delivered_fps"] + 2)
-
-    def test_srt_picture_update_and_reconnect_with_real_encoder_decoder(self):
-        from types import SimpleNamespace
-        from frontend.desktop.diagnostics import _synthetic_frame
-        from frontend.desktop.paths import error_dir
-
-        reports = set(error_dir().glob("*.txt"))
-
-        class Capture:
-            def __init__(self, config):
-                self.index = 0
-                self.config = config
-                self.cursor_mode = self.cursor_applied_mode = "smart"
-                self.cursor_visible = True
-
-            def open(self):
-                pass
-
-            def reconfigure(self, width, height, fps):
-                from dataclasses import replace
-                self.config = replace(self.config, width=width, height=height, fps=fps)
-
-            def read(self):
-                self.cursor_applied_mode = self.cursor_mode
-                frame = _synthetic_frame(self.index)
-                self.index += 1
-                return frame
-
-            def close(self):
-                pass
-
-        host_media, viewer_media = SessionService(), SessionService()
-        host = DesktopConnection(host_media, "media-host", HostSettings())
-        viewer = DesktopConnection(viewer_media, "media-viewer", HostSettings())
-        errors, applied = [], []
-        cursors, frame_pts = [], []
-        viewer_media.cursor_changed.connect(cursors.append)
-        viewer_media.frame_ready.connect(lambda frame: frame_pts.append(frame.pts))
-        host.error.connect(errors.append)
-        viewer.error.connect(errors.append)
-        viewer.picture_applied.connect(applied.append)
-        # Client ephemeral ports must not occupy the adjacent control port.
-        for port in range(23000, 23100, 3):
-            try:
-                with socket.socket() as session_probe, socket.socket() as control_probe, socket.socket(
-                    socket.AF_INET, socket.SOCK_DGRAM
-                ) as srt_probe:
-                    session_probe.bind(("0.0.0.0", port))
-                    control_probe.bind(("0.0.0.0", port + 1))
-                    srt_probe.bind(("0.0.0.0", port + 2))
-                self.assertTrue(host.start(port))
-                break
-            except OSError:
-                continue
-        else:
-            host.close()
-            viewer.close()
-            self.fail("No available session/control/SRT port group")
-        peer = {"id": "media-host", "ip": "127.0.0.1",
-                "session_port": host.server.serverPort()}
-        settings = ViewerSettings(stream_width=320, stream_height=240,
-                                  stream_bitrate_kbps=800, clipboard_enabled=False,
-                                  gamepad_enabled=False, protocol_preferences={"media-host": "srt"},
-                                  codec_preferences={"media-host": {"codec": "h264", "decoder": "h264"}})
-        injected = []
-        def state():
-            return {
-                "host": (host.phase, host_media.running),
-                "viewer": (viewer.phase, viewer_media.running),
-                "stderr": [service._transport.stderr_text() if service._transport else ""
-                           for service in (host_media, viewer_media)],
-                "errors": errors,
-            }
-        with patch("backend.bootstrap.build_capture", side_effect=lambda config: Capture(config.capture)), patch(
-            "frontend.desktop.service._display_region", return_value=(0, 0, 320, 240)
-        ), patch.object(host_media, "_inject_remote_input",
-                        side_effect=lambda event: injected.append(event) or True), patch.object(
-            host_media, "_start_clipboard"
-        ), patch.object(host_media, "_start_gamepad_host"):
-            try:
-                viewer.connect_peer(peer, settings, False)
-                wait_until(lambda: viewer.phase == "active" or bool(errors), timeout=25)
-                self.assertFalse(errors)
-                self.assertEqual(len(applied), 1)
-                viewer_media.set_mouse_mode("local")
-                wait_until(lambda: cursors and cursors[-1]["mode"] == "local")
-                boundary = cursors[-1]["pts"]
-                wait_until(lambda: frame_pts and frame_pts[-1] >= boundary)
-                self.assertLess(frame_pts[-1] - boundary, 90000)
-                wait_until(lambda: "rtt_ms" in viewer_media.stats.extra)
-                self.assertGreaterEqual(viewer_media.stats.extra["rtt_ms"], 0)
-                from backend.control_channel.protocol import EventType, InputEvent
-                from backend.control_channel.base import ChannelState
-                wait_until(lambda: viewer_media._control is not None
-                           and viewer_media._control.state == ChannelState.OPEN)
-                self.assertFalse(viewer_media.set_input_focus(True))
-                viewer.set_control(True)
-                wait_until(lambda: host_media._host_live.allow_inject)
-                viewer_media.set_control_enabled(True, viewer_media._viewer_live)
-                self.assertTrue(viewer_media.set_input_focus(True))
-                self.assertTrue(viewer_media.send_input(InputEvent(
-                    EventType.MOUSE_MOVE, x=65535, y=65535, extra={"coordinates": "normalized"})))
-                self.assertTrue(viewer_media.send_input(InputEvent(
-                    EventType.MOUSE_BUTTON, button=1, pressed=True, extra={"positioned": True})))
-                wait_until(lambda: len(injected) == 2)
-                viewer.set_control(False)
-                wait_until(lambda: len(injected) == 3)
-                self.assertEqual([event.event_type for event in injected],
-                                 [EventType.MOUSE_MOVE, EventType.MOUSE_BUTTON, EventType.MOUSE_BUTTON])
-                self.assertFalse(injected[-1].pressed)
-                viewer_media.set_control_enabled(False, viewer_media._viewer_live)
-                viewer.configure({"width": 320, "height": 240, "fps": 20, "bitrate_kbps": 1000})
-                wait_until(lambda: len(applied) == 2 or bool(errors), timeout=25, detail=state)
-                self.assertFalse(errors)
-                self.assertEqual(applied[-1]["fps"], 20)
-                viewer.disconnect()
-                wait_until(lambda: host.phase == viewer.phase == "idle", timeout=15)
-                self.assertFalse(host_media.running)
-                self.assertFalse(viewer_media.running)
-                viewer.connect_peer(peer, settings, False)
-                wait_until(lambda: len(applied) == 3 or bool(errors), timeout=25)
-                self.assertFalse(errors)
-                for initiator in ("host", "both"):
-                    viewer.configure({"width": 320, "height": 240, "fps": 120, "bitrate_kbps": 1000})
-                    count = len(applied)
-                    wait_until(lambda: len(applied) > count or bool(errors), timeout=25, detail=state)
-                    self.assertFalse(errors)
-                    self.assertEqual(host_media._pipeline.capture.config.fps, 120)
-                    if initiator == "both":
-                        viewer.disconnect()
-                    host.disconnect()
-                    wait_until(lambda: host.phase == viewer.phase == "idle", timeout=15, detail=state)
-                    viewer.connect_peer(peer, settings, False)
-                    count = len(applied)
-                    wait_until(lambda: len(applied) > count or bool(errors), timeout=25, detail=state)
-                    self.assertFalse(errors)
-                for codec in ("h264", "hevc", "av1"):
-                    encoders = [n for n, v in host_media.codec_capabilities["encoders"].items()
-                                if v["codec"] == codec]
-                    decoders = [n for n, v in viewer_media.codec_capabilities["decoders"].items()
-                                if v["codec"] == codec]
-                    if not encoders or not decoders:
-                        print(f"No runtime pair for {codec}; transport fixture still covers this format.")
-                        continue
-                    count = len(applied)
-                    viewer.configure({
-                        "width": 320, "height": 240, "fps": 120, "bitrate_kbps": 1000,
-                        "codec": codec, "encoder": encoders[0], "decoder": decoders[0],
-                    })
-                    wait_until(lambda: len(applied) > count or bool(errors), timeout=25, detail=state)
-                    self.assertFalse(errors)
-                    self.assertEqual(host_media._pipeline.stream.codec.value, codec)
-                    self.assertEqual(viewer_media._pipeline.stream.codec.value, codec)
-                    self.assertEqual(viewer_media._pipeline.stats.extra["decoder"], decoders[0])
-                count = len(applied)
-                viewer.refresh_codecs()
-                wait_until(lambda: len(applied) > count or bool(errors), timeout=25, detail=state)
-                self.assertFalse(errors)
-            finally:
-                viewer.close()
-                host.close()
-                wait_until(lambda: not host_media.running and not viewer_media.running, timeout=15)
-                viewer.deleteLater()
-                host.deleteLater()
-                APP.processEvents()
-        new_reports = set(error_dir().glob("*.txt")) - reports
-        self.assertFalse(new_reports, "\n".join(path.read_text(encoding="utf-8")
-                                               for path in new_reports))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,7 +40,6 @@ from .widgets import (
     MetricStrip,
     MetricsGrid,
     QuickTile,
-    SegmentedControl,
     StatusPill,
     ToggleSwitch,
     card_title,
@@ -238,7 +237,7 @@ class OverviewPage(QWidget):
         art_layout.addWidget(headline)
         art_layout.addSpacing(7)
 
-        blurb = QLabel("采集、编码、SRT 传输与远端键鼠控制都在这里；\n从这台机器开始一条会话，另一端即刻接管。")
+        blurb = QLabel("采集、编码、WebRTC 传输与远端键鼠控制。")
         blurb.setStyleSheet("font-size: 13px; color: #5A7391;")
         art_layout.addWidget(blurb)
         art_layout.addSpacing(14)
@@ -257,7 +256,7 @@ class OverviewPage(QWidget):
 
         tags = QHBoxLayout()
         tags.setSpacing(14)
-        for text in ("H.264 编码", "SRT 传输", "键鼠接管", "多显示器"):
+        for text in ("H.264 编码", "WebRTC", "键鼠接管", "多显示器"):
             item = QLabel(text)
             item.setStyleSheet("font-size: 12px; color: #7C93AD;")
             tags.addWidget(item)
@@ -442,9 +441,6 @@ class HostPage(QWidget):
         self.preset = QComboBox()
         self.preset.addItems(PRESETS)
         self.preset.setCurrentText("veryfast")
-        self.transport = SegmentedControl(["SRT", "文件"])
-        self.srt_url = QLineEdit("srt://0.0.0.0:9000")
-        self.srt_url.setPlaceholderText("srt://0.0.0.0:9000")
         self.file_path = QLineEdit("out/host.ts")
         self.file_path.setPlaceholderText("out/host.ts")
         for widget in (self.display, self.resolution, self.fps, self.bitrate, self.encoder, self.preset):
@@ -452,7 +448,6 @@ class HostPage(QWidget):
             widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
 
         self.display_field = FormField("显示器", self.display)
-        self.srt_field = FormField("SRT 地址", self.srt_url)
         self.file_field = FormField("文件路径", self.file_path)
 
         grid.addWidget(self.display_field, 0, 0, 1, 2)
@@ -461,9 +456,7 @@ class HostPage(QWidget):
         grid.addWidget(FormField("码率（Mbps）", self.bitrate), 2, 0)
         grid.addWidget(FormField("编码器", self.encoder), 2, 1)
         grid.addWidget(FormField("编码预设", self.preset), 3, 0)
-        grid.addWidget(FormField("传输方式", self.transport), 3, 1)
-        grid.addWidget(self.srt_field, 4, 0, 1, 2)
-        grid.addWidget(self.file_field, 5, 0, 1, 2)
+        grid.addWidget(self.file_field, 4, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         params.body().addLayout(grid)
@@ -517,8 +510,6 @@ class HostPage(QWidget):
             self.bitrate,
             self.encoder,
             self.preset,
-            self.transport,
-            self.srt_url,
             self.file_path,
             self.control_port,
             self.allow_inject,
@@ -527,21 +518,9 @@ class HostPage(QWidget):
 
         self.start_button.clicked.connect(self._emit_start)
         self.stop_button.clicked.connect(self.stop_requested.emit)
-        self.transport.currentIndexChanged.connect(self._sync_transport)
-        self._sync_transport(0)
 
     def _emit_start(self) -> None:
         self.start_requested.emit(self.settings())
-
-    def _sync_transport(self, index: int) -> None:
-        is_srt = index == 0
-        self.srt_field.setVisible(is_srt)
-        self.file_field.setVisible(not is_srt)
-        self.srt_url.setEnabled(is_srt and not self._running)
-        self.file_path.setEnabled(not is_srt and not self._running)
-
-    def sync_transport(self) -> None:
-        self._sync_transport(self.transport.currentIndex())
 
     def apply_profile(self, key: str) -> None:
         meta = PROFILES.get(key)
@@ -564,8 +543,6 @@ class HostPage(QWidget):
             bitrate_kbps=round(self.bitrate.value() * 1000),
             encoder=ENCODERS[self.encoder.currentIndex()],
             preset=PRESETS[self.preset.currentIndex()],
-            transport="srt" if self.transport.currentIndex() == 0 else "file",
-            srt_url=self.srt_url.text().strip(),
             file_path=self.file_path.text().strip(),
             control_port=int(self.control_port.value()),
             allow_inject=self.allow_inject.isChecked(),
@@ -586,7 +563,6 @@ class HostPage(QWidget):
         self.report_button.setEnabled(running)
         for widget in self._controls:
             widget.setEnabled(not running)
-        self._sync_transport(self.transport.currentIndex())
 
     def show_stats(self, stats: SessionStats) -> None:
         self.metrics.set("fps", f"{stats.fps:.1f} fps")

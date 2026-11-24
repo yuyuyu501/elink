@@ -45,10 +45,9 @@ python main.py --self-test out/self-test.json
 
 ### 两种模式
 
-- **主机（被控）**：`DesktopCapture` 采集 → 可选缩放 → 编码（libx264 / NVENC / QSV / AMF）
-  → MPEG-TS → SRT 或文件；同时开 TCP 控制通道（默认 7000）接受远端键鼠并注入。
-- **观看（控制）**：SRT/文件 → 解封装 → 解码 → 预览；开启「接管键鼠」后把本机
-  Windows 低级钩子事件通过控制通道发给对方；可同步文本剪贴板、转发 XInput 手柄，
+- **远控**：主机按需采集并编码，经 WebRTC 发送画面和声音；控制端用 DataChannel 转发
+  键鼠、剪贴板和手柄。观看模式不转发输入。
+- **画面**：接收并解码 WebRTC 视频，
   开启「超分」后由 `upscale.py` 在 FSR 1（离屏 OpenGL EASU+RCAS）或 RTX VSR
 （`elink_video.dll`）重建，
   F11 打开独立全屏播放器，F8 释放输入，F10 叠加连接统计。
