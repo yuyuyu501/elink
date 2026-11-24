@@ -10,6 +10,11 @@ from frontend.desktop.service import ViewerSettings
 
 
 class DevicePictureSettingsTests(unittest.TestCase):
+    def test_volume_migrates_legacy_mute(self):
+        for raw, expected in (({"muted": True}, 0), ({"muted": True, "volume": 35}, 35), ({}, 100)):
+            with patch.object(settings, "_read", return_value={"viewer": raw}):
+                self.assertEqual(settings.load()[1].volume, expected)
+
     def test_devices_use_independent_picture_values(self):
         viewer = ViewerSettings()
         device_a = settings.for_device(viewer, "device-a")

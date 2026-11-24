@@ -208,7 +208,7 @@ class SessionAudio:
 
     def __init__(self, *, muxer=None, ffmpeg_path="ffmpeg", muted=False):
         self.muxer, self.ffmpeg_path = muxer, ffmpeg_path
-        self.muted = muted
+        self.volume = 0.0 if muted else 1.0
         self.closed = threading.Event()
         self.queue = queue.Queue(maxsize=4)
         self.playback = None
@@ -258,7 +258,7 @@ class SessionAudio:
                 from backend.media.audio.playback.windows.wasapi_playback import WasapiPlayback
                 from backend.media.audio.codec.decoding.aac import AacDecoder
                 self.playback = WasapiPlayback()
-                self.playback.muted = self.muted
+                self.playback.volume = self.volume
                 self.playback.open()
                 codec = AacDecoder(stream, ffmpeg_path=self.ffmpeg_path)
                 codec.open()

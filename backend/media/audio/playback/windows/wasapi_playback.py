@@ -10,6 +10,7 @@ class WasapiPlayback:
     def __init__(self, sample_rate=48000, channels=2, **_):
         self.sample_rate, self.channels = sample_rate, channels
         self.muted = False
+        self.volume = 1.0
         self._stream = None
         self._queue = deque(maxlen=4)
         self._pending = None
@@ -32,6 +33,7 @@ class WasapiPlayback:
             self._queue.append(pixels)
 
     def _callback(self, output, frames, time_info, status):
+        volume = 0 if self.muted else self.volume
         output.fill(0)
         at = 0
         with self._lock:
@@ -41,8 +43,10 @@ class WasapiPlayback:
                         break
                     self._pending = self._queue.popleft()
                 count = min(frames - at, len(self._pending))
-                if not self.muted:
+                if volume:
                     output[at:at + count] = self._pending[:count]
+                    if volume != 1:
+                        output[at:at + count] *= volume
                 self._pending = self._pending[count:]
                 at += count
 

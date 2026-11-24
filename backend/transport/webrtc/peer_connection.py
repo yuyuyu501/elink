@@ -223,9 +223,11 @@ class RtcSession:
         try:
             if track.kind == "audio":
                 from backend.media.audio.playback.windows.wasapi_playback import WasapiPlayback
-                self.service._audio_output = WasapiPlayback()
+                output = WasapiPlayback()
+                self.service._audio_output = output
+                output.volume = self.settings.volume / 100
                 try:
-                    self.service._audio_output.open()
+                    output.open()
                 except Exception as exc:
                     self.service.log.emit(f"系统声音播放不可用：{exc}", "warn")
                     return
@@ -235,8 +237,6 @@ class RtcSession:
                 if track.kind == "video":
                     self.renderer.render(Frame.from_av(image, native=True))
                 else:
-                    output = self.service._audio_output
-                    output.muted = self.settings.muted
                     for audio in resampler.resample(image):
                         output.write_samples(audio.to_ndarray().T.copy())
                         stats = self.service.stats.extra

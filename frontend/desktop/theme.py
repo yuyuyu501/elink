@@ -228,6 +228,12 @@ QMenu {
 }
 QMenu::item { padding: 7px 22px 7px 12px; border-radius: 6px; }
 QMenu::item:selected { background: #EAF1FF; color: #2B6BFF; }
+QSlider#streamSlider::groove:horizontal { height: 4px; border-radius: 2px; background: #D9E3F5; }
+QSlider#streamSlider::sub-page:horizontal { border-radius: 2px; background: #2B6BFF; }
+QSlider#streamSlider::handle:horizontal {
+    width: 12px; height: 12px; margin: -5px 0; border-radius: 7px;
+    background: #FFFFFF; border: 1px solid #7695D0;
+}
 QToolTip {
     background: #1D2129; color: #FFFFFF; border: 0; padding: 5px 8px; border-radius: 4px;
 }

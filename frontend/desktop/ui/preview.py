@@ -38,7 +38,7 @@ class PreviewWidget(QWidget):
     input_error = Signal(object)
     presented = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, show_frame_info: bool = True) -> None:
         super().__init__(parent)
         self.setMinimumSize(QSize(320, 180))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -70,6 +70,7 @@ class PreviewWidget(QWidget):
 
         self._image: QImage | None = None
         self._info = ""
+        self._show_frame_info = show_frame_info
         self._badge = ""
         self._stats_lines: list[str] = []
         self._stats_visible = False
@@ -123,10 +124,11 @@ class PreviewWidget(QWidget):
                     self._cursor_boundary = None
                     refresh_overlay = True
                 self._frames += 1
-                info = f"{frame.width}×{frame.height}"
-                if info != self._info:
-                    self._info = info
-                    refresh_overlay = True
+                if self._show_frame_info:
+                    info = f"{frame.width}×{frame.height}"
+                    if info != self._info:
+                        self._info = info
+                        refresh_overlay = True
                 self._image = self._pixels = None
                 self._scaled = self._scaled_key = None
                 self._paint_pending = False
@@ -164,7 +166,8 @@ class PreviewWidget(QWidget):
         self._paint_pending = True
         self._source_size = QSize(frame.width, frame.height)
         self._frames += 1
-        self._info = f"{frame.width}×{frame.height} · 第 {self._frames} 帧"
+        if self._show_frame_info:
+            self._info = f"{frame.width}×{frame.height} · 第 {self._frames} 帧"
         self.update()
 
     def clear(self) -> None:
@@ -564,8 +567,12 @@ class PreviewWidget(QWidget):
             painter.drawPath(pointer)
 
         self._paint_badges(painter, target, with_info=True)
-        if self._stats_visible and self._stats_lines:
+        if self._stats_visible:
             self._paint_stats(painter, target)
+
+    def _stats_parts(self) -> list[str]:
+        height = self._source_size.height()
+        return [f"{height}p", *self._stats_lines] if not self._show_frame_info and height > 0 else self._stats_lines
 
     def _paint_stats(self, painter: QPainter, target: QRect) -> None:
         target = target.adjusted(0, max(0, getattr(self, "stats_top", 0) - target.top()),
@@ -576,7 +583,7 @@ class PreviewWidget(QWidget):
         metrics = painter.fontMetrics()
         available = max(0, target.width() - 24)
         parts = []
-        for part in self._stats_lines:
+        for part in self._stats_parts():
             if len(part) > 28:
                 part = metrics.elidedText(part, Qt.TextElideMode.ElideRight, 180)
             text = " | ".join([*parts, part])

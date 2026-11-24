@@ -306,6 +306,7 @@ class MainWindow(QMainWindow):
         self.connection.connected.connect(self._session_connected)
         self.connection.picture_applied.connect(self._picture_applied)
         self.connection.codec_selection_required.connect(self._edit_picture)
+        self.connection.capabilities_changed.connect(self._refresh_stream_picture_codecs)
         self.connection.mode_applied.connect(self._mode_applied)
         self.connection.finished.connect(self._session_finished)
 
@@ -489,7 +490,8 @@ class MainWindow(QMainWindow):
         window.set_stats_lines(self._stats_lines())
         window.set_status(self.status_label.text(), self.status_dot.property("tone") or "ok")
         window.stats_toggled.connect(self._toggle_stats_overlay)
-        window.picture_requested.connect(self._edit_picture)
+        window.picture_requested.connect(self._edit_stream_picture)
+        window.picture_submitted.connect(self._submit_stream_picture)
         window.preference_changed.connect(self._viewer_preference)
         window.preview.bind_input(self.service.send_input, self.service.set_input_focus)
         window.preview.input_error.connect(self.service._input_failure)
@@ -661,12 +663,16 @@ class MainWindow(QMainWindow):
         if self._stream_window is not None:
             self._stream_window.release_input()
         if name not in {"mouse_mode", "mouse_sensitivity", "clipboard_enabled", "gamepad_enabled",
-                        "muted"}:
+                        "volume"}:
             return
         setattr(self._viewer_settings, name, value)
         setattr(self.connection._viewer, name, value)
-        if name == "muted":
-            self.service.set_muted(value)
+        if name == "volume":
+            if self.connection._live is not None and "viewer" in self.connection._live:
+                self.connection._live["viewer"].volume = value
+            self.service.set_volume(value)
+            self._persist_ui()
+            return
         if name == "clipboard_enabled":
             self.service.set_clipboard_enabled(value and self._viewer_settings.control_enabled)
         elif name == "gamepad_enabled":
@@ -699,21 +705,30 @@ class MainWindow(QMainWindow):
         self._persist_ui()
         self.notice_bar.show_message("桌面已连接", "info")
 
+    def _edit_stream_picture(self) -> None:
+        if self._stream_window is not None and self.connection.role == "viewer" and self.connection.phase == "active":
+            self._release_viewer_input()
+            self._stream_window.load_picture(saved_picture(self._viewer_settings), self.connection)
+
+    def _refresh_stream_picture_codecs(self) -> None:
+        if self._stream_window is not None and self._stream_window.picture_menu.isVisible():
+            self._stream_window.refresh_picture_codecs(self.connection)
+
+    def _submit_stream_picture(self, picture: dict) -> None:
+        if self.connection.role == "viewer" and self.connection.phase == "active":
+            self.connection.configure(picture)
+
     def _edit_picture(self) -> None:
-        if self.connection.role != "viewer" or self.connection.phase not in {"active", "selection"}:
+        if self.connection.role != "viewer" or self.connection.phase != "selection":
             return
         if self._picture_dialog is not None:
             return
         self._release_viewer_input()
-        embedded = self.connection.phase == "active" and self._stream_window is not None
-        dialog = PictureDialog(saved_picture(self._viewer_settings), self._stream_window or self,
-                               connection=self.connection, embedded=embedded)
+        dialog = PictureDialog(saved_picture(self._viewer_settings), self,
+                               connection=self.connection)
         self._picture_dialog = dialog
-        if embedded:
-            self._stream_window.set_picture_editor(dialog)
         dialog.finished.connect(lambda result: self._picture_finished(dialog, result))
-        if not embedded:
-            dialog.open()
+        dialog.open()
 
     def _picture_finished(self, dialog: PictureDialog, result: int) -> None:
         if self._picture_dialog is not dialog:

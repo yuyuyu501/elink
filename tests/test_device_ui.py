@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QStyle, QStyleOptionSlider
 from PySide6.QtTest import QTest
 
 from frontend.desktop import icons
@@ -41,7 +41,8 @@ def hover_action(menu, action):
 
 def save_menu_view(stream, name):
     widgets = [stream] + [menu for menu in
-                          (stream.panel, stream.picture_menu, stream.mouse_menu)
+                          (stream.panel, stream.picture_menu, stream.resolution_menu,
+                           stream.bitrate_menu, stream.mouse_menu)
                           if menu.isVisible()]
     bounds = stream.frameGeometry()
     for widget in widgets[1:]:
@@ -414,15 +415,12 @@ class WindowConnectionTests(unittest.TestCase):
 
     def test_picture_dialog_is_async_unique_and_closes_before_remote_window(self):
         self.window._session_connected(ViewerSettings())
-        self.window.connection.role, self.window.connection.phase = "viewer", "active"
+        self.window.connection.role, self.window.connection.phase = "viewer", "selection"
         with patch.object(PictureDialog, "exec", side_effect=AssertionError("nested event loop")):
-            stream = self.window._stream_window
-            stream.set_session_active(True)
-            stream.toggle_controls()
-            hover_action(stream.panel, stream.picture_button)
+            self.window._edit_picture()
             dialog = self.window._picture_dialog
             self.assertTrue(dialog.isVisible())
-            self.assertFalse(dialog.isWindow())
+            self.assertTrue(dialog.isWindow())
             self.window._edit_picture()
             self.assertIs(self.window._picture_dialog, dialog)
             with patch.object(self.window.connection, "disconnect") as disconnect:
@@ -452,34 +450,99 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertFalse(stream.panel.isVisible())
         self.assertFalse(stream.mouse_menu.isVisible())
 
-    def test_embedded_picture_applies_once_and_menu_cancel_discards_draft(self):
+    def test_cascading_picture_applies_on_click_and_slider_release(self):
         self.window._session_connected(ViewerSettings())
         self.window.connection.role, self.window.connection.phase = "viewer", "active"
         stream = self.window._stream_window
         stream.set_session_active(True)
-        for apply in (False, True):
+        stream.resize(640, 400)
+        available = stream.screen().availableGeometry()
+        stream.move(available.right() - stream.width(), available.top() + 30)
+        with patch.object(self.window.connection, "configure") as configure:
             stream.toggle_controls()
             hover_action(stream.panel, stream.picture_button)
-            dialog = self.window._picture_dialog
-            self.assertIsNotNone(dialog)
-            save_menu_view(stream, "picture")
-            dialog.bitrate.setValue(24)
-            with patch.object(self.window.connection, "configure") as configure:
-                configure.assert_not_called()
-                if apply:
-                    dialog.apply_button.click()
-                    configure.assert_called_once()
-                    self.assertEqual(configure.call_args.args[0]["bitrate_kbps"], 24000)
-                else:
-                    stream.panel.close()
-                    configure.assert_not_called()
             self.assertIsNone(self.window._picture_dialog)
+            self.assertTrue(stream.picture_menu.isVisible())
+            self.assertNotIn("应用", [action.text() for action in stream.picture_menu.actions()])
+            self.assertNotIn("取消", [action.text() for action in stream.picture_menu.actions()])
+            hover_action(stream.picture_menu, stream.resolution_menu.menuAction())
+            self.assertTrue(stream.resolution_menu.isVisible())
+            for menu in (stream.panel, stream.picture_menu, stream.resolution_menu):
+                self.assertTrue(available.contains(menu.frameGeometry()), menu.frameGeometry())
+            self.assertFalse(stream.panel.frameGeometry().intersects(stream.resolution_menu.frameGeometry()))
+            choice = next(action for action in stream.resolution_choices.actions()
+                          if action.data() == (2560, 1440))
+            save_menu_view(stream, "picture")
+            QTest.mouseClick(stream.resolution_menu, Qt.MouseButton.LeftButton,
+                             pos=stream.resolution_menu.actionGeometry(choice).center())
+            configure.assert_called_once_with(
+                {"width": 2560, "height": 1440, "fps": 30, "bitrate_kbps": 4000})
             self.assertFalse(stream.panel.isVisible())
-            APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            configure.reset_mock()
+            stream.toggle_controls()
+            hover_action(stream.panel, stream.picture_button)
+            hover_action(stream.picture_menu, stream.bitrate_menu.menuAction())
+            self.assertTrue(stream.bitrate_menu.isVisible())
+            self.assertEqual(stream.bitrate.value(), 4)
+            option = QStyleOptionSlider()
+            stream.bitrate.initStyleOption(option)
+            handle = stream.bitrate.style().subControlRect(
+                QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle,
+                stream.bitrate).center()
+            end = stream.bitrate.rect().center()
+            QTest.mousePress(stream.bitrate, Qt.MouseButton.LeftButton, pos=handle)
+            QTest.mouseMove(stream.bitrate, end)
+            configure.assert_not_called()
+            QTest.mouseRelease(stream.bitrate, Qt.MouseButton.LeftButton, pos=end)
+            self.assertGreater(stream.bitrate.value(), 4)
+            configure.assert_called_once()
+            self.assertEqual(configure.call_args.args[0]["bitrate_kbps"], stream.bitrate.value() * 1000)
+            self.assertFalse(stream.panel.isVisible())
+
+    def test_volume_submenu_and_resolution_status(self):
+        import numpy as np
+        from backend.media.audio.playback.windows.wasapi_playback import WasapiPlayback
+        from backend.media.frame import Frame
+
+        self.window._session_connected(ViewerSettings())
+        self.window.connection.role, self.window.connection.phase = "viewer", "active"
+        stream = self.window._stream_window
+        stream.set_session_active(True)
+        stream.toggle_controls()
+        hover_action(stream.panel, stream.volume_menu.menuAction())
+        self.assertTrue(stream.volume_menu.isVisible())
+        slider = stream.volume
+        self.assertEqual(slider.layoutDirection(), Qt.LayoutDirection.LeftToRight)
+        self.assertTrue(stream.volume_menu.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
+        option = QStyleOptionSlider()
+        slider.initStyleOption(option)
+        handle = slider.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle, slider).center()
+        self.assertGreater(handle.x(), slider.width() // 2)
+        playback = WasapiPlayback()
+        with patch.object(self.window.service, "_audio_output", playback):
+            QTest.mousePress(slider, Qt.MouseButton.LeftButton, pos=handle)
+            target = handle
+            target.setX(0)
+            QTest.mouseMove(slider, target)
+            QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=target)
+            self.assertEqual(slider.value(), 0)
+            self.assertEqual(stream.volume_value.text(), "0%")
+            self.assertEqual(self.window._viewer_settings.volume, 0)
+            output = np.empty((4, 2), dtype=np.float32)
+            playback.write_samples(np.ones_like(output))
+            playback._callback(output, len(output), None, None)
+            self.assertTrue(np.all(output == 0))
+            QTest.keyClick(slider, Qt.Key.Key_End)
+            self.assertEqual(playback.volume, 1)
+        stream.set_frame(Frame(data=bytes(1280 * 720 * 4), width=1280, height=720))
+        stream.set_stats_lines(["60 FPS"])
+        self.assertEqual(stream.preview._stats_parts(), ["720p", "60 FPS"])
+        self.assertEqual(stream.preview._info, "")
 
     def test_picture_accept_clears_owner_before_reentrant_disconnect(self):
         self.window._session_connected(ViewerSettings())
-        self.window.connection.role, self.window.connection.phase = "viewer", "active"
+        self.window.connection.role, self.window.connection.phase = "viewer", "selection"
         self.window._edit_picture()
         dialog = self.window._picture_dialog
         with patch.object(self.window.connection, "configure",
@@ -492,7 +555,7 @@ class WindowConnectionTests(unittest.TestCase):
 
     def test_connection_loss_with_picture_dialog_never_applies_settings(self):
         self.window._session_connected(ViewerSettings())
-        self.window.connection.role, self.window.connection.phase = "viewer", "active"
+        self.window.connection.role, self.window.connection.phase = "viewer", "selection"
         self.window._edit_picture()
         with patch.object(self.window.connection, "configure") as configure:
             self.window.connection.phase = "stopping"
@@ -595,9 +658,9 @@ class WindowConnectionTests(unittest.TestCase):
         self.assertNotIn("auto_host", UiSettings.__dataclass_fields__)
         self.window._session_connected(ViewerSettings())
         stream = self.window._stream_window
-        self.assertNotIn("clipboard_enabled", stream.preferences)
-        self.assertNotIn("gamepad_enabled", stream.preferences)
-        self.assertNotIn("超分", [action.text() for action in stream.panel.actions()])
+        menu_items = [action.text() for action in stream.panel.actions()]
+        for text in ("同步剪贴板", "转发手柄", "超分", "静音"):
+            self.assertNotIn(text, menu_items)
         from PySide6.QtWidgets import QPushButton
         texts = [button.text() for button in stream.findChildren(QPushButton)]
         for text in ("截图", "导出性能报告", "释放键鼠输入"):

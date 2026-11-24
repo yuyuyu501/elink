@@ -104,7 +104,7 @@ class ViewerSettings:
     ffmpeg_path: str = "ffmpeg"
     session_token: str = ""
     motion_port: int = 0
-    muted: bool = False
+    volume: int = 100
 
 
 @dataclass
@@ -1187,15 +1187,16 @@ class SessionService(QObject):
                 pass
         self.input_available.emit(False)
 
-    def set_muted(self, muted):
+    def set_volume(self, volume: int):
         if self._viewer_live is not None:
-            self._viewer_live.muted = bool(muted)
-        if self._audio_output is not None:
-            self._audio_output.muted = bool(muted)
+            self._viewer_live.volume = volume
+        output = self._audio_output
+        if output is not None:
+            output.volume = volume / 100
         if self._session_audio is not None:
-            self._session_audio.muted = bool(muted)
+            self._session_audio.volume = volume / 100
             if self._session_audio.playback is not None:
-                self._session_audio.playback.muted = bool(muted)
+                self._session_audio.playback.volume = volume / 100
 
     # ---- 性能报告 ----
     def performance_report(self) -> dict:
@@ -1311,7 +1312,7 @@ def _viewer_config(settings: ViewerSettings) -> AppConfig:
         config.encode.framerate = settings.stream_fps
     config.capture.fps = settings.stream_fps
     config.audio.enabled = settings.transport != "file"
-    config.audio.muted = settings.muted
+    config.audio.muted = settings.volume == 0
     config.validate()
     return config
 

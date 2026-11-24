@@ -50,6 +50,10 @@ def load() -> tuple[HostSettings, ViewerSettings]:
     data = _read()
     host = _merge(HostSettings, data.get("host"))
     viewer = _merge(ViewerSettings, data.get("viewer"))
+    raw_viewer = data.get("viewer")
+    if isinstance(raw_viewer, dict) and "volume" not in raw_viewer and raw_viewer.get("muted") is True:
+        viewer.volume = 0
+    viewer.volume = max(0, min(100, viewer.volume)) if type(viewer.volume) is int else 100
     host.clipboard_enabled = host.gamepad_enabled = True
     host.gamepad_backend = host.gamepad_backend if host.gamepad_backend in {"vigem", "elinkpad"} else "vigem"
     viewer.clipboard_enabled = viewer.gamepad_enabled = True

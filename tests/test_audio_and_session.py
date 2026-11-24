@@ -319,6 +319,21 @@ def test_srt_mux_demux_keeps_audio_and_video_streams_separate():
                for p in packets if p.codec == CodecId.AAC)
 
 
+def test_playback_volume_scales_samples_and_zero_is_silent():
+    import numpy as np
+    from backend.media.audio.playback.windows.wasapi_playback import WasapiPlayback
+
+    playback = WasapiPlayback()
+    samples = np.ones((4, 2), dtype=np.float32)
+    output = np.empty_like(samples)
+    for volume in (0.5, 0.0, 1.0):
+        playback.volume = volume
+        playback.write_samples(samples)
+        playback._callback(output, len(output), None, None)
+        assert np.all(output == volume)
+        assert np.all(samples == 1)
+
+
 def main() -> int:
     failures = 0
     for name, func in sorted(globals().items()):

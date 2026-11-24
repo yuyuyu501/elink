@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFormLayout, QFrame,
-    QHBoxLayout, QMenu, QScrollArea, QSizePolicy, QSlider, QToolButton,
+    QHBoxLayout, QMenu, QSizePolicy, QSlider, QToolButton,
     QVBoxLayout, QWidget, QWidgetAction,
 )
 
@@ -17,6 +17,24 @@ from .preview import PreviewWidget
 from .widgets import NoticeBar, StatusPill, label
 
 TITLE_HEIGHT = 44
+RESOLUTIONS = ((1280, 720), (1920, 1080), (2560, 1440), (3840, 2160))
+FRAME_RATES = (30, 60, 90, 120)
+CODECS = (("AV1", "av1"), ("H.264", "h264"), ("H.265", "hevc"))
+DISPLAY_MODES = (("自动", "auto"), ("GPU 纹理显示", "gpu"), ("CPU 兼容显示", "cpu"))
+
+
+class StreamMenu(QMenu):
+    def __init__(self, title, parent):
+        super().__init__(title, parent)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def submenu(self, title, icon=None):
+        child = StreamMenu(title, self)
+        if icon is not None:
+            child.setIcon(icon)
+        self.addMenu(child)
+        return child
 
 
 def fps_control(slider: QSlider) -> QWidget:
@@ -43,44 +61,58 @@ def fps_control(slider: QSlider) -> QWidget:
     return container
 
 
+def bitrate_control(parent):
+    container = QWidget(parent)
+    row = QHBoxLayout(container)
+    row.setContentsMargins(0, 0, 0, 0)
+    slider = QSlider(Qt.Orientation.Horizontal)
+    slider.setRange(1, 50)
+    slider.setSingleStep(1)
+    value = label(str(slider.value()))
+    value.setFixedWidth(24)
+    slider.valueChanged.connect(lambda number: value.setText(str(number)))
+    row.addWidget(slider, 1)
+    row.addWidget(value)
+    return container, slider, value
+
+
+def available_codecs(connection):
+    remote, local = connection.codec_capabilities
+    if remote is None or local is None:
+        return set(), "正在检测编解码能力…"
+    try:
+        names = {choice["codec"] for choice in compatible_choices(remote, local, {})}
+    except ValueError:
+        names = set()
+    return names, "" if names else "双方没有共同可用的视频格式"
+
+
 class PictureDialog(QDialog):
-    def __init__(self, picture: dict, parent=None, *, connection=None, embedded=False) -> None:
+    def __init__(self, picture: dict, parent=None, *, connection=None) -> None:
         super().__init__(parent)
-        if embedded:
-            self.setWindowFlags(Qt.WindowType.Widget)
         self.setWindowTitle("画面设置")
         self.setMinimumWidth(300)
         form = QFormLayout(self)
         self.resolution = QComboBox()
-        self.resolution.addItems(["1280×720", "1920×1080", "2560×1440", "3840×2160"])
+        self.resolution.addItems([f"{w}×{h}" for w, h in RESOLUTIONS])
         current = f"{picture['width']}×{picture['height']}"
         if self.resolution.findText(current) < 0:
             self.resolution.addItem(current)
         self.resolution.setCurrentText(current)
         self.fps = QComboBox()
-        for rate in (30, 60, 90, 120):
+        for rate in FRAME_RATES:
             self.fps.addItem(f"{rate} FPS", rate)
         nearest = min(range(self.fps.count()),
                       key=lambda index: abs(self.fps.itemData(index) - picture["fps"]))
         self.fps.setCurrentIndex(nearest)
-        self.bitrate = QSlider(Qt.Orientation.Horizontal)
-        self.bitrate.setRange(1, 50)
-        self.bitrate.setSingleStep(1)
+        bitrate, self.bitrate, self.bitrate_value = bitrate_control(self)
         self.bitrate.setValue(round(picture["bitrate_kbps"] / 1000))
-        self.bitrate_value = label(str(self.bitrate.value()))
-        self.bitrate_value.setFixedWidth(24)
-        self.bitrate.valueChanged.connect(lambda value: self.bitrate_value.setText(str(value)))
-        bitrate = QWidget()
-        bitrate_row = QHBoxLayout(bitrate)
-        bitrate_row.setContentsMargins(0, 0, 0, 0)
-        bitrate_row.addWidget(self.bitrate, 1)
-        bitrate_row.addWidget(self.bitrate_value)
         form.addRow("分辨率", self.resolution)
         form.addRow("帧率", self.fps)
         form.addRow("码率（Mbps）", bitrate)
         self.connection = connection
         self.codec = QComboBox()
-        for name, value in (("AV1", "av1"), ("H.264", "h264"), ("H.265", "hevc")):
+        for name, value in CODECS:
             self.codec.addItem(name, value)
         self.codec.setCurrentIndex(1)
         self.codec_status = label("")
@@ -113,17 +145,8 @@ class PictureDialog(QDialog):
         self._connection_state()
 
     def _update_codecs(self):
-        remote, local = self.connection.codec_capabilities
-        if remote is None or local is None:
-            self.codec_status.setText("正在检测编解码能力…")
-            choices = []
-        else:
-            try:
-                choices = compatible_choices(remote, local, {})
-            except ValueError:
-                choices = []
-            self.codec_status.setText("" if choices else "双方没有共同可用的视频格式")
-        names = {choice["codec"] for choice in choices}
+        names, status = available_codecs(self.connection)
+        self.codec_status.setText(status)
         for i in range(self.codec.count()):
             self.codec.model().item(i).setEnabled(self.codec.itemData(i) in names)
         self._connection_state()
@@ -213,6 +236,7 @@ class StreamWindow(QWidget):
     closed = Signal()
     stats_toggled = Signal(bool)
     picture_requested = Signal()
+    picture_submitted = Signal(dict)
     preference_changed = Signal(str, object)
 
     def __init__(self, parent=None) -> None:
@@ -229,22 +253,36 @@ class StreamWindow(QWidget):
         self._input_available = False
         self._control_enabled = False
         self._was_maximized = False
-        self.preview = PreviewWidget(self)
+        self.preview = PreviewWidget(self, show_frame_info=False)
         self.preview.set_edge_padding(0)
         self.preview.capture_changed.connect(self._capture_changed)
         self.toolbar = StreamTitleBar(self)
         self.title = self.toolbar.title
         self.pill = self.toolbar.pill
         self.notice = NoticeBar(self)
-        self.panel = QMenu(self)
+        self.panel = StreamMenu("", self)
         self.panel.setMinimumWidth(200)
-        self.picture_menu = self.panel.addMenu(icons.icon("settings"), "画面设置")
+        self.picture_menu = self.panel.submenu("画面设置", icons.icon("settings"))
         self.picture_button = self.picture_menu.menuAction()
-        self.picture_menu.addAction("画面设置").setEnabled(False)
+        self.resolution_menu, self.resolution_choices = self._picture_choices("分辨率")
+        _, self.fps_choices = self._picture_choices("帧率", ((f"{rate} FPS", rate) for rate in FRAME_RATES))
+        self.bitrate_menu = self.picture_menu.submenu("码率（Mbps）")
+        bitrate, self.bitrate, bitrate_value = bitrate_control(self.bitrate_menu)
+        self.bitrate.setTracking(False)
+        self.bitrate.sliderMoved.connect(lambda value: bitrate_value.setText(str(value)))
+        self.bitrate.valueChanged.connect(self._bitrate_changed)
+        self.bitrate.setObjectName("streamSlider")
+        self._menu_widget(self.bitrate_menu, bitrate, min_width=200)
+        self.codec_menu, self.codec_choices = self._picture_choices("视频格式", CODECS)
+        self.codec_status = self.codec_menu.addAction("")
+        self.codec_status.setEnabled(False)
+        _, self.display_choices = self._picture_choices("显示方式", DISPLAY_MODES)
+        self.display_choices.triggered.connect(
+            lambda action: self.preview.set_display_mode(action.data()))
         self.picture_menu.aboutToShow.connect(self.picture_requested.emit)
-        self.picture_menu.aboutToHide.connect(self._discard_picture)
-        self._picture_editor = None
-        self.mouse_menu = self.panel.addMenu(icons.icon("mouse"), "鼠标")
+        for group in (self.resolution_choices, self.fps_choices, self.codec_choices):
+            group.triggered.connect(self._submit_picture)
+        self.mouse_menu = self.panel.submenu("鼠标", icons.icon("mouse"))
         mouse = QWidget()
         controls = QVBoxLayout(mouse)
         form = QFormLayout()
@@ -257,6 +295,7 @@ class StreamWindow(QWidget):
         controls.addLayout(form)
         sensitivity = QHBoxLayout()
         self.sensitivity = QSlider(Qt.Orientation.Horizontal)
+        self.sensitivity.setObjectName("streamSlider")
         self.sensitivity.setRange(-50, 50)
         self.sensitivity.setSingleStep(1)
         self.sensitivity_value = label("0.0")
@@ -265,31 +304,31 @@ class StreamWindow(QWidget):
             lambda value: self.sensitivity_value.setText(f"{value / 10:.1f}"))
         self.sensitivity.valueChanged.connect(
             lambda value: self.preference_changed.emit("mouse_sensitivity", value / 10))
-        reset = QToolButton()
-        reset.setIcon(icons.icon("refresh-cw"))
-        reset.setFixedSize(28, 28)
-        reset.setToolTip("恢复默认灵敏度")
-        reset.clicked.connect(lambda: self.sensitivity.setValue(0))
         sensitivity.addWidget(label("灵敏度"))
         sensitivity.addWidget(self.sensitivity, 1)
         sensitivity.addWidget(self.sensitivity_value)
-        sensitivity.addWidget(reset)
         controls.addLayout(sensitivity)
         self._menu_widget(self.mouse_menu, mouse)
         self.panel.addSeparator()
-        muted = self.panel.addAction(icons.icon("volume-2"), "静音")
-        muted.setCheckable(True)
-        muted.toggled.connect(lambda checked: self.preference_changed.emit("muted", checked))
-        self.preferences = {"muted": muted}
+        self.volume_menu = self.panel.submenu("音量", icons.icon("volume-2"))
+        volume_controls = QWidget(self.volume_menu)
+        volume_row = QHBoxLayout(volume_controls)
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setObjectName("streamSlider")
+        self.volume.setRange(0, 100)
+        self.volume_value = label("100%")
+        self.volume_value.setFixedWidth(38)
+        self.volume.valueChanged.connect(self._volume_changed)
+        volume_row.addWidget(self.volume, 1)
+        volume_row.addWidget(self.volume_value)
+        self._menu_widget(self.volume_menu, volume_controls, min_width=200)
         self.stats_button = self.panel.addAction(icons.icon("activity"), "性能叠加")
         self.stats_button.setCheckable(True)
         self.stats_button.toggled.connect(self.stats_toggled.emit)
         self.panel.addSeparator()
         self.panel.addAction(icons.icon("maximize"), "全屏").triggered.connect(self.toggle_fullscreen)
         self.panel.addAction(icons.icon("power"), "断开连接").triggered.connect(self.close)
-        self._session_actions = [self.picture_button, self.mouse_menu.menuAction(), muted]
-        for menu in (self.picture_menu, self.mouse_menu):
-            menu.aboutToShow.connect(self._fit_submenu)
+        self._session_actions = [self.picture_button, self.mouse_menu.menuAction(), self.volume_menu.menuAction()]
         for action in self._session_actions:
             action.setEnabled(False)
         self._handles = []
@@ -309,48 +348,73 @@ class StreamWindow(QWidget):
             shortcut.activated.connect(callback)
             self._shortcuts.append(shortcut)
 
-    def _menu_widget(self, menu, content):
-        scroll = QScrollArea(menu)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(content)
-        content.adjustSize()
-        scroll.setFixedWidth(max(320, content.sizeHint().width() + 18))
-        scroll.setFixedHeight(min(content.sizeHint().height() + 16,
-                                  self.screen().availableGeometry().height() - 80))
+    def _menu_widget(self, menu, content, *, min_width=320):
+        content.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        content.setMinimumWidth(min_width)
         action = QWidgetAction(menu)
-        action.setDefaultWidget(scroll)
+        action.setDefaultWidget(content)
         menu.addAction(action)
         for widget in (content, *content.findChildren(QWidget)):
             widget.installEventFilter(self)
         return action
 
-    def set_picture_editor(self, editor):
-        self._picture_editor = editor
-        for action in self.picture_menu.actions():
-            if isinstance(action, QWidgetAction):
-                self.picture_menu.removeAction(action)
-                action.deleteLater()
-        display = QComboBox(editor)
-        for title, mode in (("自动", "auto"), ("GPU 纹理显示", "gpu"), ("CPU 兼容显示", "cpu")):
-            display.addItem(title, mode)
-        display.setCurrentIndex(display.findData(self.preview.display_mode))
-        display.currentIndexChanged.connect(lambda _: self.preview.set_display_mode(display.currentData()))
-        editor.layout().insertRow(3, "显示方式", display)
-        self._menu_widget(self.picture_menu, editor)
-        editor.finished.connect(self._picture_done)
+    def _picture_choices(self, title, choices=()):
+        menu = self.picture_menu.submenu(title)
+        group = QActionGroup(menu)
+        for text, value in choices:
+            self._add_picture_choice(menu, group, text, value)
+        return menu, group
 
-    def _fit_submenu(self):
-        for action in self.sender().actions():
-            if isinstance(action, QWidgetAction):
-                scroll = action.defaultWidget()
-                content = scroll.widget()
-                height = max(content.sizeHint().height(), content.heightForWidth(scroll.width() - 4))
-                scroll.setFixedHeight(min(height + 4, self.screen().availableGeometry().height() - 80))
+    @staticmethod
+    def _add_picture_choice(menu, group, text, value):
+        action = menu.addAction(text)
+        action.setCheckable(True)
+        action.setData(value)
+        group.addAction(action)
 
-    def _picture_done(self, _result):
-        self._picture_editor = None
+    def load_picture(self, picture, connection):
+        self.resolution_menu.clear()
+        resolution = (picture["width"], picture["height"])
+        for w, h in sorted({*RESOLUTIONS, resolution}):
+            self._add_picture_choice(self.resolution_menu, self.resolution_choices, f"{w} × {h}", (w, h))
+        fps = min(FRAME_RATES, key=lambda rate: abs(rate - picture["fps"]))
+        codec = connection._applied_options["codec"]
+        if codec == "auto":
+            codec = "h264"
+        for group, value in ((self.resolution_choices, resolution), (self.fps_choices, fps),
+                             (self.codec_choices, codec), (self.display_choices, self.preview.display_mode)):
+            next(action for action in group.actions() if action.data() == value).setChecked(True)
+        self.bitrate.setValue(round(picture["bitrate_kbps"] / 1000))
+        self.codec_menu.menuAction().setVisible(connection._codec_enabled)
+        self.refresh_picture_codecs(connection)
+
+    def refresh_picture_codecs(self, connection):
+        if self.codec_menu.menuAction().isVisible():
+            names, status = available_codecs(connection)
+            for action in self.codec_choices.actions():
+                action.setEnabled(action.data() in names)
+            self.codec_status.setText(status)
+            self.codec_status.setVisible(bool(status))
+    def _bitrate_changed(self):
+        if self.bitrate_menu.isVisible():
+            self._submit_picture()
+
+    def _submit_picture(self):
+        resolution = self.resolution_choices.checkedAction()
+        if resolution is None:
+            return
+        width, height = resolution.data()
+        picture = {"width": width, "height": height, "fps": self.fps_choices.checkedAction().data(),
+                   "bitrate_kbps": self.bitrate.value() * 1000}
+        codec = self.codec_choices.checkedAction()
+        if self.codec_menu.menuAction().isVisible() and codec is not None and codec.isEnabled():
+            picture["codec"] = codec.data()
         self.panel.close()
+        self.picture_submitted.emit(picture)
+
+    def _volume_changed(self, value):
+        self.volume_value.setText(f"{value}%")
+        self.preference_changed.emit("volume", value)
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
@@ -358,13 +422,8 @@ class StreamWindow(QWidget):
             return True
         return super().eventFilter(watched, event)
 
-    def _discard_picture(self):
-        editor, self._picture_editor = self._picture_editor, None
-        if editor is not None:
-            editor.reject()
-
     def apply_settings(self, settings) -> None:
-        widgets = [self.mouse_mode, self.sensitivity, *self.preferences.values()]
+        widgets = [self.mouse_mode, self.sensitivity, self.volume]
         for widget in widgets:
             widget.blockSignals(True)
         self._control_enabled = settings.control_enabled
@@ -373,8 +432,8 @@ class StreamWindow(QWidget):
         self.sensitivity.setValue(round(settings.mouse_sensitivity * 10))
         self.sensitivity_value.setText(f"{settings.mouse_sensitivity:.1f}")
         self.preview.set_sensitivity(settings.mouse_sensitivity)
-        for name, check in self.preferences.items():
-            check.setChecked(getattr(settings, name))
+        self.volume.setValue(settings.volume)
+        self.volume_value.setText(f"{settings.volume}%")
         for widget in widgets:
             widget.blockSignals(False)
         self._sync_input()
@@ -425,8 +484,13 @@ class StreamWindow(QWidget):
         if self.panel.isVisible():
             self.panel.close()
         else:
-            self.panel.popup(self.toolbar.controls.mapToGlobal(
-                QPoint(self.toolbar.controls.width() - self.panel.sizeHint().width(), TITLE_HEIGHT)))
+            anchor = self.toolbar.controls.mapToGlobal(QPoint(self.toolbar.controls.width(), TITLE_HEIGHT))
+            screen = self.screen().availableGeometry()
+            direction = (Qt.LayoutDirection.RightToLeft
+                         if anchor.x() - screen.left() > screen.right() - anchor.x()
+                         else Qt.LayoutDirection.LeftToRight)
+            self.panel.setLayoutDirection(direction)
+            self.panel.popup(anchor - QPoint(self.panel.sizeHint().width(), 0))
 
     def toggle_fullscreen(self) -> None:
         self.release_input()
