@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import socket
 import sys
 import time
 import threading
@@ -80,7 +79,6 @@ class MainWindow(QMainWindow):
         self._exit_requested = False
         self._tray = None
         self._tray_notified = False
-        self._discovery_message = ""
         self._stats_overlay_enabled = False
         self._last_stats = None
         self._loading_settings = False
@@ -96,6 +94,7 @@ class MainWindow(QMainWindow):
         self.update_progress.connect(self._download_progress)
         self.ui_settings = user_settings.load_ui()
         self.discovery = DiscoveryService(self)
+        self.discovery.set_name(self.ui_settings.device_name)
         self.discovery.peers_changed.connect(self._on_peers)
         self.discovery.status_changed.connect(self._on_discovery_status)
         app = QApplication.instance()
@@ -159,8 +158,8 @@ class MainWindow(QMainWindow):
 
         device = ClickableCard("deviceCard")
         device.setFixedHeight(64)
-        hostname = socket.gethostname() or "this device"
-        device.setToolTip(f"本机 · {hostname}（返回设备列表）")
+        device.setToolTip("查看本机设备信息")
+        device.setAccessibleName("本机设备信息")
         device_row = QHBoxLayout(device)
         device_row.setContentsMargins(12, 10, 10, 10)
         device_row.setSpacing(10)
@@ -177,7 +176,7 @@ class MainWindow(QMainWindow):
         self.sidebar_dot = StatusDot("ok")
         device_row.addWidget(self.sidebar_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         device_row.addWidget(icons.icon_label("chevron-right", 13, "#A9B4C4"))
-        device.clicked.connect(self._show_device_list)
+        device.clicked.connect(lambda: self.devices_page.show_local_info())
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
@@ -233,7 +232,7 @@ class MainWindow(QMainWindow):
             display_count=len(displays), control_port=self._host_settings.control_port
         )
         self.host_page = HostPage(displays)
-        self.devices_page = DevicesPage()
+        self.devices_page = DevicesPage(local_name=self.discovery.name)
         self.settings_page = SettingsPage(self.root)
 
         self.notice_bar = NoticeBar()
@@ -299,6 +298,7 @@ class MainWindow(QMainWindow):
         self.host_page.clipboard_toggled.connect(lambda enabled: self._toggle_clipboard("host", enabled))
         self.host_page.report_requested.connect(lambda: self._export_report("host"))
         self.devices_page.connect_peer.connect(self._connect_peer)
+        self.devices_page.device_name_changed.connect(self._rename_local_device)
         self.connection.error.connect(lambda message: self.log(
             message, "error", fault_id=self.connection.fault_id,
             source=self.connection._fault_source))
@@ -543,18 +543,31 @@ class MainWindow(QMainWindow):
     def _on_devices(self, items: list[dict]) -> None:
         self.devices_page.set_devices(items)
         displays = sum(1 for item in items if item.get("kind") == "display")
-        hostname = socket.gethostname() or "本机"
         self.overview_page.update_environment(
             platform_text=_platform_text(),
             display_count=displays,
             control_port=int(self.host_page.control_port.value()),
         )
-        self.overview_page.identity.setText(f"本机 · {hostname}")
+        self._update_local_identity()
 
     # ---- 设备发现 ----
+    def _rename_local_device(self, name: str) -> None:
+        if not name or name == self.discovery.name:
+            return
+        updated = replace(self.ui_settings, device_name=name)
+        if not user_settings.save(self._host_settings, self._viewer_settings, updated):
+            self.notice_bar.show_message("设备名称保存失败", "error")
+            return
+        self.ui_settings = updated
+        self.discovery.set_name(name)
+        self.devices_page.set_local_name(name)
+        self._update_local_identity()
+
+    def _update_local_identity(self) -> None:
+        self.overview_page.identity.setTextFormat(Qt.TextFormat.PlainText)
+        self.overview_page.identity.setText(f"本机 · {self.discovery.name}")
+
     def _refresh_devices(self) -> None:
-        if self.discovery.running:
-            self.devices_page.set_discovery_state(True, "正在搜索同网设备…")
         self.discovery.refresh()
         self.service.refresh_devices_async()
 
@@ -565,10 +578,8 @@ class MainWindow(QMainWindow):
             self.devices_page.watch_button.setEnabled(False)
 
     def _on_discovery_status(self, message: str) -> None:
-        self._discovery_message = message
         enabled = self.discovery.running
-        hint = "" if message.startswith("设备发现已") else message
-        self.devices_page.set_discovery_state(enabled, hint)
+        self.devices_page.set_discovery_state(enabled)
         self.settings_page.set_discovery_state(enabled, message)
         if "不可用" in message:
             self.notice_bar.show_message(message, "error")
@@ -856,7 +867,7 @@ class MainWindow(QMainWindow):
         self._setup_tray(self.ui_settings.close_to_tray)
         self.connection.start()
         self.discovery.start()
-        self.devices_page.set_discovery_state(self.discovery.running, self._discovery_message)
+        self.devices_page.set_discovery_state(self.discovery.running)
         self.settings_page.set_discovery_state(self.discovery.running)
         self._on_peers(self.discovery.peers())
         self._sync_discovery_hosting("idle")

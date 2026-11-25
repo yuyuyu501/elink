@@ -240,6 +240,22 @@ class DiscoveryTests(unittest.TestCase):
                              [(peer.identity, 49322)])
             self.assertEqual([(p["id"], p["session_port"]) for p in peer.peers()],
                              [(self.service.identity, 49321)])
+            self.service.set_name("工作电脑")
+            deadline = time.monotonic() + 1
+            while peer.peers()[0]["name"] != "工作电脑" and time.monotonic() < deadline:
+                APP.processEvents()
+                time.sleep(.005)
+            self.assertEqual([(p["id"], p["name"]) for p in peer.peers()],
+                             [(self.service.identity, "工作电脑")])
+
+    def test_rename_announcement_updates_display_name_across_multiple_paths(self):
+        with patch("frontend.desktop.discovery.time.monotonic", return_value=100):
+            self.service._remember(PEER, "192.168.1.10", "Ethernet")
+        with patch("frontend.desktop.discovery.time.monotonic", return_value=101):
+            self.service._remember({**PEER, "name": "Renamed"}, "192.168.2.10", "Virtual adapter")
+            peers = self.service.peers()
+        self.assertEqual([(peer["id"], peer["name"], peer["ip"]) for peer in peers],
+                         [(PEER["id"], "Renamed", "192.168.1.10")])
 
     def test_candidates_are_queried_once_per_interval_through_matching_interface(self):
         first, second = MagicMock(), MagicMock()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elink"
-version = "0.6.18"
+version = "0.6.19"
 description = "低延迟远程控制与串流：屏幕采集、WebRTC 传输、PySide6 桌面端"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

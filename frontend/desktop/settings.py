@@ -32,6 +32,7 @@ class UiSettings:
     close_to_tray: bool = False
     admin_startup: bool = False
     update_previews: bool = True
+    device_name: str = ""
 
 
 def _read() -> dict:
@@ -124,23 +125,32 @@ def remember_device_picture(viewer: ViewerSettings, peer_id: str,
     viewer.picture_preferences[str(peer_id)] = values
 
 
+def normalize_device_name(value: object) -> str:
+    name = value.strip() if isinstance(value, str) else ""
+    return name if 1 <= len(name) <= 80 else ""
+
+
 def load_ui() -> UiSettings:
     data = _read()
-    return _merge(UiSettings, data.get("ui"))
+    ui = _merge(UiSettings, data.get("ui"))
+    ui.device_name = normalize_device_name(ui.device_name)
+    return ui
 
 
-def save(host: HostSettings, viewer: ViewerSettings, ui: UiSettings | None = None) -> None:
+def save(host: HostSettings, viewer: ViewerSettings, ui: UiSettings | None = None) -> bool:
     path = settings_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "host": asdict(host),
         "viewer": asdict(viewer),
         "ui": asdict(ui or UiSettings()),
     }
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         logger.warning("设置保存失败: %s", path, exc_info=True)
+        return False
+    return True
 
 
 def _merge(cls, values) -> object:

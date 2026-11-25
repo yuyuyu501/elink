@@ -245,7 +245,7 @@ QFrame#computerRow {
 QFrame#computerRow:hover, QFrame#computerRow[focused="true"] {
     background: #F2F7FF; border-color: #B1C9EF;
 }
-QPushButton#openComputer {
+QPushButton#openComputer, QWidget#localComputer {
     background: transparent; border: 1px solid transparent; border-radius: 3px; padding: 0;
 }
 QFrame#computerRow QPushButton:hover, QFrame#computerRow QPushButton:focus,
@@ -267,11 +267,6 @@ QPushButton#computerGroup {
     background: transparent; border: 0; padding: 2px 0; color: #455569; font-size: 13px;
 }
 QPushButton#computerGroup:focus { color: #2468E8; }
-QLineEdit#deviceSearch {
-    background: #FFFFFF; border: 1px solid #DEE5ED; border-radius: 5px; padding: 7px 10px;
-    font-size: 12px; color: #202C3C;
-}
-QLineEdit#deviceSearch:focus { border-color: #2468E8; }
 QLabel#deviceDetailName { color: #202C3C; font-size: 24px; font-weight: 600; }
 QFrame#deviceSurface { background: #FFFFFF; border: 1px solid #D7E1EC; border-radius: 5px; }
 QWidget#deviceTools { background: #FFFFFF; }

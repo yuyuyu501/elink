@@ -43,7 +43,7 @@ class DiscoveryService(QObject):
         super().__init__(parent)
         self._ports = DISCOVERY_PORTS if port == DISCOVERY_PORT else (port,)
         self._id = instance_id or _machine_id()
-        self._name = socket.gethostname() or "elink"
+        self._name = socket.gethostname().strip()[:80] or "elink"
         self._platform = f"{platform.system()} {platform.release()}".strip()
         self._hosting = False
         self._session_port = 0
@@ -73,6 +73,21 @@ class DiscoveryService(QObject):
     @property
     def identity(self) -> str:
         return self._id
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def set_name(self, name: str) -> None:
+        if not name or name == self._name:
+            return
+        self._name = name
+        if self._running:
+            self._announce()
+            data = QByteArray(json.dumps(self._payload("announce"), ensure_ascii=False).encode("utf-8"))
+            for paths in self._peers.values():
+                for ip in paths:
+                    self._send_to_ports(self._socket, data, QHostAddress(ip))
 
     def set_connection(self, port: int, busy: bool) -> None:
         state = (int(port), bool(busy))
@@ -307,6 +322,7 @@ class DiscoveryService(QObject):
             if not live:
                 continue
             item = {key: value for key, value in live[0].items() if not key.startswith("_")}
+            item["name"] = max(live, key=lambda peer: peer["_seen"])["name"]
             item["addresses"] = [
                 {"ip": peer["ip"], "interface": peer["interface"]} for peer in live
             ]

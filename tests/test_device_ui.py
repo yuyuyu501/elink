@@ -13,9 +13,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, Qt, QTimer
 from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QPushButton, QStyle, QStyleOptionSlider
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QPushButton, QStyle, QStyleOptionSlider
 from PySide6.QtTest import QTest
 
 from frontend.desktop import icons
@@ -27,6 +27,7 @@ from frontend.desktop.theme import apply_theme
 from frontend.desktop.ui.devices_page import ComputerName, DevicesPage
 from frontend.desktop.ui.window import MainWindow, PAGE_INDEX
 from frontend.desktop.ui.stream_window import PictureDialog
+from frontend.desktop.ui.widgets import ClickableCard
 
 APP = QApplication.instance() or QApplication([])
 apply_theme(APP)
@@ -100,7 +101,7 @@ class DisplayModeTests(unittest.TestCase):
 
 class DevicePageTests(unittest.TestCase):
     def setUp(self):
-        self.page = DevicesPage()
+        self.page = DevicesPage(local_name="Local computer")
         self.page.set_peers([PEER])
         self.requests = []
         self.page.connect_peer.connect(lambda peer, control: self.requests.append((peer, control)))
@@ -135,7 +136,7 @@ class DevicePageTests(unittest.TestCase):
             APP.processEvents()
             self.assertTrue(row.property("focused"))
             self.assertEqual(button.palette().button().color().alpha(), 0)
-        self.page.search.setFocus()
+        self.page.group_button.setFocus()
         APP.processEvents()
         self.assertFalse(row.property("focused"))
 
@@ -176,13 +177,11 @@ class DevicePageTests(unittest.TestCase):
         self.page._request_connection(True)
         self.assertFalse(self.requests)
 
-    def test_search_matches_secondary_address_and_info_shows_network(self):
+    def test_remote_device_info_shows_secondary_network_address(self):
         self.page.set_peers([{**PEER, "addresses": [
             {"ip": PEER["ip"], "interface": "Ethernet"},
             {"ip": "100.64.0.3", "interface": "Virtual adapter"},
         ]}])
-        self.page.search.setText("100.64.0.3")
-        self.assertEqual(len(self.page.rows), 1)
         self.page.open_peer(PEER["id"])
         with patch("frontend.desktop.ui.devices_page.QMessageBox.exec", return_value=0), patch(
             "frontend.desktop.ui.devices_page.QMessageBox.setInformativeText"
@@ -190,16 +189,15 @@ class DevicePageTests(unittest.TestCase):
             self.page.show_selected_info()
         self.assertIn("Virtual adapter：100.64.0.3", informative_text.call_args.args[0])
 
-    def test_search_and_group_collapsing_do_not_start_sessions(self):
-        self.page.search.setText("Study")
-        self.assertEqual(len(self.page.rows), 1)
-        self.page.search.setText("192.168.1.108")
-        self.assertEqual(len(self.page.rows), 1)
-        self.page.search.setText("no such computer")
-        self.assertEqual(len(self.page.rows), 0)
-        self.page.search.clear()
+    def test_list_has_no_search_or_discovery_message_and_still_updates(self):
+        self.assertIsNone(self.page.findChild(QLineEdit))
+        self.assertFalse(hasattr(self.page, "discovery_hint"))
+        self.assertFalse(self.page.rows[0].findChildren(QPushButton))
         self.assertEqual(len(self.page.rows), 2)
         self.page.group_button.click()
+        self.assertTrue(self.page.scroll.isHidden())
+        self.page.set_peers([])
+        self.assertEqual(len(self.page.rows), 1)
         self.assertTrue(self.page.scroll.isHidden())
         self.assertFalse(self.requests)
 
@@ -262,7 +260,9 @@ class WindowConnectionTests(unittest.TestCase):
                                       return_value=(HostSettings(), ViewerSettings())))
         self.mocks.enter_context(patch("frontend.desktop.ui.window.user_settings.load_ui",
                                       return_value=UiSettings()))
-        self.mocks.enter_context(patch("frontend.desktop.ui.window.user_settings.save"))
+        self.save_settings = self.mocks.enter_context(
+            patch("frontend.desktop.ui.window.user_settings.save", return_value=True)
+        )
         self.mocks.enter_context(patch.object(MainWindow, "_apply_ui_settings"))
         self.mocks.enter_context(patch.object(SessionService, "displays", return_value=[]))
         self.peers = self.mocks.enter_context(patch.object(DiscoveryService, "peers", return_value=[PEER]))
@@ -277,6 +277,33 @@ class WindowConnectionTests(unittest.TestCase):
         self.window.close()
         self.window.deleteLater()
         APP.processEvents()
+
+    def test_sidebar_opens_local_info_and_persists_rename(self):
+        local = self.window.findChild(ClickableCard, "deviceCard")
+        initial_name = self.window.discovery.name
+        initial_id = self.window.discovery.identity
+        observed = []
+
+        def edit_dialog():
+            dialog = APP.activeModalWidget()
+            edit = dialog.findChild(QLineEdit)
+            save = dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save)
+            observed.extend((dialog.windowTitle(), edit.text()))
+            edit.setText("   ")
+            observed.append(save.isEnabled())
+            edit.setText("x" * 81)
+            observed.append(save.isEnabled())
+            edit.setText("  工作电脑  ")
+            save.click()
+
+        QTimer.singleShot(0, edit_dialog)
+        QTest.mouseClick(local, Qt.MouseButton.LeftButton)
+        self.assertEqual(observed, ["设备信息", initial_name, False, False])
+        self.assertEqual(self.window.discovery.identity, initial_id)
+        self.assertEqual(self.window.discovery.name, "工作电脑")
+        self.assertEqual(self.window.devices_page.rows[0].peer["name"], "工作电脑")
+        self.assertEqual(self.save_settings.call_args.args[2].device_name, "工作电脑")
+        self.assertEqual(self.window.devices_page.stack.currentIndex(), 1)
 
     def test_device_is_home_and_both_connection_modes_reach_service(self):
         self.assertEqual(self.window.stack.currentIndex(), PAGE_INDEX["devices"])

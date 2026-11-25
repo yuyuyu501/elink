@@ -1,12 +1,30 @@
 import unittest
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from frontend.desktop import settings
 from frontend.desktop.service import ViewerSettings
+
+
+class DeviceNameSettingsTests(unittest.TestCase):
+    def test_custom_name_round_trips_with_whitespace_trimmed(self):
+        with TemporaryDirectory() as folder, patch.object(
+            settings, "settings_file", return_value=Path(folder) / "config" / "desktop.json"
+        ):
+            host, viewer = settings.load()
+            self.assertTrue(settings.save(host, viewer, settings.UiSettings(device_name="  工作电脑  ")))
+            self.assertEqual(settings.load_ui().device_name, "工作电脑")
+
+    def test_old_and_invalid_values_use_default_name(self):
+        for values in ({}, {"device_name": None}, {"device_name": 9},
+                       {"device_name": "  "}, {"device_name": "x" * 81}):
+            with self.subTest(values=values), patch.object(settings, "_read", return_value={"ui": values}):
+                self.assertEqual(settings.load_ui().device_name, "")
+        self.assertEqual(settings.normalize_device_name("x" * 80), "x" * 80)
 
 
 class DevicePictureSettingsTests(unittest.TestCase):

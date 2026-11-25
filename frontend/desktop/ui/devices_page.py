@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import platform
-import socket
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLineEdit,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from .. import icons
 from ..paths import resource_dir
+from ..settings import normalize_device_name
 from .widgets import ElidedLabel, StatusPill, divider, hint, label, title
 
 
@@ -53,6 +55,7 @@ def _connectable(peer: dict) -> bool:
 class ComputerName(ElidedLabel):
     def __init__(self, text: str = "") -> None:
         super().__init__(text)
+        self.setTextFormat(Qt.TextFormat.PlainText)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
     def sizeHint(self) -> QSize:
@@ -128,13 +131,18 @@ class ComputerRow(QFrame):
         row.setContentsMargins(12, 0, 10, 0)
         row.setSpacing(5)
 
-        self.open_button = QPushButton()
-        self.open_button.setObjectName("openComputer")
-        self.open_button.setMinimumHeight(62)
         name = str(peer.get("name") or "未命名设备")
-        self.open_button.setAccessibleName(f"本机 {name}" if local else f"打开 {name}")
-        self.open_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        content = QHBoxLayout(self.open_button)
+        if local:
+            body = QWidget()
+            body.setObjectName("localComputer")
+        else:
+            self.open_button = body = QPushButton()
+            body.setObjectName("openComputer")
+            body.setAccessibleName(f"打开 {name}")
+            body.setCursor(Qt.CursorShape.PointingHandCursor)
+            body.clicked.connect(on_open)
+        body.setMinimumHeight(62)
+        content = QHBoxLayout(body)
         content.setContentsMargins(0, 0, 8, 0)
         content.setSpacing(14)
         symbol = icons.icon_label("monitor", 34, "#FFFFFF", glyph_size=22)
@@ -156,17 +164,12 @@ class ComputerRow(QFrame):
             widget = content.itemAt(index).widget()
             if widget is not None:
                 widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.open_button.clicked.connect(on_info if local else on_open)
-        row.addWidget(self.open_button, 1)
+        row.addWidget(body, 1)
 
-        self.info_button = _icon_button("info", f"查看 {name} 信息")
-        self.info_button.clicked.connect(on_info)
-        row.addWidget(self.info_button)
-        if local:
-            space = QWidget()
-            space.setFixedWidth(34)
-            row.addWidget(space)
-        else:
+        if not local:
+            self.info_button = _icon_button("info", f"查看 {name} 信息")
+            self.info_button.clicked.connect(on_info)
+            row.addWidget(self.info_button)
             self.arrow_button = _icon_button("chevron-right", f"进入 {name}")
             self.arrow_button.clicked.connect(on_open)
             row.addWidget(self.arrow_button)
@@ -184,15 +187,16 @@ class ComputerRow(QFrame):
 
 class DevicesPage(QWidget):
     connect_peer = Signal(dict, bool)
+    device_name_changed = Signal(str)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, local_name: str = "本机") -> None:
         super().__init__(parent)
         self._peers: list[dict] = []
         self._hardware: list[dict] = []
         self._selected_key = ""
         self._selected_peer: dict = {}
         self._discovery_enabled = True
-        self._discovery_message = ""
+        self._local_name = local_name
         self._local_hosting = False
         self._local_ready = True
         self.rows: list[ComputerRow] = []
@@ -211,21 +215,7 @@ class DevicesPage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(6, 8, 6, 0)
         layout.setSpacing(10)
-        heading = QHBoxLayout()
-        heading.addWidget(title("全部设备"), 1)
-        self.search = QLineEdit()
-        self.search.setObjectName("deviceSearch")
-        self.search.setPlaceholderText("搜索设备")
-        self.search.setAccessibleName("搜索设备")
-        self.search.setClearButtonEnabled(True)
-        self.search.setMaximumWidth(220)
-        self.search.addAction(icons.icon("search", "#596778"), QLineEdit.ActionPosition.LeadingPosition)
-        self.search.textChanged.connect(self._render_rows)
-        heading.addWidget(self.search)
-        layout.addLayout(heading)
-        self.discovery_hint = hint("")
-        layout.addWidget(self.discovery_hint)
-        layout.addSpacing(10)
+        layout.addWidget(title("全部设备"))
         self.group_button = QPushButton()
         self.group_button.setObjectName("computerGroup")
         self.group_button.setCheckable(True)
@@ -246,8 +236,6 @@ class DevicesPage(QWidget):
         self.row_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.row_holder)
         layout.addWidget(self.scroll, 1)
-        self.empty_label = hint("没有匹配的设备")
-        layout.addWidget(self.empty_label)
         return page
 
     def _build_detail(self) -> QWidget:
@@ -327,7 +315,7 @@ class DevicesPage(QWidget):
 
     def show_list(self) -> None:
         self.stack.setCurrentIndex(0)
-        self.search.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.group_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def open_peer(self, key: str) -> None:
         peer = next((peer for peer in self._peers if _peer_key(peer) == key), None)
@@ -344,10 +332,8 @@ class DevicesPage(QWidget):
         if self._discovery_enabled and peer is not None and _connectable(peer):
             self.connect_peer.emit(dict(peer), control)
 
-    def set_discovery_state(self, enabled: bool, message: str = "") -> None:
+    def set_discovery_state(self, enabled: bool) -> None:
         self._discovery_enabled = enabled
-        self._discovery_message = message
-        self._update_discovery_hint()
         self._update_detail()
 
     def set_local_state(self, hosting: bool, *, ready: bool = True) -> None:
@@ -357,25 +343,14 @@ class DevicesPage(QWidget):
     def set_devices(self, items: list[dict]) -> None:
         self._hardware = [dict(item) for item in items]
 
+    def set_local_name(self, name: str) -> None:
+        self._local_name = name
+        self._render_rows()
+
     def set_peers(self, peers: list[dict]) -> None:
         self._peers = list({_peer_key(peer): dict(peer) for peer in peers if _peer_key(peer)}.values())
         self._render_rows()
-        self._update_discovery_hint()
         self._update_detail()
-
-    def _update_discovery_hint(self) -> None:
-        if not self._discovery_enabled:
-            text = "设备发现暂不可用"
-        elif self._peers:
-            text = f"已发现 {len(self._peers)} 台设备 · 自动更新"
-        else:
-            text = "正在自动发现网络中的 Elink 设备"
-        if self._discovery_enabled and any(
-            word in self._discovery_message for word in ("失败", "不可用", "未连接")
-        ):
-            text += f" · {self._discovery_message}"
-        self.discovery_hint.setText(text)
-        self.discovery_hint.setToolTip(self._discovery_message)
 
     def _render_rows(self) -> None:
         while self.row_layout.count():
@@ -384,26 +359,18 @@ class DevicesPage(QWidget):
                 widget.hide()
                 widget.deleteLater()
         self.rows = []
-        query = self.search.text().strip().casefold()
-        local = {"name": socket.gethostname() or "本机", "platform": platform.platform()}
+        local = {"name": self._local_name}
         candidates = [(local, True)] + [(peer, False) for peer in self._peers]
         for peer, is_local in candidates:
-            addresses = " ".join(item["ip"] for item in peer.get("addresses", []))
-            searchable = f"{peer.get('name', '')} {peer.get('ip', '')} {addresses} {'本机' if is_local else ''}"
-            if query and query not in searchable.casefold():
-                continue
             row = ComputerRow(
                 peer,
                 local=is_local,
                 on_open=lambda checked=False, key=_peer_key(peer): self.open_peer(key),
-                on_info=lambda checked=False, data=dict(peer), local=is_local: self._show_info(data, local),
+                on_info=lambda checked=False, data=dict(peer): self._show_info(data),
             )
             self.rows.append(row)
             self.row_layout.addWidget(row)
         self.group_button.setText(f"电脑  {len(self.rows)}")
-        self.empty_label.setVisible(not self.rows)
-        if query:
-            self.group_button.setChecked(True)
         self._toggle_group(self.group_button.isChecked())
 
     def _toggle_group(self, expanded: bool) -> None:
@@ -438,28 +405,57 @@ class DevicesPage(QWidget):
 
     def show_selected_info(self) -> None:
         if self._selected_peer:
-            self._show_info(self._selected_peer, False)
+            self._show_info(self._selected_peer)
 
-    def _show_info(self, peer: dict, local: bool) -> None:
+    def show_local_info(self) -> None:
+        dialog = QDialog(self.window())
+        dialog.setWindowTitle("设备信息")
+        dialog.setMinimumWidth(360)
+        layout = QVBoxLayout(dialog)
+        name = QLineEdit(self._local_name)
+        name.setAccessibleName("设备名称")
+        layout.addWidget(label("设备名称"))
+        layout.addWidget(name)
+        ready = self._local_ready
+        state = "等待连接" if ready else "监听未就绪"
+        if self._local_hosting:
+            state = "会话运行中"
+        lines = [
+            f"系统：{platform.platform()}",
+            f"设备发现：{'已开启' if self._discovery_enabled else '已关闭'}",
+            f"桌面连接：{state}",
+        ]
+        lines.extend(str(item.get("name") or item.get("id") or "") for item in self._hardware)
+        details = label("\n".join(lines), wrap=True)
+        details.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(details)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        save = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save.setText("保存")
+        save.setEnabled(bool(normalize_device_name(name.text())))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        name.textChanged.connect(lambda text: save.setEnabled(bool(normalize_device_name(text))))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        name.selectAll()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.device_name_changed.emit(normalize_device_name(name.text()))
+        dialog.deleteLater()
+
+    def _show_info(self, peer: dict) -> None:
         name = str(peer.get("name") or "未命名设备")
         lines = [f"系统：{peer.get('platform') or '未知'}"]
-        if local:
-            lines.append(f"设备发现：{'已开启' if self._discovery_enabled else '已关闭'}")
-            ready = self._local_ready
-            lines.append(f"桌面连接：{'会话运行中' if self._local_hosting else '等待连接' if ready else '监听未就绪'}")
-            for item in self._hardware:
-                lines.append(str(item.get("name") or item.get("id") or ""))
-        else:
-            online = self._discovery_enabled and any(
-                _peer_key(item) == _peer_key(peer) for item in self._peers
-            )
-            lines.append(f"连接地址：{peer.get('ip') or '未知'}")
-            for address in peer.get("addresses", []):
-                lines.append(f"{address.get('interface') or '网络'}：{address['ip']}")
-            lines.append(f"版本：{peer.get('version') or '未知'}")
-            lines.append(f"设备状态：{'在线' if online else '离线'}")
-            state = "设备离线" if not online else ("已开放" if _connectable(peer) else "未开放")
-            lines.append(f"桌面连接：{state}")
+        online = self._discovery_enabled and any(
+            _peer_key(item) == _peer_key(peer) for item in self._peers
+        )
+        lines.append(f"连接地址：{peer.get('ip') or '未知'}")
+        for address in peer.get("addresses", []):
+            lines.append(f"{address.get('interface') or '网络'}：{address['ip']}")
+        lines.append(f"版本：{peer.get('version') or '未知'}")
+        lines.append(f"设备状态：{'在线' if online else '离线'}")
+        state = "设备离线" if not online else ("已开放" if _connectable(peer) else "未开放")
+        lines.append(f"桌面连接：{state}")
         dialog = QMessageBox(QMessageBox.Icon.Information, "设备信息", name, parent=self)
         dialog.setInformativeText("\n".join(lines))
         dialog.setTextFormat(Qt.TextFormat.PlainText)
