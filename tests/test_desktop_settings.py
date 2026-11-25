@@ -28,6 +28,19 @@ class DeviceNameSettingsTests(unittest.TestCase):
 
 
 class DevicePictureSettingsTests(unittest.TestCase):
+    def test_codec_modes_round_trip_independently_and_legacy_defaults_to_auto(self):
+        preferences = {
+            "device-a": {"codec": "h264", "encoder_device": "cpu", "decoder_device": "gpu"},
+            "device-b": {"codec": "hevc"},
+        }
+        with TemporaryDirectory() as folder, patch.object(
+            settings, "settings_file", return_value=Path(folder) / "config" / "desktop.json"
+        ):
+            host, viewer = settings.load()
+            viewer.codec_preferences = preferences
+            self.assertTrue(settings.save(host, viewer))
+            self.assertEqual(settings.load()[1].codec_preferences, preferences)
+
     def test_volume_migrates_legacy_mute(self):
         for raw, expected in (({"muted": True}, 0), ({"muted": True, "volume": 35}, 35), ({}, 100)):
             with patch.object(settings, "_read", return_value={"viewer": raw}):

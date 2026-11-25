@@ -634,6 +634,37 @@ class WindowConnectionTests(unittest.TestCase):
         dialog.close()
         dialog.deleteLater()
 
+    def test_cascading_codec_devices_filter_by_format_and_submit_independently(self):
+        self.window._session_connected(ViewerSettings())
+        connection = self.window.connection
+        connection.role, connection.phase, connection._codec_enabled = "viewer", "active", True
+        connection._applied_options = {"codec": "h264", "decoder_device": "cpu"}
+        connection._peer_caps = {"encoders": {
+            "h264_nvenc": {"codec": "h264"},
+            "libx264": {"codec": "h264"},
+            "libx265": {"codec": "hevc"},
+        }}
+        self.window.service.codec_capabilities = {"decoders": {
+            "h264": {"codec": "h264"}, "hevc": {"codec": "hevc"},
+        }}
+        picture = {"width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 4000}
+        stream = self.window._stream_window
+        stream.load_picture(picture, connection)
+        encoder, decoder = ({action.data(): action for action in stream.codec_device_choices[key].actions()}
+                            for key in ("encoder_device", "decoder_device"))
+        self.assertTrue(encoder["gpu"].isEnabled())
+        self.assertFalse(decoder["gpu"].isEnabled())
+        self.assertTrue(decoder["cpu"].isChecked())
+        with patch.object(connection, "configure") as configure:
+            encoder["gpu"].trigger()
+            configure.assert_called_once_with({
+                **picture, "codec": "h264", "encoder_device": "gpu", "decoder_device": "cpu",
+            })
+        connection._applied_options = {"codec": "hevc"}
+        stream.load_picture(picture, connection)
+        self.assertTrue(encoder["cpu"].isEnabled())
+        self.assertFalse(encoder["gpu"].isEnabled())
+
     def test_overlay_uses_measured_units_expiry_and_shared_persisted_toggle(self):
         from frontend.desktop.service import SessionStats
         self.window._session_connected(ViewerSettings(control_enabled=True))

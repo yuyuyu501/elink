@@ -290,6 +290,9 @@ def codec_label(name: str) -> str:
     return f"{vendor} · {name}"
 
 
+CODEC_DEVICE_KEYS = ("encoder_device", "decoder_device")
+
+
 def codec_options(values: dict) -> dict:
     """Validate the public identifiers without accepting command-line fragments."""
     if not isinstance(values, dict):
@@ -307,6 +310,12 @@ def codec_options(values: dict) -> dict:
     for key, mapping in (("encoder", VIDEO_ENCODERS), ("decoder", VIDEO_DECODERS)):
         if result["codec"] != "auto" and result[key] != "auto" and mapping[result[key]] != result["codec"]:
             raise ValueError("编解码器与视频格式不匹配")
+    for key in CODEC_DEVICE_KEYS:
+        device = values.get(key, "auto")
+        if device not in ("auto", "gpu", "cpu"):
+            raise ValueError(f"无效编解码设备：{key}")
+        if device != "auto":
+            result[key] = device
     return result
 
 
@@ -339,9 +348,14 @@ def public_capabilities(snapshot: dict) -> dict:
     })
 
 
+def _decoder_uses_gpu(name: str) -> bool:
+    return name.endswith(("_cuvid", "_amf", "_qsv", "_vaapi", "_mediacodec"))
+
+
 def compatible_choices(remote: dict, local: dict, preference: dict) -> list[dict]:
     options = codec_options(preference)
     encoders, decoders = remote.get("encoders", {}), local.get("decoders", {})
+    encoder_device, decoder_device = (options.get(key, "auto") for key in CODEC_DEVICE_KEYS)
     result = []
     for codec in ("h264", "hevc", "av1"):
         if options["codec"] not in ("auto", codec):
@@ -352,10 +366,13 @@ def compatible_choices(remote: dict, local: dict, preference: dict) -> list[dict
                 continue
             if enc["codec"] != codec or options["encoder"] not in ("auto", encoder):
                 continue
+            if encoder_device not in ("auto", "cpu" if encoder.startswith("lib") else "gpu"):
+                continue
             for decoder in sorted(decoders, key=lambda n: (
-                    not n.endswith(("_cuvid", "_amf", "_qsv", "_vaapi", "_mediacodec")),
-                    n in {"hevc", "av1"})):
+                    not _decoder_uses_gpu(n), n in {"hevc", "av1"})):
                 dec = decoders[decoder]
+                if decoder_device not in ("auto", "gpu" if _decoder_uses_gpu(decoder) else "cpu"):
+                    continue
                 if dec["codec"] == codec and options["decoder"] in ("auto", decoder):
                     result.append({"codec": codec, "encoder": encoder, "decoder": decoder})
     if not result:

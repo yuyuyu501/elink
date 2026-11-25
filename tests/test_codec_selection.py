@@ -140,9 +140,26 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             compatible_choices(remote, local, {"encoder": "h264_amf"})
 
+    def test_device_modes_filter_each_side_for_every_format(self):
+        for codec, software in (("h264", "libx264"), ("hevc", "libx265"), ("av1", "libsvtav1")):
+            with self.subTest(codec=codec):
+                gpu_encoder = f"{codec}_nvenc"
+                gpu_decoder = f"{codec}_cuvid"
+                remote = caps("encoders", {gpu_encoder: available(codec), software: available(codec)})
+                local = caps("decoders", {gpu_decoder: available(codec), codec: available(codec)})
+                self.assertEqual(compatible_choices(remote, local, {
+                    "codec": codec, "encoder_device": "cpu", "decoder_device": "gpu",
+                }), [{"codec": codec, "encoder": software, "decoder": gpu_decoder}])
+                self.assertEqual(compatible_choices(remote, local, {
+                    "codec": codec, "encoder_device": "gpu", "decoder_device": "cpu",
+                }), [{"codec": codec, "encoder": gpu_encoder, "decoder": codec}])
+                with self.assertRaises(ValueError):
+                    compatible_choices(remote, caps("decoders", {codec: available(codec)}),
+                                       {"codec": codec, "decoder_device": "gpu"})
+
     def test_invalid_options_and_untrusted_capabilities(self):
         for options in ({"codec": "vp9"}, {"encoder": "-i evil"}, {"decoder": []},
-                        {"codec": "hevc", "encoder": "libx264"}):
+                        {"codec": "hevc", "encoder": "libx264"}, {"encoder_device": "other"}):
             with self.assertRaises(ValueError):
                 codec_options(options)
         with self.assertRaises(ValueError):

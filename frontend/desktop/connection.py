@@ -14,7 +14,7 @@ from . import settings as user_settings
 from .service import HostSettings, SessionService, ViewerSettings
 from .error_report import remote_details, save_error
 from backend.media.video.codec.probe import (
-    checked_capabilities, codec_options, compatible_choices,
+    CODEC_DEVICE_KEYS, checked_capabilities, codec_options, compatible_choices,
 )
 
 SESSION_PORT = 49321
@@ -140,6 +140,7 @@ class DesktopConnection(QObject):
             if self.service.running:
                 if self._previous is not None:
                     self._picture, self._previous = self._previous, None
+                self._preferences = dict(self._applied_options)
                 self.phase = "active"
                 self.error.emit(str(exc))
                 self.changed.emit()
@@ -158,6 +159,7 @@ class DesktopConnection(QObject):
                 if self._previous is not None:
                     self._picture, self._previous = self._previous, None
                 self._selection, self._prior_selection = self._prior_selection, None
+                self._preferences = dict(self._applied_options)
                 self.phase = "active"
                 self.changed.emit()
                 return
@@ -626,7 +628,10 @@ class DesktopConnection(QObject):
             self._prior_selection = None
             if self._codec_enabled and not self._rollback:
                 self._applied_options = dict(self._preferences)
-                self._viewer.codec_preferences[str(self._peer["id"])] = {"codec": self._selection["codec"]}
+                self._viewer.codec_preferences[str(self._peer["id"])] = user_settings.codec_preference(
+                    self._applied_options)
+            elif self._rollback:
+                self._preferences = dict(self._applied_options)
             self._clear_failure()
             self._send("active")
             self._viewer = replace(
@@ -640,7 +645,12 @@ class DesktopConnection(QObject):
             return
         self._clear_failure()
         try:
-            options = codec_options(picture) if "codec" in picture else self._applied_options
+            if "codec" in picture:
+                options = codec_options(picture)
+            elif any(key in picture for key in CODEC_DEVICE_KEYS):
+                options = codec_options({**self._applied_options, **picture})
+            else:
+                options = self._applied_options
             picture = picture_settings(picture)
         except ValueError as exc:
             self._report(exc)
@@ -653,7 +663,10 @@ class DesktopConnection(QObject):
         if self._live_enabled and self.phase == "active":
             try:
                 choices = compatible_choices(self._peer_caps, self.service.codec_capabilities, options)
-                selection = self._selection if self._selection in choices else choices[0]
+                unchanged = [axis for axis, key in zip(("encoder", "decoder"), CODEC_DEVICE_KEYS)
+                             if options.get(key, "auto") == self._applied_options.get(key, "auto")]
+                selection = min(choices, key=lambda candidate: sum(
+                    candidate[axis] != self._selection[axis] for axis in unchanged))
                 if selection["codec"] == self._selection["codec"]:
                     viewer = replace(
                         self._viewer, decoder=selection["decoder"],

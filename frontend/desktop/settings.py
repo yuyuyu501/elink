@@ -15,7 +15,7 @@ from backend.logging.logger import get_logger
 from .paths import data_dir, settings_file
 from .service import HostSettings, ViewerSettings
 from backend.input_capture.mouse import mouse_mode, sensitivity_value
-from backend.media.video.codec.probe import codec_options
+from backend.media.video.codec.probe import CODEC_DEVICE_KEYS, codec_options
 
 logger = get_logger(__name__)
 
@@ -70,12 +70,19 @@ def load() -> tuple[HostSettings, ViewerSettings]:
         if not isinstance(peer, str) or len(peer) > 128:
             continue
         try:
-            codec = codec_options({"codec": options.get("codec", "h264")})["codec"]
-            viewer.codec_preferences[peer] = {"codec": "h264" if codec == "auto" else codec}
+            preference = codec_options({
+                key: options.get(key, "h264" if key == "codec" else "auto")
+                for key in ("codec", *CODEC_DEVICE_KEYS)
+            })
+            viewer.codec_preferences[peer] = codec_preference(preference)
         except (ValueError, AttributeError):
             continue
     viewer.picture_preferences = _load_picture_preferences(viewer.picture_preferences)
     return host, viewer
+
+
+def codec_preference(options: dict) -> dict:
+    return {key: options[key] for key in ("codec", *CODEC_DEVICE_KEYS) if key in options}
 
 
 def picture_settings(values: dict) -> dict:

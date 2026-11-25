@@ -643,6 +643,32 @@ class LiveConnectionTests(unittest.TestCase):
         self.viewer_media.frame_ready.emit(SimpleNamespace(width=width, height=height))
         self.assertEqual(self.viewer.phase, "active")
 
+    def test_live_device_modes_save_only_after_success_and_reconnect(self):
+        self.connect()
+        picture = self.applied[-1]
+        preference = {"codec": "h264", "encoder_device": "cpu", "decoder_device": "gpu"}
+        self.viewer.configure({**picture, **preference})
+        self.assertEqual(self.viewer._viewer.codec_preferences["host"], {"codec": "h264"})
+        self.deliver_live_frame(picture["width"], picture["height"])
+        self.assertEqual(self.host_media.updates[-1][1]["encoder"], "libx264")
+        self.assertEqual(self.viewer_media.updates[-1][1]["decoder"], "h264_qsv")
+        self.assertEqual(self.viewer._viewer.codec_preferences["host"], preference)
+
+        self.host_media.fail_update = True
+        self.viewer.configure({**picture, **preference, "decoder_device": "cpu"})
+        wait_until(lambda: self.viewer.phase == self.host.phase == "active")
+        self.assertTrue(self.errors)
+        self.assertEqual(self.viewer._selection["decoder"], "h264_qsv")
+        self.assertEqual(self.viewer._viewer.codec_preferences["host"], preference)
+
+        settings = self.viewer._viewer
+        self.viewer.disconnect()
+        wait_until(lambda: self.viewer.phase == self.host.phase == "idle")
+        self.viewer.connect_peer(self.peer, settings, True)
+        wait_until(lambda: self.viewer.phase == self.host.phase == "active")
+        self.assertEqual(self.host_media.starts[-1].encoder, "libx264")
+        self.assertEqual(self.viewer_media.starts[-1].decoder, "h264_qsv")
+
     def test_unchanged_picture_does_nothing_and_live_update_keeps_media(self):
         self.connect()
         self.viewer.configure(self.applied[-1])

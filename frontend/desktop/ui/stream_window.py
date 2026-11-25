@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from backend.input_capture.mouse import MOUSE_MODES
-from backend.media.video.codec.probe import compatible_choices
+from backend.media.video.codec.probe import CODEC_DEVICE_KEYS, compatible_choices
 from .. import icons
 from .preview import PreviewWidget
 from .widgets import NoticeBar, StatusPill, label
@@ -20,6 +20,8 @@ TITLE_HEIGHT = 44
 RESOLUTIONS = ((1280, 720), (1920, 1080), (2560, 1440), (3840, 2160))
 FRAME_RATES = (30, 60, 90, 120)
 CODECS = (("AV1", "av1"), ("H.264", "h264"), ("H.265", "hevc"))
+CODEC_DEVICES = (("自动", "auto"), ("GPU", "gpu"), ("CPU", "cpu"))
+CODEC_DEVICE_LABELS = ("被控端编码", "主控端解码")
 DISPLAY_MODES = (("自动", "auto"), ("GPU 纹理显示", "gpu"), ("CPU 兼容显示", "cpu"))
 
 
@@ -76,12 +78,12 @@ def bitrate_control(parent):
     return container, slider, value
 
 
-def available_codecs(connection):
+def available_codecs(connection, **options):
     remote, local = connection.codec_capabilities
     if remote is None or local is None:
         return set(), "正在检测编解码能力…"
     try:
-        names = {choice["codec"] for choice in compatible_choices(remote, local, {})}
+        names = {choice["codec"] for choice in compatible_choices(remote, local, options)}
     except ValueError:
         names = set()
     return names, "" if names else "双方没有共同可用的视频格式"
@@ -116,6 +118,7 @@ class PictureDialog(QDialog):
             self.codec.addItem(name, value)
         self.codec.setCurrentIndex(1)
         self.codec_status = label("")
+        self.codec_devices = {}
         if connection is not None and connection._codec_enabled:
             form.addRow("视频格式", self.codec)
             form.addRow("", self.codec_status)
@@ -126,6 +129,13 @@ class PictureDialog(QDialog):
             index = self.codec.findData(options["codec"])
             if index >= 0:
                 self.codec.setCurrentIndex(index)
+            for key, title in zip(CODEC_DEVICE_KEYS, CODEC_DEVICE_LABELS):
+                combo = self.codec_devices[key] = QComboBox()
+                for name, value in CODEC_DEVICES:
+                    combo.addItem(name, value)
+                combo.setCurrentIndex(combo.findData(options.get(key, "auto")))
+                form.addRow(title, combo)
+                combo.currentIndexChanged.connect(self._connection_state)
             self._update_codecs()
         self.apply_button = QToolButton()
         self.apply_button.setIcon(icons.icon("check"))
@@ -154,7 +164,16 @@ class PictureDialog(QDialog):
     def _connection_state(self, *_):
         if self.connection is not None and hasattr(self, "apply_button"):
             active = self.connection.phase in {"active", "selection"}
-            available = self.codec.model().item(self.codec.currentIndex()).isEnabled()
+            codec = self.codec.currentData()
+            modes = {key: combo.currentData() for key, combo in self.codec_devices.items()}
+            for key, combo in self.codec_devices.items():
+                for i in range(combo.count()):
+                    mode = combo.itemData(i)
+                    names, _ = available_codecs(self.connection, codec=codec, **{key: mode})
+                    combo.model().item(i).setEnabled(mode == "auto" or codec in names)
+                combo.setEnabled(active)
+            names, _ = available_codecs(self.connection, codec=codec, **modes)
+            available = codec in names
             self.apply_button.setEnabled(active and (available or not self.connection._codec_enabled))
             self.codec.setEnabled(active)
 
@@ -164,6 +183,7 @@ class PictureDialog(QDialog):
                   "bitrate_kbps": self.bitrate.value() * 1000}
         if self.connection is not None and self.connection._codec_enabled:
             result["codec"] = self.codec.currentData()
+            result.update({key: combo.currentData() for key, combo in self.codec_devices.items()})
         return result
 
 
@@ -276,11 +296,17 @@ class StreamWindow(QWidget):
         self.codec_menu, self.codec_choices = self._picture_choices("视频格式", CODECS)
         self.codec_status = self.codec_menu.addAction("")
         self.codec_status.setEnabled(False)
+        self.codec_device_menu = self.picture_menu.submenu("编解码设备")
+        self.codec_device_choices = {
+            key: self._picture_choices(title, CODEC_DEVICES, parent=self.codec_device_menu)[1]
+            for key, title in zip(CODEC_DEVICE_KEYS, CODEC_DEVICE_LABELS)
+        }
         _, self.display_choices = self._picture_choices("显示方式", DISPLAY_MODES)
         self.display_choices.triggered.connect(
             lambda action: self.preview.set_display_mode(action.data()))
         self.picture_menu.aboutToShow.connect(self.picture_requested.emit)
-        for group in (self.resolution_choices, self.fps_choices, self.codec_choices):
+        for group in (self.resolution_choices, self.fps_choices, self.codec_choices,
+                      *self.codec_device_choices.values()):
             group.triggered.connect(self._submit_picture)
         self.mouse_menu = self.panel.submenu("鼠标", icons.icon("mouse"))
         mouse = QWidget()
@@ -358,8 +384,8 @@ class StreamWindow(QWidget):
             widget.installEventFilter(self)
         return action
 
-    def _picture_choices(self, title, choices=()):
-        menu = self.picture_menu.submenu(title)
+    def _picture_choices(self, title, choices=(), *, parent=None):
+        menu = (parent if parent is not None else self.picture_menu).submenu(title)
         group = QActionGroup(menu)
         for text, value in choices:
             self._add_picture_choice(menu, group, text, value)
@@ -380,21 +406,36 @@ class StreamWindow(QWidget):
         fps = min(FRAME_RATES, key=lambda rate: abs(rate - picture["fps"]))
         codec = connection._applied_options["codec"]
         if codec == "auto":
-            codec = "h264"
+            codec = (connection._selection or {}).get("codec", "h264")
         for group, value in ((self.resolution_choices, resolution), (self.fps_choices, fps),
                              (self.codec_choices, codec), (self.display_choices, self.preview.display_mode)):
             next(action for action in group.actions() if action.data() == value).setChecked(True)
+        for key, group in self.codec_device_choices.items():
+            mode = connection._applied_options.get(key, "auto")
+            next(action for action in group.actions() if action.data() == mode).setChecked(True)
         self.bitrate.setValue(round(picture["bitrate_kbps"] / 1000))
         self.codec_menu.menuAction().setVisible(connection._codec_enabled)
+        self.codec_device_menu.menuAction().setVisible(connection._codec_enabled)
         self.refresh_picture_codecs(connection)
 
     def refresh_picture_codecs(self, connection):
         if self.codec_menu.menuAction().isVisible():
-            names, status = available_codecs(connection)
+            codec = self.codec_choices.checkedAction().data()
+            modes = self._codec_devices()
+            names, status = available_codecs(connection, **modes)
             for action in self.codec_choices.actions():
                 action.setEnabled(action.data() in names)
+            for key, group in self.codec_device_choices.items():
+                for action in group.actions():
+                    names, _ = available_codecs(connection, codec=codec,
+                                                **{**modes, key: action.data()})
+                    action.setEnabled(codec in names)
             self.codec_status.setText(status)
             self.codec_status.setVisible(bool(status))
+
+    def _codec_devices(self):
+        return {key: group.checkedAction().data() for key, group in self.codec_device_choices.items()}
+
     def _bitrate_changed(self):
         if self.bitrate_menu.isVisible():
             self._submit_picture()
@@ -409,6 +450,7 @@ class StreamWindow(QWidget):
         codec = self.codec_choices.checkedAction()
         if self.codec_menu.menuAction().isVisible() and codec is not None and codec.isEnabled():
             picture["codec"] = codec.data()
+            picture.update(self._codec_devices())
         self.panel.close()
         self.picture_submitted.emit(picture)
 
