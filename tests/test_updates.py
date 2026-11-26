@@ -120,7 +120,11 @@ class UpdateTests(unittest.TestCase):
                         expected = "Previous application restored" if fail else "Update successful"
                         deadline = time.monotonic() + 15
                         while time.monotonic() < deadline:
-                            text = log.read_text(encoding="utf-8-sig") if log.exists() else ""
+                            try:
+                                text = log.read_text(encoding="utf-8-sig") if log.exists() else ""
+                            except PermissionError:
+                                time.sleep(.05)
+                                continue
                             if expected in text and (target / "pid.txt").exists():
                                 break
                             time.sleep(.05)
