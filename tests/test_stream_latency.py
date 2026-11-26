@@ -32,6 +32,80 @@ from frontend.desktop.service import SessionService, _QtRenderer
 
 APP = QCoreApplication.instance() or QCoreApplication([])
 
+@unittest.skipUnless(sys.platform == "win32", "Windows desktop capture")
+class DesktopCaptureTests(unittest.TestCase):
+    def test_hardware_failure_preserves_errors_without_gdi_fallback(self):
+        from backend.media.video.capture.windows import dxgi_desktop_duplication as capture
+
+        source = capture.DesktopCapture()
+        with patch.object(capture, "_D3D11Source", side_effect=OSError("D3D11 failed")), \
+             patch.object(capture, "_desktop_output", return_value=(1, 0, (0, 0), "display")), \
+             patch("dxcam.create", side_effect=OSError("DXGI_ERROR_UNSUPPORTED")), \
+             patch.object(capture, "GdiCapture") as gdi:
+            with self.assertRaises(capture.CaptureError) as error:
+                source.open()
+        self.assertIn("D3D11 failed", error.exception.detail)
+        self.assertIn("DXGI_ERROR_UNSUPPORTED", error.exception.detail)
+        gdi.assert_not_called()
+        self.assertIsNone(source._source)
+        self.assertIsNone(source._gpu)
+
+    def test_primary_output_is_selected_on_its_own_adapter(self):
+        from backend.media.video.capture.windows import dxgi_desktop_duplication as capture
+
+        def output(name):
+            return SimpleNamespace(
+                devicename=name, attached_to_desktop=True,
+                desc=SimpleNamespace(DesktopCoordinates=SimpleNamespace(
+                    left=0, top=0, right=1920, bottom=1080)))
+
+        with patch("dxcam.util.io.enum_dxgi_adapters", return_value=["empty", "gpu", "igpu"]), \
+             patch("dxcam.util.io.enum_dxgi_outputs", side_effect=[[], ["secondary"], ["primary"]]), \
+             patch("dxcam.util.io.get_output_metadata",
+                   return_value={"secondary": ("GPU", False), "primary": ("iGPU", True)}), \
+             patch("dxcam.core.output.Output", side_effect=output):
+            self.assertEqual(capture._desktop_output(None), (1, 0, (0, 0), "primary"))
+
+    def test_dxcam_receives_selected_device_and_monitor_local_region(self):
+        from backend.config.schema import CaptureConfig
+        from backend.media.video.capture.windows import dxgi_desktop_duplication as capture
+
+        source = capture.DesktopCapture(CaptureConfig(region=(-1920, 0, 1280, 720)))
+        camera = Mock()
+        with patch.object(capture, "_D3D11Source", side_effect=OSError("unavailable")), \
+             patch.object(capture, "_desktop_output",
+                          return_value=(1, 2, (-1920, 0), "display")), \
+             patch("dxcam.create", return_value=camera) as create:
+            try:
+                source.open()
+                create.assert_called_once_with(
+                    device_idx=1, output_idx=2, output_color="BGRA", max_buffer_len=2)
+                camera.start.assert_called_once_with(
+                    region=(0, 0, 1280, 720), target_fps=30, video_mode=True)
+                self.assertEqual(source.backend, "dxcam")
+            finally:
+                source.close()
+
+    def test_capture_failure_is_reported_instead_of_repeating_old_frame(self):
+        from backend.media.video.capture.windows import dxgi_desktop_duplication as capture
+
+        source = capture.DesktopCapture()
+        source._gpu = Mock()
+        source._gpu.read.side_effect = OSError("device lost")
+        source._draw_mouse = True
+        source._last = Frame(data=b"", width=1, height=1)
+        with self.assertRaises(capture.CaptureError) as error:
+            source.read()
+        self.assertIn("device lost", error.exception.detail)
+        self.assertIsNone(source._gpu)
+
+    def test_cli_preserves_automatic_capture_selection(self):
+        from backend.config.loader import merge_cli_overrides
+        from backend.config.schema import AppConfig
+
+        self.assertEqual(merge_cli_overrides(AppConfig(), {}).capture.backend, "auto")
+
+
 class RtcRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from backend.media.video.codec.inprocess import InprocessDecoder

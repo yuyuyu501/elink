@@ -58,9 +58,5 @@ def merge_cli_overrides(config: AppConfig, overrides: dict[str, Any]) -> AppConf
             raise ConfigError(f"未知配置路径: {key}")
         setattr(target, parts[-1], value)
 
-    if config.capture.backend == "auto":
-        # 当前只接了 Windows 的 GDI 采集通道；接入 DXGI 桌面复制后在此切换
-        config.capture.backend = "gdi"
-
     config.validate()
     return config
