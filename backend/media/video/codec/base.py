@@ -431,6 +431,7 @@ class FfmpegEncoderBase(BaseEncoder):
             "-hide_banner",
             "-loglevel", "error",
             "-nostdin",
+            *self.device_args(),
             *(["-vaapi_device", "/dev/dri/renderD128"] if self.name.endswith("_vaapi") else []),
             "-f", "rawvideo",
             "-pix_fmt", input_pix_fmt,
@@ -471,6 +472,9 @@ class FfmpegEncoderBase(BaseEncoder):
 
     def diagnostics(self) -> dict:
         return _process_diagnostics(self)
+
+    def device_args(self) -> list[str]:
+        return []
 
     def close(self) -> None:
         proc = self._proc
@@ -594,6 +598,84 @@ class FfmpegEncoderBase(BaseEncoder):
 
     def _stderr_text(self) -> str:
         return " | ".join(self._stderr_tail.copy()) or "无 stderr 输出"
+
+
+class FfmpegAmfEncoder(FfmpegEncoderBase):
+    """Device-bound AMF fallback with one framed output packet per input frame."""
+
+    def __init__(self, stream, config, adapter_index):
+        super().__init__(stream, config)
+        self.adapter_index = adapter_index
+        self.force_keyframe = False
+        self.target_bitrate = config.bitrate_kbps * 1000
+        self._sent_frame = False
+
+    def device_args(self):
+        return ["-init_hw_device", f"d3d11va=amf_gpu:{self.adapter_index}",
+                "-filter_hw_device", "amf_gpu"]
+
+    def video_args(self):
+        args = super().video_args()
+        args[args.index("-pix_fmt") + 1] = "d3d11"
+        args[args.index("-b:v") + 1] = str(min(self.target_bitrate, self.config.bitrate_kbps * 1000))
+        if self.config.on_demand_keyframes:
+            args[args.index("-g") + 1] = str(2**31 - 1)
+        return ["-vf", "format=nv12,hwupload", *args, "-flush_packets", "1", "-write_index", "0"]
+
+    def stream_format(self):
+        return "nut"
+
+    def encode(self, frame):
+        if self.force_keyframe and self._sent_frame:
+            self.close()
+            self._out = queue.Queue()
+            self._pending_pts.clear()
+            self._reader_error = None
+            self.open()
+        self.force_keyframe = False
+        self._sent_frame = True
+        image = frame.to_av().to_ndarray(format="bgra")
+        output = super().encode(frame.with_data(memoryview(image), linesize=frame.width * 4,
+                                               pixel_format=PixelFormat.BGRA))
+        if output:
+            return output
+        try:
+            packet = self._out.get(timeout=2)
+        except queue.Empty as exc:
+            raise EncodeError("AMF 编码未输出当前帧", detail=self._stderr_text()) from exc
+        if packet is None:
+            raise EncodeError("AMF 编码进程已退出", detail=self._stderr_text())
+        return [packet]
+
+    def _drain(self):
+        packets = super()._drain()
+        if any(packet is None for packet in packets):
+            raise EncodeError("AMF 编码进程已退出", detail=self._stderr_text())
+        return packets
+
+    def _read_loop(self):
+        import av
+
+        class Pipe:
+            read = staticmethod(self._proc.stdout.read)
+
+        try:
+            with av.open(Pipe(), format="nut", buffer_size=4096, options={
+                "probesize": "32", "analyzeduration": "1", "fpsprobesize": "0",
+            }) as container:
+                stream = container.streams.video[0]
+                headers = stream.codec_context.extradata or b""
+                for packet in container.demux(stream):
+                    if not packet.size:
+                        continue
+                    with self._pts_lock:
+                        pts = self._pending_pts.popleft()
+                    data = (headers if packet.is_keyframe else b"") + bytes(packet)
+                    self._out.put(Packet(data=data, codec=self.stream.codec, pts=pts, dts=pts,
+                                         timebase=self._timestamp, keyframe=packet.is_keyframe))
+        except Exception as exc:
+            self._reader_error = str(exc)
+            self._out.put(None)
 
 
 class FfmpegDecoderBase(BaseDecoder):

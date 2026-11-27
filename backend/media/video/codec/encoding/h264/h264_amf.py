@@ -7,10 +7,10 @@ AMF 的编解码同名接口，参数名与 x264 不同：质量用 ``-quality``
 from __future__ import annotations
 
 from backend.media.stream import CodecId
-from backend.media.video.codec.base import FfmpegEncoderBase
+from backend.media.video.codec.base import FfmpegAmfEncoder
 
 
-class H264AmfEncoder(FfmpegEncoderBase):
+class H264AmfEncoder(FfmpegAmfEncoder):
     name = "h264_amf"
     codec = CodecId.H264.value
     hardware = True
@@ -18,9 +18,10 @@ class H264AmfEncoder(FfmpegEncoderBase):
     ffmpeg_encoder = "h264_amf"
     preset_supported = False
     private_params = (
-        ("-usage", "lowlatency"),
+        ("-usage", "ultralowlatency"),
         ("-quality", "speed"),
         ("-rc", "cbr"),
+        ("-preanalysis", "0"),
     )
 
     @classmethod

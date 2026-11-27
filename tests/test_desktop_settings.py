@@ -37,9 +37,13 @@ class DevicePictureSettingsTests(unittest.TestCase):
             settings, "settings_file", return_value=Path(folder) / "config" / "desktop.json"
         ):
             host, viewer = settings.load()
-            viewer.codec_preferences = preferences
+            picture = {"width": 1280, "height": 720, "fps": 60, "bitrate_kbps": 8000}
+            for peer, preference in preferences.items():
+                settings.remember_device_preferences(viewer, peer, picture, preference)
             self.assertTrue(settings.save(host, viewer))
-            self.assertEqual(settings.load()[1].codec_preferences, preferences)
+            _, saved = settings.load()
+            self.assertEqual(saved.codec_preferences, preferences)
+            self.assertEqual(saved.picture_preferences["device-b"], picture)
 
     def test_capture_backend_round_trips_and_reaches_host_config(self):
         with TemporaryDirectory() as folder, patch.object(

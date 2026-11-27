@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -41,6 +42,60 @@ def available(codec):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_amf_probe_publishes_only_the_route_that_encodes(self):
+        from backend.media.video.codec.probe import ProbeResult, _probe_amf
+
+        config = VideoEncodeConfig(encoder="h264_amf", on_demand_keyframes=True)
+        stream = StreamInfo(codec=CodecId.H264, width=320, height=240, framerate=30)
+        entry = SimpleNamespace(name="h264_amf", factory=lambda _s, _c, *, route: route)
+        adapters = ((1, "AMD A", 0, 10), (2, "AMD B", 0, 20))
+        ffmpeg = ProbeResult(encoders={"h264_amf"})
+        tested = []
+
+        def verify(route, **kwargs):
+            tested.append(route)
+            self.assertTrue(kwargs["on_demand_keyframes"])
+            return None if route == (2, "ffmpeg") else "encoder initialization failed"
+
+        with patch("av.codecs_available", {"h264_amf"}), patch(
+            "backend.media.video.codec.probe.verify_backend", side_effect=verify
+        ):
+            self.assertEqual(_probe_amf(entry, stream, config, adapters, ffmpeg, None),
+                             ((2, "ffmpeg"), ""))
+        self.assertEqual(tested, [(1, "pyav"), (1, "ffmpeg"), (2, "pyav"), (2, "ffmpeg")])
+        with patch("backend.media.video.codec.probe.probe_ffmpeg", return_value=ffmpeg), patch(
+            "backend.media.video.codec.probe.amf_encoder_route", return_value=(2, "ffmpeg")
+        ):
+            registry = build_default_registry("ffmpeg")
+            encoder = registry.create_encoder("h264", "h264_amf", stream, config)
+            self.assertEqual(encoder.diagnostics()["adapter"], 2)
+            self.assertEqual(encoder.diagnostics()["implementation"], "ffmpeg")
+            self.assertIn("d3d11va=amf_gpu:2", encoder._delegate.device_args())
+
+    def test_ffmpeg_framed_fallback_outputs_current_frame_and_recovers_on_request(self):
+        import shutil
+        from backend.media.video.codec.base import FfmpegAmfEncoder
+
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            self.skipTest("ffmpeg unavailable")
+
+        class TestEncoder(FfmpegAmfEncoder):
+            name = ffmpeg_encoder = "libx264"
+            codec = "h264"
+
+            def device_args(self):
+                return []
+
+            def video_args(self):
+                return ["-c:v", "libx264", "-tune", "zerolatency", "-bf", "0",
+                        "-g", str(2**31 - 1), "-flush_packets", "1", "-write_index", "0"]
+
+        stream = StreamInfo(codec=CodecId.H264, width=320, height=240, framerate=30)
+        encoder = TestEncoder(stream, VideoEncodeConfig(ffmpeg_path=ffmpeg, on_demand_keyframes=True), 0)
+        with patch.object(encoder, "supports_on_demand_keyframes", True, create=True):
+            self.assertIsNone(verify_backend(encoder, on_demand_keyframes=True, cross_period=False))
+
     def test_runtime_implementations_filter_format_kind_and_probe_status(self):
         snapshot = {
             "encoders": {"libx264": available("h264"), "libx265": available("hevc"),

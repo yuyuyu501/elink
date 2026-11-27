@@ -112,12 +112,15 @@ class InprocessDecoder(BaseDecoder):
 class InprocessEncoder(BaseEncoder):
     """Encode video in-process without rawvideo pipes."""
 
-    def __init__(self, stream, config):
+    def __init__(self, stream, config, *, amf_adapter=None, delegate=None, replacement=None):
         super().__init__(stream)
         self.config = config
         self.name = config.encoder
         self.codec = stream.codec.value
-        self._context = self._proc = None
+        self._context = None
+        self._amf_adapter = amf_adapter
+        self._delegate = delegate
+        self._replacement = replacement
         self.force_keyframe = False
         self.target_bitrate = config.bitrate_kbps * 1000
         self._updates = queue.Queue(maxsize=1)
@@ -127,9 +130,25 @@ class InprocessEncoder(BaseEncoder):
         self._updates.put_nowait((stream, config, future))
         return future
 
+    @property
+    def _proc(self):
+        return self._delegate._proc if self._delegate is not None else None
+
+    @property
+    def supports_on_demand_keyframes(self):
+        return True
+
     def open(self):
         try:
-            context = av.CodecContext.create(self.name, "w")
+            if self._delegate is not None:
+                self._delegate.open()
+                self._opened = True
+                return
+            accel = None
+            if self._amf_adapter is not None:
+                accel = av.codec.hwaccel.HWAccel("d3d11va", device=str(self._amf_adapter),
+                                                 allow_software_fallback=False)
+            context = av.CodecContext.create(self.name, "w", hwaccel=accel)
             context.width, context.height = self.stream.width, self.stream.height
             context.pix_fmt = "yuv420p"
             if (self.name.endswith(("_nvenc", "_qsv", "_amf"))
@@ -190,25 +209,34 @@ class InprocessEncoder(BaseEncoder):
             pass
         else:
             if future.set_running_or_notify_cancel():
-                replacement = InprocessEncoder(stream, config)
+                replacement = None
                 try:
+                    replacement = (self._replacement(stream, config) if self._replacement is not None
+                                   else InprocessEncoder(stream, config))
                     replacement.open()
                     replacement.force_keyframe = True
                     packets = replacement.encode(frame)
                     if not packets or not any(p.keyframe for p in packets):
                         raise RuntimeError("新编码器未生成关键帧")
                 except Exception as exc:
-                    replacement.close()
+                    if replacement is not None:
+                        replacement.close()
                     future.set_exception(exc)
                 else:
                     self.close()
                     self._context = replacement._context
+                    self._amf_adapter, self._delegate = replacement._amf_adapter, replacement._delegate
                     self.config, self.stream, self.name = config, stream, config.encoder
                     self.target_bitrate = config.bitrate_kbps * 1000
                     self.force_keyframe = False
                     self._opened = True
                     future.set_result(None)
                     return packets
+        if self._delegate is not None:
+            self._delegate.force_keyframe = self.force_keyframe
+            self._delegate.target_bitrate = self.target_bitrate
+            self.force_keyframe = False
+            return self._delegate.encode(frame)
         image = frame.to_av().reformat(width=self.stream.width, height=self.stream.height,
                                        format=self._context.pix_fmt)
         if int(image.colorspace) in (1, 5, 6):
@@ -234,10 +262,14 @@ class InprocessEncoder(BaseEncoder):
                        timebase=Timebase.mpegts(), keyframe=p.is_keyframe) for p in packets]
 
     def flush(self):
+        if self._delegate is not None:
+            return self._delegate.flush()
         return (self._packets(self._context.encode(None))
                 if self._context is not None and self._context.is_open else [])
 
     def close(self):
+        if self._delegate is not None:
+            self._delegate.close()
         self._context = None
         self._opened = False
         while not self._updates.empty():
@@ -245,7 +277,10 @@ class InprocessEncoder(BaseEncoder):
             future.cancel()
 
     def diagnostics(self):
-        return {"backend": self.name, "implementation": "pyav", "bitrate": self.target_bitrate}
+        diagnostic = self._delegate.diagnostics() if self._delegate is not None else {}
+        return {**diagnostic, "backend": self.name, "bitrate": self.target_bitrate,
+                "implementation": "ffmpeg" if self._delegate is not None else "pyav",
+                "adapter": self._amf_adapter}
 
     def _stderr_text(self):
-        return ""
+        return self._delegate._stderr_text() if self._delegate is not None else ""

@@ -39,6 +39,7 @@ class DesktopConnection(QObject):
     error = Signal(str)
     connected = Signal(object)
     picture_applied = Signal(dict)
+    picture_preferred = Signal()
     mode_applied = Signal(bool)
     finished = Signal()
     capabilities_changed = Signal()
@@ -71,6 +72,11 @@ class DesktopConnection(QObject):
         self._prior_selection = None
         self._preferences = codec_options({})
         self._applied_options = codec_options({})
+        self._desired_picture = {}
+        self._desired_options = codec_options({})
+        self._queued_picture = None
+        self._initial_fallback = False
+        self._rejected_implementations = set()
         self._choices = []
         self._revision = 0
         self._offer_sent = False
@@ -104,6 +110,10 @@ class DesktopConnection(QObject):
         local = getattr(self.service, "codec_capabilities", None)
         return self._peer_caps, local
 
+    @property
+    def picture_preferences(self):
+        return dict(self._desired_picture), dict(self._desired_options)
+
     def _capabilities_ready(self):
         self.capabilities_changed.emit()
         if not self._codec_enabled:
@@ -133,10 +143,17 @@ class DesktopConnection(QObject):
         self.changed.emit()
 
     def _begin_choices(self):
+        if self._revision == 0:
+            self._queued_picture = None
         try:
-            self._choices = compatible_choices(self._peer_caps, self.service.codec_capabilities,
-                                               self._preferences)
+            self._choices = [
+                choice for choice in compatible_choices(
+                    self._peer_caps, self.service.codec_capabilities, self._preferences)
+                if not any(choice[key] == name for key, name in self._rejected_implementations)
+            ]
         except ValueError as exc:
+            if self._fallback_initial_choice(str(exc)):
+                return
             if self.service.running:
                 if self._previous is not None:
                     self._picture, self._previous = self._previous, None
@@ -144,17 +161,22 @@ class DesktopConnection(QObject):
                 self.phase = "active"
                 self.error.emit(str(exc))
                 self.changed.emit()
+                self._apply_queued_picture()
             else:
                 self.phase = "selection"
                 self._send("selection_pending")
                 self.error.emit(str(exc))
                 self.changed.emit()
-                self.codec_selection_required.emit()
+                if self._queued_picture is None:
+                    self.codec_selection_required.emit()
+                self._apply_queued_picture()
             return
         self._try_choice()
 
     def _try_choice(self):
         if not self._choices:
+            if self._fallback_initial_choice("所选编解码组合未能启动"):
+                return
             if not self._host_attempted and self.service.running:
                 if self._previous is not None:
                     self._picture, self._previous = self._previous, None
@@ -162,6 +184,7 @@ class DesktopConnection(QObject):
                 self._preferences = dict(self._applied_options)
                 self.phase = "active"
                 self.changed.emit()
+                self._apply_queued_picture()
                 return
             self._send("restore")
             self.phase = "updating"
@@ -176,12 +199,30 @@ class DesktopConnection(QObject):
                                     self._picture, self._viewer.ffmpeg_path)
         self.changed.emit()
 
+    def _fallback_initial_choice(self, reason):
+        if (self._previous is not None or self._initial_fallback
+                or all(self._preferences.get(axis, "auto") == "auto"
+                       for axis in ("encoder", "decoder", *CODEC_DEVICE_KEYS))):
+            return False
+        self._initial_fallback = True
+        codec = self._preferences["codec"]
+        options = codec_options({"codec": codec})
+        try:
+            compatible_choices(self._peer_caps, self.service.codec_capabilities, options)
+        except ValueError:
+            options = codec_options({})
+        self._preferences = options
+        self.error.emit(f"{reason}，本次连接改用自动编解码")
+        self._begin_choices()
+        return True
+
     def _codec_validated(self, revision, reason):
         if revision != self._revision or self.phase != "validating":
             return
         kind, self._validating = self._validating, None
         if reason:
             if self.role == "viewer":
+                self._rejected_implementations.add(("decoder", self._selection["decoder"]))
                 if self._preferences["decoder"] == "auto":
                     self._choices = [item for item in self._choices if item["decoder"] != self._selection["decoder"]]
                 else:
@@ -262,6 +303,9 @@ class DesktopConnection(QObject):
         self._selection = self._prior_selection = None
         self._revision = 0
         self._offer_sent = self._rollback = self._host_attempted = False
+        self._queued_picture = None
+        self._initial_fallback = False
+        self._rejected_implementations.clear()
         sock.readyRead.connect(lambda: self._read() if sock is self.socket else None)
         sock.disconnected.connect(lambda: self._disconnected(sock))
         sock.errorOccurred.connect(lambda _error: self._socket_error(sock))
@@ -300,10 +344,12 @@ class DesktopConnection(QObject):
             self._preferences = codec_options(viewer.codec_preferences.get(str(peer["id"]), {"codec": "h264"}))
         except (ValueError, AttributeError):
             self._preferences = codec_options({})
+        self._desired_picture, self._desired_options = dict(picture), dict(self._preferences)
+        self._applied_options = codec_options({})
         sock = QTcpSocket(self)
         self._attach(sock, "viewer")
         sock.connected.connect(lambda: self._send(
-            "request", target=peer["id"], control=control, picture=picture,
+            "request", target=peer["id"], control=control, picture=self._picture,
             codec_selection=hasattr(self.service, "refresh_codecs"),
             transport="webrtc",
             live_settings=hasattr(self.service, "update_live"))
@@ -481,6 +527,8 @@ class DesktopConnection(QObject):
             axis = message.get("backend", "encoder")
             if axis not in {"encoder", "decoder", "pair"}:
                 raise ValueError("无效编解码失败类型")
+            if axis != "pair":
+                self._rejected_implementations.add((axis, self._selection[axis]))
             if axis == "pair":
                 pass
             elif self._preferences[axis] == "auto":
@@ -628,8 +676,6 @@ class DesktopConnection(QObject):
             self._prior_selection = None
             if self._codec_enabled and not self._rollback:
                 self._applied_options = dict(self._preferences)
-                self._viewer.codec_preferences[str(self._peer["id"])] = user_settings.codec_preference(
-                    self._applied_options)
             elif self._rollback:
                 self._preferences = dict(self._applied_options)
             self._clear_failure()
@@ -639,24 +685,43 @@ class DesktopConnection(QObject):
             )
             self.picture_applied.emit(dict(self._picture))
             self.changed.emit()
+            self._apply_queued_picture()
 
     def configure(self, picture: dict) -> None:
-        if self.role != "viewer" or self.phase not in {"active", "selection"}:
+        if self.role != "viewer" or self.phase in {"idle", "stopping"}:
             return
         self._clear_failure()
         try:
             if "codec" in picture:
                 options = codec_options(picture)
-            elif any(key in picture for key in CODEC_DEVICE_KEYS):
-                options = codec_options({**self._applied_options, **picture})
             else:
-                options = self._applied_options
+                options = codec_options({**self._desired_options, **picture})
             picture = picture_settings(picture)
         except ValueError as exc:
             self._report(exc)
             self.error.emit(str(exc))
             self._clear_failure()
             return
+        self._desired_picture, self._desired_options = picture, options
+        user_settings.remember_device_preferences(self._viewer, self._peer["id"], picture, options)
+        self.picture_preferred.emit()
+        if self.phase in {"connecting", "negotiating"} and self._revision == 0:
+            self._picture, self._preferences = picture, options
+            # An older peer may already be preparing the original request.
+            self._queued_picture = (picture, options)
+            return
+        if self.phase not in {"active", "selection"}:
+            self._queued_picture = (picture, options)
+            return
+        self._queued_picture = None
+        self._apply_picture(picture, options)
+
+    def _apply_queued_picture(self):
+        if self.phase in {"active", "selection"} and self._queued_picture is not None:
+            (picture, options), self._queued_picture = self._queued_picture, None
+            self._apply_picture(picture, options)
+
+    def _apply_picture(self, picture, options):
         if (self.phase == "active" and picture == self._picture
                 and options == self._applied_options):
             return
@@ -687,9 +752,11 @@ class DesktopConnection(QObject):
                 self.changed.emit()
                 return
         if self._codec_enabled:
-            self._previous = dict(self._picture)
+            self._previous = dict(self._picture) if self.phase == "active" else None
             self._prior_selection = dict(self._selection) if self._selection else None
             self._picture, self._preferences = picture, options
+            self._initial_fallback = False
+            self._rejected_implementations.clear()
             self._rollback = False
             self._host_attempted = False
             self._begin_choices()
@@ -721,12 +788,14 @@ class DesktopConnection(QObject):
             self._started = time.monotonic()
             self._send("live_configure", picture=pending["picture"], selection=pending["selection"])
         self.changed.emit()
+        self._apply_queued_picture()
 
     def _commit_live(self):
         pending, self._live = self._live, None
         self._picture, self._selection = pending["picture"], pending["selection"]
         self._preferences = pending["options"]
-        self._viewer = pending["viewer"]
+        self._viewer = replace(pending["viewer"], codec_preferences=self._viewer.codec_preferences,
+                               picture_preferences=self._viewer.picture_preferences)
         self._live_committing = True
         self.phase = "receiving"
         self._started = time.monotonic()

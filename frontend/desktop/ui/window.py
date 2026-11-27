@@ -306,6 +306,7 @@ class MainWindow(QMainWindow):
         self.connection.changed.connect(self._connection_changed)
         self.connection.connected.connect(self._session_connected)
         self.connection.picture_applied.connect(self._picture_applied)
+        self.connection.picture_preferred.connect(self._save_picture_preference)
         self.connection.codec_selection_required.connect(self._edit_picture)
         self.connection.capabilities_changed.connect(self._refresh_stream_picture_codecs)
         self.service.capabilities_changed.connect(self._refresh_host_encoders)
@@ -618,19 +619,19 @@ class MainWindow(QMainWindow):
         self._viewer_from_devices = True
         self._viewer_settings.control_enabled = control_enabled
         self._active_mode = "viewer"
-        self._open_stream_window()
         self.connection.connect_peer(peer, self._viewer_settings, control_enabled)
-        if self.connection.phase == "idle":
-            self._close_stream_window()
+        if self.connection.phase != "idle":
+            self._open_stream_window()
+            self._edit_stream_picture()
+            self._connection_changed()
 
     def _connection_changed(self) -> None:
         phase = self.connection.phase
         self._on_peers(self.discovery.peers())
         if self._stream_window:
-            keep_settings = phase not in {"idle", "stopping"} and self._stream_window.picture_menu.isVisible()
             self._stream_window.set_session_active(
                 phase == "active" or self.connection._live is not None or self.connection._live_committing,
-                settings_ready=phase == "active", keep_settings=keep_settings)
+                settings_ready=phase not in {"idle", "stopping"})
             self._stream_window.set_status(
                 "已连接" if phase == "active" else "调整中" if phase in {"updating", "validating", "negotiating"} else "连接中",
                 "ok" if phase == "active" else "busy",
@@ -704,42 +705,49 @@ class MainWindow(QMainWindow):
             self._stream_window.set_session_active(
                 self.connection.phase == "active" or self.connection._live is not None
                 or self.connection._live_committing,
-                settings_ready=self.connection.phase == "active")
+                settings_ready=self.connection.phase not in {"idle", "stopping"})
         if name == "mouse_mode":
             if self._stream_window is not None:
                 self._stream_window.preview.request_mouse_mode()
             self.service.set_mouse_mode(value)
         self._persist_ui()
 
+    def _save_picture_preference(self) -> None:
+        viewer = self.connection._viewer
+        self._viewer_settings = replace(self._viewer_settings,
+                                        codec_preferences=viewer.codec_preferences,
+                                        picture_preferences=viewer.picture_preferences)
+        if not user_settings.save(self._host_settings, self._viewer_settings, self.ui_settings):
+            self.notice_bar.show_message("画面设置保存失败", "error")
+
     def _picture_applied(self, picture: dict) -> None:
         if self.connection._peer:
             self._viewer_settings = replace(self.connection._viewer)
-            user_settings.remember_device_picture(
-                self._viewer_settings,
-                str(self.connection._peer["id"]),
-                self.connection._viewer,
-            )
+            peer_id = str(self.connection._peer["id"])
+            if peer_id not in self._viewer_settings.picture_preferences:
+                user_settings.remember_device_picture(self._viewer_settings, peer_id, self.connection._viewer)
+                self._persist_ui()
         else:
             self._viewer_settings = replace(self._viewer_settings)
             for name, value in picture.items():
                 setattr(self._viewer_settings, f"stream_{name}", value)
-        self._persist_ui()
+            self._persist_ui()
         self.notice_bar.show_message("桌面已连接", "info")
-        if self._stream_window is not None and self._stream_window.picture_menu.isVisible():
-            self._stream_window.load_picture(picture, self.connection)
 
     def _edit_stream_picture(self) -> None:
-        if self._stream_window is not None and self.connection.role == "viewer" and self.connection.phase == "active":
+        if (self._stream_window is not None and self.connection.role == "viewer"
+                and self.connection.phase not in {"idle", "stopping"}):
             self._release_viewer_input()
-            self._stream_window.load_picture(saved_picture(self._viewer_settings), self.connection)
+            picture, options = self.connection.picture_preferences
+            self._stream_window.load_picture(picture or saved_picture(self._viewer_settings),
+                                             self.connection, options)
 
     def _refresh_stream_picture_codecs(self) -> None:
-        if self._stream_window is not None and self._stream_window.picture_menu.isVisible():
+        if self._stream_window is not None:
             self._stream_window.refresh_picture_codecs(self.connection)
 
     def _submit_stream_picture(self, picture: dict) -> None:
-        if self.connection.role == "viewer" and self.connection.phase == "active":
-            self.connection.configure(picture)
+        self.connection.configure(picture)
 
     def _edit_picture(self) -> None:
         if self.connection.role != "viewer" or self.connection.phase != "selection":

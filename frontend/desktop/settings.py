@@ -139,6 +139,13 @@ def remember_device_picture(viewer: ViewerSettings, peer_id: str,
     viewer.picture_preferences[str(peer_id)] = values
 
 
+def remember_device_preferences(viewer: ViewerSettings, peer_id: str, picture: dict,
+                                options: dict) -> None:
+    viewer.picture_preferences = {**viewer.picture_preferences, str(peer_id): picture_settings(picture)}
+    viewer.codec_preferences = {**viewer.codec_preferences,
+                                str(peer_id): codec_preference(codec_options(options))}
+
+
 def normalize_device_name(value: object) -> str:
     name = value.strip() if isinstance(value, str) else ""
     return name if 1 <= len(name) <= 80 else ""

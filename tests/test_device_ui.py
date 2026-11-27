@@ -655,6 +655,8 @@ class WindowConnectionTests(unittest.TestCase):
         stream = self.window._stream_window
         stream.set_session_active(True)
         stream.load_picture(picture, connection)
+        self.assertEqual([action.text() for action in stream.codec_impl_menu.actions()],
+                         ["编码器", "解码器"])
         for codec, encoder in (("h264", "h264_nvenc"), ("hevc", "libx265"), ("av1", "libsvtav1")):
             connection._applied_options = {"codec": codec}
             stream.load_picture(picture, connection)
@@ -670,6 +672,26 @@ class WindowConnectionTests(unittest.TestCase):
         self.window._refresh_host_encoders()
         local = self.window.host_page.encoder
         self.assertEqual([local.itemData(i) for i in range(local.count())], ["auto", "libx264"])
+
+    def test_connecting_picture_menu_applies_and_waits_for_codec_capabilities(self):
+        self.window._session_connected(ViewerSettings())
+        connection = self.window.connection
+        connection.role, connection.phase = "viewer", "connecting"
+        connection._peer = PEER
+        connection._picture = connection._desired_picture = {
+            "width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 4000,
+        }
+        self.window._connection_changed()
+        self.window._edit_stream_picture()
+        stream = self.window._stream_window
+        self.assertTrue(stream.picture_button.isEnabled())
+        self.assertIn("正在检测", stream.codec_status.text())
+        self.assertFalse(stream.codec_impl_menus["encoder"].menuAction().isEnabled())
+        next(action for action in stream.fps_choices.actions() if action.data() == 120).trigger()
+        self.assertEqual(connection._picture["fps"], 120)
+        self.assertEqual(self.window._viewer_settings.picture_preferences[PEER["id"]]["fps"], 120)
+        next(action for action in stream.codec_choices.actions() if action.data() == "hevc").trigger()
+        self.assertEqual(self.window._viewer_settings.codec_preferences[PEER["id"]]["codec"], "hevc")
 
     def test_overlay_uses_measured_units_expiry_and_shared_persisted_toggle(self):
         from frontend.desktop.service import SessionStats

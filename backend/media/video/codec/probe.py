@@ -251,6 +251,11 @@ PROBE_SAMPLES = {
 }
 _video_cache: dict[tuple, dict] = {}
 _probe_lock = threading.Lock()
+_amf_routes: dict[tuple[str, bool], dict[str, tuple[int, str]]] = {}
+
+
+def amf_encoder_route(ffmpeg_path, name, on_demand_keyframes):
+    return _amf_routes.get((ffmpeg_path, on_demand_keyframes), {}).get(name)
 
 
 def _device_signature():
@@ -430,7 +435,8 @@ def verify_backend(adapter, *, width=320, height=240, cancel=None, timeout=8.0,
             adapter.open()
             check_cancel()
             if hasattr(adapter, "encode"):
-                if on_demand_keyframes and adapter._proc is not None:
+                if (on_demand_keyframes and adapter._proc is not None
+                        and not getattr(adapter, "supports_on_demand_keyframes", False)):
                     raise RuntimeError("该编码后端不支持会话内请求关键帧")
                 step = round(90000 / (adapter.stream.framerate or 30)) if on_demand_keyframes else 3000
                 request = round(180000 / step) + 2 if on_demand_keyframes and cross_period else 8
@@ -527,6 +533,34 @@ def _verify_on_demand_frames(stream, packets, requested_pts):
         raise RuntimeError(f"关键帧未按请求产生：{recovered_pts}")
 
 
+def _probe_amf(entry, stream, config, adapters, ffmpeg, cancel):
+    import av
+
+    reasons = []
+    for index, name, *_ in adapters:
+        for implementation, exposed in (("pyav", entry.name in av.codecs_available),
+                                        ("ffmpeg", ffmpeg.has_encoder(entry.name))):
+            if cancel is not None and cancel.is_set():
+                return None, "探测已取消"
+            if not exposed:
+                reasons.append(f"{name} ({implementation}): 无编码接口")
+                continue
+            route = index, implementation
+            try:
+                encoder = entry.factory(stream, config, route=route)
+                reason = verify_backend(encoder, cancel=cancel, on_demand_keyframes=config.on_demand_keyframes)
+            except Exception as exc:
+                reason = str(exc)
+            if not reason:
+                logger.info("AMF 编码验证通过: %s / %s / DXGI %d %s; 先前尝试: %s",
+                            entry.name, implementation, index, name, " | ".join(reasons) or "无")
+                return route, ""
+            reasons.append(f"DXGI {index} {name} ({implementation}): {reason}")
+    reason = " | ".join(reasons) or "未发现 AMD 硬件适配器"
+    logger.info("AMF 编码不可用: %s: %s", entry.name, reason)
+    return None, reason
+
+
 def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, progress=None,
                        on_demand_keyframes=False):
     from backend.config.schema import VideoEncodeConfig
@@ -535,14 +569,23 @@ def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, prog
     path = resolve_ffmpeg_path(ffmpeg_path)
     resolved = Path(shutil.which(path) or path)
     stat = resolved.stat() if resolved.is_file() else None
+    adapters, adapter_error = (), ""
+    if sys.platform == "win32":
+        from backend.media.video.capture.windows.dxgi_capture import amd_adapters
+        try:
+            adapters = amd_adapters()
+        except Exception as exc:
+            adapter_error = str(exc)
     key = (str(resolved.resolve()), stat.st_size if stat else 0,
-           stat.st_mtime_ns if stat else 0, _device_signature(), on_demand_keyframes)
+           stat.st_mtime_ns if stat else 0, _device_signature(), adapters, on_demand_keyframes)
     with _probe_lock:
         if not refresh and key in _video_cache:
             return _video_cache[key]
         probe_ffmpeg.cache_clear()
+        ffmpeg = probe_ffmpeg(path)
         registry = build_default_registry(path)
         snapshot = {"encoders": {}, "decoders": {}}
+        routes = {}
         for kind in snapshot:
             for codec, entry in registry.candidates(kind):
                 item = {"codec": codec, "state": "pending", "reason": ""}
@@ -555,19 +598,26 @@ def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, prog
                     or (entry.name.endswith("_amf") and sys.platform != "win32")
                 )
                 reason = "当前平台或 FFmpeg 不提供此后端"
-                if platform_ok and entry.is_available():
+                if platform_ok:
                     cfg = VideoEncodeConfig(codec=codec, encoder=entry.name, decoder=entry.name,
                                             ffmpeg_path=path, preset="ultrafast", realtime=True,
                                             on_demand_keyframes=on_demand_keyframes)
-                    adapter = entry.factory(StreamInfo(codec=CodecId(codec), width=320, height=240,
-                                                       framerate=30), cfg)
-                    reason = verify_backend(adapter, cancel=cancel, on_demand_keyframes=on_demand_keyframes)
-                    if not reason and hasattr(adapter, "decode_ms"):
-                        # Exclude the cold-start call and EOS flush from the steady-state comparison.
-                        decode = list(adapter.decode_ms)[1:-1]
-                        convert = list(adapter.convert_ms)[1:]
-                        if decode and convert:
-                            item["latency_ms"] = sum(decode) / len(decode) + sum(convert) / len(convert)
+                    stream = StreamInfo(codec=CodecId(codec), width=320, height=240, framerate=30)
+                    if kind == "encoders" and entry.name.endswith("_amf"):
+                        route, reason = _probe_amf(entry, stream, cfg, adapters, ffmpeg, cancel)
+                        if adapter_error:
+                            reason = f"DXGI 适配器枚举失败：{adapter_error}"
+                        if route is not None:
+                            routes[entry.name] = route
+                    elif entry.is_available():
+                        adapter = entry.factory(stream, cfg)
+                        reason = verify_backend(adapter, cancel=cancel, on_demand_keyframes=on_demand_keyframes)
+                        if not reason and hasattr(adapter, "decode_ms"):
+                            # Exclude the cold-start call and EOS flush from the steady-state comparison.
+                            decode = list(adapter.decode_ms)[1:-1]
+                            convert = list(adapter.convert_ms)[1:]
+                            if decode and convert:
+                                item["latency_ms"] = sum(decode) / len(decode) + sum(convert) / len(convert)
                 item.update(state="unavailable" if reason else "available", reason=reason or "")
                 if progress:
                     progress(snapshot)
@@ -575,6 +625,9 @@ def probe_video_codecs(ffmpeg_path="ffmpeg", *, refresh=False, cancel=None, prog
             snapshot["decoders"].items(),
             key=lambda pair: (pair[1]["codec"], pair[1].get("latency_ms", float("inf"))),
         ))
+        if cancel is not None and cancel.is_set():
+            return snapshot
+        _amf_routes[path, on_demand_keyframes] = routes
         for previous in tuple(_video_cache):
             if previous[-1] == on_demand_keyframes:
                 del _video_cache[previous]

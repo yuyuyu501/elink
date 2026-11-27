@@ -329,8 +329,8 @@ class StreamWindow(QWidget):
         self.codec_impl_menu = self.picture_menu.submenu("视频编解码")
         self.codec_impl_menus = {}
         self.codec_impl_groups = {}
-        for role, title, kind in (("encoder", "被控端", "编码器"), ("decoder", "主控端", "解码器")):
-            menu = self.codec_impl_menu.submenu(title).submenu(kind)
+        for role, title in (("encoder", "编码器"), ("decoder", "解码器")):
+            menu = self.codec_impl_menu.submenu(title)
             self.codec_impl_menus[role] = menu
             group = self.codec_impl_groups[role] = QActionGroup(menu)
             group.triggered.connect(self._submit_picture)
@@ -433,7 +433,7 @@ class StreamWindow(QWidget):
         action.setData(value)
         group.addAction(action)
 
-    def load_picture(self, picture, connection):
+    def load_picture(self, picture, connection, options=None):
         resolution = (picture["width"], picture["height"])
         resolutions = sorted({*RESOLUTIONS, resolution})
         if resolutions != [action.data() for action in self.resolution_choices.actions()]:
@@ -441,7 +441,8 @@ class StreamWindow(QWidget):
             for w, h in resolutions:
                 self._add_picture_choice(self.resolution_menu, self.resolution_choices, f"{w} × {h}", (w, h))
         fps = min(FRAME_RATES, key=lambda rate: abs(rate - picture["fps"]))
-        codec = connection._applied_options["codec"]
+        options = connection._applied_options if options is None else options
+        codec = options["codec"]
         if codec == "auto":
             codec = (connection._selection or {}).get("codec", "h264")
         for group, value in ((self.resolution_choices, resolution), (self.fps_choices, fps),
@@ -449,34 +450,36 @@ class StreamWindow(QWidget):
             next(action for action in group.actions() if action.data() == value).setChecked(True)
         self._connection = connection
         preferred = {
-            key: connection._applied_options.get(key, "auto")
+            key: options.get(key, "auto")
             for key in ("encoder", "decoder")
         }
         with QSignalBlocker(self.bitrate):
             self.bitrate.setValue(round(picture["bitrate_kbps"] / 1000))
         self.bitrate_value.setText(str(self.bitrate.value()))
-        self.codec_menu.menuAction().setVisible(connection._codec_enabled)
-        self.codec_impl_menu.menuAction().setVisible(connection._codec_enabled)
         self.refresh_picture_codecs(connection, preferred)
 
     def refresh_picture_codecs(self, connection, preferred=None):
+        show_codecs = connection._codec_enabled or getattr(connection, "phase", "") == "connecting"
+        self.codec_menu.menuAction().setVisible(show_codecs)
+        self.codec_impl_menu.menuAction().setVisible(show_codecs)
         if self.codec_menu.menuAction().isVisible() and self.codec_choices.checkedAction():
             codec = self.codec_choices.checkedAction().data()
             names, status = available_codecs(connection)
             for action in self.codec_choices.actions():
-                action.setEnabled(action.data() in names)
+                action.setEnabled(action.data() in names or None in connection.codec_capabilities)
             implementations = codec_implementations(connection, codec)
+            if preferred is None:
+                _, preferred = connection.picture_preferences
             for role, group in self.codec_impl_groups.items():
-                selected = group.checkedAction()
-                value = (preferred or {}).get(role, selected.data() if selected else "auto")
+                value = preferred.get(role, "auto")
                 values = ["auto", *implementations[role]]
                 menu = self.codec_impl_menus[role]
                 if values != [action.data() for action in group.actions()]:
                     menu.clear()
                     for name in values:
                         self._add_picture_choice(menu, group, "自动" if name == "auto" else codec_label(name), name)
-                next(action for action in group.actions()
-                     if action.data() == (value if value in values else "auto")).setChecked(True)
+                for action in group.actions():
+                    action.setChecked(action.data() == value)
                 menu.menuAction().setEnabled(codec in names)
             self.codec_status.setText(status)
             self.codec_status.setVisible(bool(status))
@@ -497,10 +500,17 @@ class StreamWindow(QWidget):
         picture = {"width": width, "height": height, "fps": self.fps_choices.checkedAction().data(),
                    "bitrate_kbps": self.bitrate.value() * 1000}
         codec = self.codec_choices.checkedAction()
-        if self.codec_menu.menuAction().isVisible() and codec is not None and codec.isEnabled():
-            picture["codec"] = codec.data()
-            picture.update({role: group.checkedAction().data()
-                            for role, group in self.codec_impl_groups.items()})
+        if self.codec_menu.menuAction().isVisible() and codec is not None:
+            _, preferred = self._connection.picture_preferences
+            source = self.sender()
+            if source is self.codec_choices:
+                picture.update(codec=codec.data(), encoder="auto", decoder="auto")
+            for role, group in self.codec_impl_groups.items():
+                if source is group:
+                    picture.update(preferred)
+                    picture["codec"] = codec.data()
+                    picture[role] = group.checkedAction().data()
+                    picture.pop(f"{role}_device", None)
         self.picture_submitted.emit(picture)
 
     def _volume_changed(self, value):
@@ -529,19 +539,18 @@ class StreamWindow(QWidget):
             widget.blockSignals(False)
         self._sync_input()
 
-    def set_session_active(self, active: bool, *, settings_ready: bool = True,
-                           keep_settings: bool = False) -> None:
+    def set_session_active(self, active: bool, *, settings_ready: bool | None = None) -> None:
         self._active = active
-        self._picture_ready = active and settings_ready
+        self._picture_ready = active if settings_ready is None else settings_ready
         for action in self._session_actions:
             action.setEnabled(active)
         self.mouse_mode.parentWidget().setEnabled(active)
-        self.picture_button.setEnabled(self._picture_ready or keep_settings)
+        self.picture_button.setEnabled(self._picture_ready)
         for group in (self.resolution_choices, self.fps_choices, self.codec_choices,
                       *self.codec_impl_groups.values()):
             group.setEnabled(self._picture_ready)
         self.bitrate.setEnabled(self._picture_ready)
-        if not active and not keep_settings:
+        if not active and not self._picture_ready:
             self.panel.close()
         self._sync_input()
 

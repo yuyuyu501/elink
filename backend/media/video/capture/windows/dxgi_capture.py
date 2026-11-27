@@ -21,6 +21,13 @@ class _OutputDesc(ct.Structure):
                 ("attached", wt.BOOL), ("rotation", wt.UINT), ("monitor", wt.HANDLE)]
 
 
+class _AdapterDesc(ct.Structure):
+    _fields_ = [("name", wt.WCHAR * 128), ("vendor", wt.UINT), ("device", wt.UINT),
+                ("subsystem", wt.UINT), ("revision", wt.UINT), ("video_memory", ct.c_size_t),
+                ("system_memory", ct.c_size_t), ("shared_memory", ct.c_size_t),
+                ("luid_low", wt.DWORD), ("luid_high", wt.LONG), ("flags", wt.UINT)]
+
+
 class _TextureDesc(ct.Structure):
     _fields_ = [(name, wt.UINT) for name in (
         "width", "height", "mip_levels", "array_size", "format", "sample_count",
@@ -81,14 +88,37 @@ def _enumerate(pointer, slot, operation):
         index += 1
 
 
-def _with_output(region, use_output):
-    from contextlib import closing
-
+def _create_factory():
     create = ct.WinDLL("dxgi").CreateDXGIFactory1
     create.restype, create.argtypes = _HR, (_PTR, _OUT)
     factory = _PTR()
     _check(create(ct.byref(_guid("770aae78-f26f-4dba-a829-253c83d1b387")),
                   ct.byref(factory)), "CreateDXGIFactory1")
+    return factory
+
+
+def amd_adapters():
+    from contextlib import closing
+
+    factory = _create_factory()
+    try:
+        with closing(_enumerate(factory, 12, "EnumAdapters1")) as adapters:
+            result = []
+            for index, adapter in adapters:
+                desc = _AdapterDesc()
+                _check(_call(adapter, 10, _HR, (ct.POINTER(_AdapterDesc),),
+                             ct.byref(desc)), "IDXGIAdapter1.GetDesc1")
+                if desc.vendor == 0x1002 and not desc.flags & 2:
+                    result.append((index, desc.name, desc.luid_high, desc.luid_low))
+            return tuple(result)
+    finally:
+        _release(factory)
+
+
+def _with_output(region, use_output):
+    from contextlib import closing
+
+    factory = _create_factory()
     try:
         device_index = 0
         with closing(_enumerate(factory, 12, "EnumAdapters1")) as adapters:

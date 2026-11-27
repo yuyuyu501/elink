@@ -156,7 +156,7 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
 
     导入放在函数内部：某个后端模块引入的可选依赖缺失时，只跳过它自己。
     """
-    from backend.media.video.codec.probe import probe_ffmpeg, resolve_ffmpeg_path
+    from backend.media.video.codec.probe import amf_encoder_route, probe_ffmpeg, resolve_ffmpeg_path
 
     ffmpeg_path = resolve_ffmpeg_path(ffmpeg_path)
     probe = probe_ffmpeg(ffmpeg_path)
@@ -180,6 +180,9 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
         if name == "av1":
             return lambda: any(probe.has_decoder(n) for n in ("libdav1d", "libaom-av1", "av1"))
         return lambda: probe.has_decoder(name)
+
+    def replacement(stream, config):
+        return registry.create_encoder(stream.codec.value, config.encoder, stream, config)
 
     encoder_specs = [
         # (codec, 后端名, 模块, 类名, 是否硬件)
@@ -230,11 +233,27 @@ def build_default_registry(ffmpeg_path: str = "ffmpeg") -> CodecRegistry:
         except ImportError as exc:
             logger.debug("跳过编码后端 %s: %s", name, exc)
             continue
+        if name.endswith("_amf"):
+            from backend.media.video.codec.inprocess import InprocessEncoder
+            import av
+
+            def factory(stream, config, *, route=None, n=name, ffmpeg_encoder=cls):
+                route = route if route is not None else amf_encoder_route(
+                    ffmpeg_path, n, config.on_demand_keyframes)
+                if route is None:
+                    raise CodecNotFoundError(f"{n} 没有通过验证的 AMD 编码设备")
+                index, implementation = route
+                config = replace(config, encoder=n, ffmpeg_path=ffmpeg_path)
+                delegate = ffmpeg_encoder(stream, config, index) if implementation == "ffmpeg" else None
+                return InprocessEncoder(stream, config, amf_adapter=index, delegate=delegate,
+                                        replacement=replacement)
+
+            available = lambda n=name: (n in av.codecs_available or probe.has_encoder(n))
         # Device-context-only FFmpeg adapters retain their existing upload path.
-        if not name.endswith(("_vaapi", "_mediacodec")):
+        elif not name.endswith(("_vaapi", "_mediacodec")):
             from backend.media.video.codec.inprocess import InprocessEncoder
             factory = lambda stream, config, n=name: InprocessEncoder(
-                stream, replace(config, encoder=n))
+                stream, replace(config, encoder=n), replacement=replacement)
             import av
             available = lambda n=name: n in av.codecs_available
         else:

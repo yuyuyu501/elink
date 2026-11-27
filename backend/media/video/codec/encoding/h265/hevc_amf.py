@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from backend.media.stream import CodecId
-from backend.media.video.codec.base import FfmpegEncoderBase
+from backend.media.video.codec.base import FfmpegAmfEncoder
 
 
-class HevcAmfEncoder(FfmpegEncoderBase):
+class HevcAmfEncoder(FfmpegAmfEncoder):
     name = "hevc_amf"
     codec = CodecId.H265.value
     hardware = True
@@ -14,9 +14,10 @@ class HevcAmfEncoder(FfmpegEncoderBase):
     ffmpeg_encoder = "hevc_amf"
     preset_supported = False
     private_params = (
-        ("-usage", "lowlatency"),
+        ("-usage", "ultralowlatency"),
         ("-quality", "speed"),
         ("-rc", "cbr"),
+        ("-preanalysis", "0"),
     )
 
     @classmethod

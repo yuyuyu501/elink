@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from backend.media.stream import CodecId
-from backend.media.video.codec.base import FfmpegEncoderBase
+from backend.media.video.codec.base import FfmpegAmfEncoder
 
 
-class Av1AmfEncoder(FfmpegEncoderBase):
+class Av1AmfEncoder(FfmpegAmfEncoder):
     name = "av1_amf"
     codec = CodecId.AV1.value
     hardware = True
@@ -17,9 +17,10 @@ class Av1AmfEncoder(FfmpegEncoderBase):
     ffmpeg_encoder = "av1_amf"
     preset_supported = False
     private_params = (
-        ("-usage", "lowlatency"),
+        ("-usage", "ultralowlatency"),
         ("-quality", "speed"),
         ("-rc", "cbr"),
+        ("-preanalysis", "0"),
     )
 
     @classmethod
