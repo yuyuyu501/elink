@@ -382,7 +382,7 @@ class SettingsAndTransportTests(unittest.TestCase):
         self.assertTrue(host.clipboard_enabled and host.gamepad_enabled)
         self.assertTrue(viewer.clipboard_enabled and viewer.gamepad_enabled)
         self.assertEqual(viewer.decoder, "h264")
-        self.assertEqual(viewer.codec_preferences["peer"], {"codec": "h264"})
+        self.assertEqual(viewer.codec_preferences["peer"], {"codec": "h264", "decoder": "h264"})
         self.assertEqual(viewer.transport, "webrtc")
         self.assertFalse(hasattr(viewer, "protocol_preferences"))
 
@@ -499,7 +499,7 @@ class CodecConnectionTests(unittest.TestCase):
         self.assertEqual(self.applied[-1], picture)
         self.assertEqual(self.host_media.starts[-1].codec, "hevc")
         self.assertEqual(self.viewer_media.starts[-1].decoder, "hevc")
-        self.assertEqual(self.viewer._viewer.codec_preferences["host"], {"codec": "hevc"})
+        self.assertEqual(self.viewer._viewer.codec_preferences["host"], options)
 
     def test_auto_preflight_failure_tries_next_encoder(self):
         self.host_media.validation_failure = ("encoder", "h264_nvenc")

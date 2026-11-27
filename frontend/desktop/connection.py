@@ -663,10 +663,11 @@ class DesktopConnection(QObject):
         if self._live_enabled and self.phase == "active":
             try:
                 choices = compatible_choices(self._peer_caps, self.service.codec_capabilities, options)
-                unchanged = [axis for axis, key in zip(("encoder", "decoder"), CODEC_DEVICE_KEYS)
-                             if options.get(key, "auto") == self._applied_options.get(key, "auto")]
                 selection = min(choices, key=lambda candidate: sum(
-                    candidate[axis] != self._selection[axis] for axis in unchanged))
+                    candidate[axis] != self._selection[axis]
+                    for axis in ("encoder", "decoder")
+                    if options.get(axis, "auto") == "auto"
+                ))
                 if selection["codec"] == self._selection["codec"]:
                     viewer = replace(
                         self._viewer, decoder=selection["decoder"],

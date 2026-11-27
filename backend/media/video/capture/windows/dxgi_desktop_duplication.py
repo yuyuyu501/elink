@@ -1,15 +1,14 @@
-"""DXGI desktop duplication, WGC capture and GDI recovery."""
+"""Windows desktop capture backend selection."""
 
 from __future__ import annotations
 
 import ctypes
 import time
-from ctypes import wintypes
 
-from backend.config.schema import CaptureConfig
+from backend.config.schema import CaptureConfig, WINDOWS_CAPTURE_BACKENDS
 from backend.errors.base import ElinkError, ErrorCode
 from backend.logging.logger import get_logger
-from backend.media.frame import Frame, FrameDomain, PixelFormat
+from backend.media.frame import Frame
 from backend.media.timebase import Timebase
 
 logger = get_logger(__name__)
@@ -18,239 +17,18 @@ if not hasattr(ctypes, "WinDLL"):  # pragma: no cover - 非 Windows 平台直接
     raise ImportError("Windows 桌面采集只能在 Windows 上导入")
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
-gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-
-SRCCOPY = 0x00CC0020
-CAPTUREBLT = 0x40000000
-DIB_RGB_COLORS = 0
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
-
-HANDLE = wintypes.HANDLE
-HDC = HANDLE
-HBITMAP = HANDLE
-HGDIOBJ = HANDLE
-
-
-class _BitmapInfoHeader(ctypes.Structure):
-    _fields_ = [
-        ("biSize", wintypes.DWORD),
-        ("biWidth", wintypes.LONG),
-        ("biHeight", wintypes.LONG),
-        ("biPlanes", wintypes.WORD),
-        ("biBitCount", wintypes.WORD),
-        ("biCompression", wintypes.DWORD),
-        ("biSizeImage", wintypes.DWORD),
-        ("biXPelsPerMeter", wintypes.LONG),
-        ("biYPelsPerMeter", wintypes.LONG),
-        ("biClrUsed", wintypes.DWORD),
-        ("biClrImportant", wintypes.DWORD),
-    ]
-
-
-class _BitmapInfo(ctypes.Structure):
-    _fields_ = [("bmiHeader", _BitmapInfoHeader), ("bmiColors", wintypes.DWORD * 3)]
-
-
-user32.GetDC.restype = HDC
-user32.GetDC.argtypes = [wintypes.HWND]
-user32.ReleaseDC.restype = ctypes.c_int
-user32.ReleaseDC.argtypes = [wintypes.HWND, HDC]
 user32.GetSystemMetrics.restype = ctypes.c_int
 user32.GetSystemMetrics.argtypes = [ctypes.c_int]
-
-gdi32.CreateCompatibleDC.restype = HDC
-gdi32.CreateCompatibleDC.argtypes = [HDC]
-gdi32.CreateDIBSection.restype = HBITMAP
-gdi32.CreateDIBSection.argtypes = [
-    HDC,
-    ctypes.POINTER(_BitmapInfo),
-    wintypes.UINT,
-    ctypes.POINTER(ctypes.c_void_p),
-    HANDLE,
-    wintypes.DWORD,
-]
-gdi32.SelectObject.restype = HGDIOBJ
-gdi32.SelectObject.argtypes = [HDC, HGDIOBJ]
-gdi32.BitBlt.restype = wintypes.BOOL
-gdi32.BitBlt.argtypes = [
-    HDC,
-    ctypes.c_int,
-    ctypes.c_int,
-    ctypes.c_int,
-    ctypes.c_int,
-    HDC,
-    ctypes.c_int,
-    ctypes.c_int,
-    wintypes.DWORD,
-]
-gdi32.DeleteObject.restype = wintypes.BOOL
-gdi32.DeleteObject.argtypes = [HGDIOBJ]
-gdi32.DeleteDC.restype = wintypes.BOOL
-gdi32.DeleteDC.argtypes = [HDC]
 
 
 class CaptureError(ElinkError):
     code = ErrorCode.IO
 
 
-class GdiCapture:
-    """屏幕采集：``read()`` 产出一帧 BGRA 的 :class:`Frame`。"""
-
-    backend = "gdi"
-
-    def __init__(
-        self,
-        config: CaptureConfig | None = None,
-        timebase: Timebase | None = None,
-    ) -> None:
-        self.config = config or CaptureConfig()
-        self.timebase = timebase or Timebase.mpegts()
-        self._screen_dc: int | None = None
-        self._mem_dc: int | None = None
-        self._bitmap: int | None = None
-        self._bits: ctypes.c_void_p | None = None
-        self._origin = (0, 0)
-        self._width = 0
-        self._height = 0
-        self._start = 0.0
-        from backend.media.video.cursor.capture import CursorCapture
-        self.cursor = CursorCapture()
-        self.cursor_mode = "smart"
-        self.cursor_applied_mode = "smart"
-        self.cursor_visible = None
-        self._previous_bitmap = None
-
-    # ---- 属性 ----
-    @property
-    def width(self) -> int:
-        return self._width
-
-    @property
-    def height(self) -> int:
-        return self._height
-
-    @property
-    def pixel_format(self) -> PixelFormat:
-        return PixelFormat.BGRA
-
-    # ---- 生命周期 ----
-    def open(self) -> None:
-        self._screen_dc = user32.GetDC(None)
-        if not self._screen_dc:
-            raise CaptureError("GetDC 失败", detail=ctypes.get_last_error())
-
-        region = self.config.clamped_region()
-        if region is None:
-            width = user32.GetSystemMetrics(SM_CXSCREEN)
-            height = user32.GetSystemMetrics(SM_CYSCREEN)
-            region = (0, 0, width, height)
-
-        x, y, width, height = region
-        if width <= 0 or height <= 0:
-            self.close()
-            raise CaptureError(f"非法采集区域: {region}")
-
-        info = _BitmapInfo()
-        info.bmiHeader.biSize = ctypes.sizeof(_BitmapInfoHeader)
-        info.bmiHeader.biWidth = width
-        info.bmiHeader.biHeight = -height  # 负值 = 自上而下
-        info.bmiHeader.biPlanes = 1
-        info.bmiHeader.biBitCount = 32
-        info.bmiHeader.biCompression = 0  # BI_RGB
-
-        self._mem_dc = gdi32.CreateCompatibleDC(self._screen_dc)
-        if not self._mem_dc:
-            self.close()
-            raise CaptureError("CreateCompatibleDC 失败", detail=ctypes.get_last_error())
-
-        bits = ctypes.c_void_p()
-        self._bitmap = gdi32.CreateDIBSection(
-            self._mem_dc, ctypes.byref(info), DIB_RGB_COLORS, ctypes.byref(bits), None, 0
-        )
-        if not self._bitmap or not bits:
-            self.close()
-            raise CaptureError("CreateDIBSection 失败", detail=ctypes.get_last_error())
-
-        self._previous_bitmap = gdi32.SelectObject(self._mem_dc, self._bitmap)
-        if not self._previous_bitmap:
-            self.close()
-            raise CaptureError("SelectObject 失败", detail=ctypes.get_last_error())
-
-        self._bits = bits
-        self._origin = (x, y)
-        self._width = width
-        self._height = height
-        self._start = time.perf_counter()
-        logger.info(
-            "屏幕采集就绪: 区域=(%d,%d) %dx%d 后端=%s", x, y, width, height, self.backend
-        )
-
-    def close(self) -> None:
-        if self._mem_dc and self._bitmap:
-            gdi32.SelectObject(self._mem_dc, self._previous_bitmap)
-        if self._bitmap:
-            gdi32.DeleteObject(self._bitmap)
-            self._bitmap = None
-        if self._mem_dc:
-            gdi32.DeleteDC(self._mem_dc)
-            self._mem_dc = None
-        if self._screen_dc:
-            user32.ReleaseDC(None, self._screen_dc)
-            self._screen_dc = None
-        self._bits = None
-        self.cursor.close()
-
-    # ---- 取帧 ----
-    def read(self) -> Frame:
-        if not self._screen_dc or not self._mem_dc or not self._bits:
-            raise CaptureError("采集器未打开")
-
-        x, y = self._origin
-        if not gdi32.BitBlt(
-            self._mem_dc,
-            0,
-            0,
-            self._width,
-            self._height,
-            self._screen_dc,
-            x,
-            y,
-            SRCCOPY | CAPTUREBLT,
-        ):
-            raise CaptureError("BitBlt 失败", detail=ctypes.get_last_error())
-
-        data = ctypes.string_at(self._bits, self._width * self._height * 4)
-        pts = self.timebase.ticks(time.perf_counter() - self._start)
-        frame = Frame(
-            data=data,
-            timebase=self.timebase,
-            pts=pts,
-            width=self._width,
-            height=self._height,
-            pixel_format=PixelFormat.BGRA,
-            domain=FrameDomain.CPU,
-        )
-        from backend.media.video.cursor.overlay import CursorOverlay
-        mode = self.cursor_mode
-        self.cursor.include_image = mode != "local"
-        state = self.cursor.read()
-        self.cursor_visible = state.visible
-        self.cursor_applied_mode = mode
-        if mode != "local":
-            frame = CursorOverlay(origin=self._origin).composite(frame, state) if not state.is_empty else frame
-        return frame
-
-    def __enter__(self) -> "DesktopCapture":
-        self.open()
-        return self
-
-    def __exit__(self, *exc_info) -> None:
-        self.close()
-
-
 class DesktopCapture:
-    """Prefer D3D11, then DXGI latest frames; recover an unavailable desktop."""
+    """Select a desktop capture backend and normalize its frames."""
 
     def __init__(self, config=None, timebase=None):
         self.config = config or CaptureConfig()
@@ -259,7 +37,7 @@ class DesktopCapture:
         self.cursor_visible = None
         self.backend = ""
         self.failures = []
-        self._source = self._graph = self._sink = None
+        self._source = None
         self._last = None
         self._start = 0
         self._draw_mouse = False
@@ -281,84 +59,85 @@ class DesktopCapture:
             self._start = previous_start
 
     def open(self):
-        self._start = time.perf_counter()
         self.close()
-        if self.config.backend != "gdi":
+        self._start = time.perf_counter()
+        self.failures.clear()
+        backends = WINDOWS_CAPTURE_BACKENDS if self.config.backend == "auto" else (self.config.backend,)
+        for backend in backends:
             try:
-                region = self.config.clamped_region()
-                width = self.config.width or (region[2] if region else user32.GetSystemMetrics(SM_CXSCREEN))
-                height = self.config.height or (region[3] if region else user32.GetSystemMetrics(SM_CYSCREEN))
-                self._draw_mouse = self.cursor_mode != "local"
-                self._gpu = _D3D11Source(width, height, self._draw_mouse, region)
-                self._last = Frame.from_av(self._gpu.read(), native=True)
-                self.backend = "d3d11"
+                self._open_backend(backend)
+                logger.info("屏幕采集就绪: 后端=%s，先前尝试=%s", self.backend, self.failures)
                 return
             except Exception as exc:
-                self.failures.append(f"D3D11: {exc}")
-                if self._gpu:
-                    self._gpu.close()
-                self._gpu = None
+                self.close()
+                self.failures.append(f"{backend}: {exc}")
+        raise CaptureError(
+            "桌面采集初始化失败",
+            detail="; ".join(self.failures),
+        )
+
+    def _open_backend(self, backend):
+        region = self.config.clamped_region()
+        self._draw_mouse = self.cursor_mode != "local"
+        if backend == "d3d11":
+            width = self.config.width or (region[2] if region else user32.GetSystemMetrics(SM_CXSCREEN))
+            height = self.config.height or (region[3] if region else user32.GetSystemMetrics(SM_CYSCREEN))
+            self._gpu = _D3D11Source(width, height, self._draw_mouse, region)
+            self._last = Frame.from_av(self._gpu.read(), native=True)
+        elif backend == "dxcam":
+            from .dxgi_capture import dxcam_output
+
+            result = ctypes.windll.ole32.CoInitializeEx(None, 2)
+            if result not in (0, 1, -2147417850):
+                raise OSError(f"CoInitializeEx 失败: 0x{result & 0xffffffff:08x}")
             try:
                 import dxcam
-                if not getattr(self, "_com_initialized", False):
-                    self._com_initialized = ctypes.windll.ole32.CoInitializeEx(None, 2) in (0, 1)
-                self._source = dxcam.create(output_color="BGRA")
-                region = self.config.clamped_region()
-                if region:
-                    x, y, w, h = region
-                    region = (x, y, x + w, y + h)
-                self._source.start(region=region, target_fps=round(self.config.fps), video_mode=True)
-                self.backend = "dxcam"
-                return
-            except Exception as exc:
-                self.failures.append(f"DXCam: {exc}")
-                self.close()
-            try:
-                from .windows_graphics_capture import WindowsGraphicsCapture
 
-                region = self.config.clamped_region()
-                if region is None or region[:2] == (0, 0):
-                    self._draw_mouse = self.cursor_mode != "local"
-                    self._source = WindowsGraphicsCapture(
-                        region=region, timebase=self.timebase, draw_mouse=self._draw_mouse,
-                    )
-                    self._source.open()
-                    self.backend = "wgc"
-                    logger.info("屏幕采集就绪: %dx%d 后端=wgc", self._source.width, self._source.height)
-                    return
-            except Exception as exc:
-                self.failures.append(f"WGC: {exc}")
-                self.close()
-        self._source = GdiCapture(self.config, self.timebase)
-        self._source.open()
-        self.backend = "gdi"
-        logger.info("采集回退 GDI: %s", self.failures[-3:])
+                device, output, left, top = dxcam_output(region)
+                self._source = dxcam.create(device_idx=device, output_idx=output,
+                                            output_color="BGRA", max_buffer_len=2)
+                dxcam_region = None
+                if region:
+                    x, y, width, height = region
+                    dxcam_region = (x - left, y - top, x - left + width, y - top + height)
+                self._source.start(region=dxcam_region, target_fps=round(self.config.fps),
+                                   video_mode=True)
+            finally:
+                if result in (0, 1):
+                    ctypes.windll.ole32.CoUninitialize()
+        elif backend == "dxgi":
+            from .dxgi_capture import DxgiCapture
+            self._source = DxgiCapture(region)
+            self._source.open()
+        else:
+            raise CaptureError(f"未知采集方式: {backend}")
+        self.backend = backend
 
     def read(self):
         import av
         import numpy as np
         try:
-            if self._gpu is not None:
+            if self.backend == "d3d11":
                 if self._draw_mouse != (self.cursor_mode != "local"):
-                    self.open()
-                frame = Frame.from_av(self._gpu.read(), native=True)
-            elif self.backend == "wgc":
-                if self._draw_mouse != (self.cursor_mode != "local"):
-                    self.open()
+                    start = self._start
+                    try:
+                        self.open()
+                    finally:
+                        self._start = start
                     return self.read()
-                frame = self._source.read()
+                frame = Frame.from_av(self._gpu.read(), native=True)
             elif self.backend == "dxcam":
                 pixels = self._source.get_latest_frame()
                 if pixels is None:
-                    raise CaptureError("DXGI 没有可用画面")
+                    raise CaptureError("DXCam 没有可用画面")
                 pixels = np.ascontiguousarray(pixels)
                 frame = Frame(data=memoryview(pixels).cast("B"), width=pixels.shape[1],
                               height=pixels.shape[0], owner=pixels)
-            else:
-                self._source.cursor_mode = self.cursor_mode
+            elif self.backend == "dxgi":
                 frame = self._source.read()
-                self.cursor_visible = self._source.cursor_visible
-            if self.backend != "gdi":
+            else:
+                raise CaptureError("采集器未打开")
+            if self.backend in {"dxcam", "dxgi"}:
                 from backend.media.video.cursor.capture import CursorCapture
                 from backend.media.video.cursor.overlay import CursorOverlay
                 if not hasattr(self, "cursor"):
@@ -366,45 +145,41 @@ class DesktopCapture:
                 self.cursor.include_image = self.cursor_mode != "local"
                 state = self.cursor.read()
                 self.cursor_visible = state.visible
-                if self.backend == "dxcam" and not state.is_empty and self.cursor_mode != "local":
+                if not state.is_empty and self.cursor_mode != "local":
                     region = self.config.clamped_region()
-                    # Overlay before resizing so desktop cursor coordinates stay correct.
-                    if not self.config.width:
-                        frame = CursorOverlay(origin=region[:2] if region else (0, 0)).composite(frame, state)
+                    frame = CursorOverlay(origin=region[:2] if region else (0, 0)).composite(frame, state)
             frame.pts = self.timebase.ticks(time.perf_counter() - self._start)
             self.cursor_applied_mode = self.cursor_mode
             self._last = frame
             return frame
-        except (OSError, av.FFmpegError, CaptureError) as exc:
-            self.failures.append(str(exc))
+        except (OSError, av.FFmpegError, CaptureError):
+            last, start = self._last, self._start
             if time.monotonic() >= self._retry_at:
                 self._retry_at = time.monotonic() + 1
                 try:
                     self.open()
-                except Exception as recovery:
-                    self.failures.append(str(recovery))
+                except Exception:
+                    self._last = last
+                finally:
+                    self._start = start
             if self._last is not None:
                 return self._last
             raise
 
     def close(self):
         source, self._source = self._source, None
-        self._sink = self._graph = None
+        self.backend = ""
+        self._last = None
         if self._gpu is not None:
             self._gpu.close()
             self._gpu = None
         if source is not None:
-            if hasattr(source, "stop"):
-                source.stop()
             if hasattr(source, "release"):
                 source.release()
-            elif hasattr(source, "close"):
+            else:
                 source.close()
         if hasattr(self, "cursor"):
             self.cursor.close()
-        if getattr(self, "_com_initialized", False):
-            ctypes.windll.ole32.CoUninitialize()
-            self._com_initialized = False
 
 
 class _CalibrationPending(RuntimeError):

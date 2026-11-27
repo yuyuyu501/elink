@@ -20,6 +20,39 @@ from backend.logging.logger import get_logger
 logger = get_logger(__name__)
 
 
+class _BitmapInfoHeader(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+class _BitmapInfo(ctypes.Structure):
+    _fields_ = [("bmiHeader", _BitmapInfoHeader), ("bmiColors", wintypes.DWORD * 3)]
+
+
+if hasattr(ctypes, "WinDLL"):
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateDIBSection.argtypes = [
+        wintypes.HDC, ctypes.POINTER(_BitmapInfo), wintypes.UINT,
+        ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD,
+    ]
+    gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
+    gdi32.SelectObject.restype = wintypes.HANDLE
+    gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.DeleteDC.restype = wintypes.BOOL
+
+
 class CursorError(ElinkError):
     code = ErrorCode.IO
 
@@ -60,10 +93,6 @@ class CursorCapture:
         return self._read_win32()
 
     def _read_win32(self) -> CursorState:
-        from backend.media.video.capture.windows.dxgi_desktop_duplication import (
-            user32, gdi32, _BitmapInfo, _BitmapInfoHeader,
-        )
-
         class CURSORINFO(ctypes.Structure):
             _fields_ = [
                 ("cbSize", wintypes.DWORD),

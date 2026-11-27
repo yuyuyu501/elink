@@ -45,7 +45,8 @@ from ..error_report import remember, save_error
 from ..service import HostSettings, SessionService, SessionStats, ViewerSettings
 from ..theme import ACCENT, MUTED
 from .devices_page import DevicesPage
-from .pages import ENCODERS, PRESETS, RESOLUTIONS, HostPage, OverviewPage
+from backend.config.schema import WINDOWS_CAPTURE_BACKENDS
+from .pages import PRESETS, RESOLUTIONS, HostPage, OverviewPage
 from .preview import PreviewFrame
 from .settings_page import SettingsPage
 from .stream_window import PictureDialog, StreamWindow
@@ -307,6 +308,7 @@ class MainWindow(QMainWindow):
         self.connection.picture_applied.connect(self._picture_applied)
         self.connection.codec_selection_required.connect(self._edit_picture)
         self.connection.capabilities_changed.connect(self._refresh_stream_picture_codecs)
+        self.service.capabilities_changed.connect(self._refresh_host_encoders)
         self.connection.mode_applied.connect(self._mode_applied)
         self.connection.finished.connect(self._session_finished)
 
@@ -315,6 +317,7 @@ class MainWindow(QMainWindow):
         settings.tray_changed.connect(self._change_tray)
         settings.admin_changed.connect(self._change_admin)
         settings.gamepad_changed.connect(self._change_gamepad_backend)
+        settings.capture_backend_changed.connect(self._change_capture_backend)
         settings.check_update_requested.connect(self._check_updates)
         settings.cancel_update_requested.connect(self._update_cancel.set)
         settings.previews_changed.connect(self._change_previews)
@@ -322,6 +325,10 @@ class MainWindow(QMainWindow):
         settings.gamepad_backend.setCurrentIndex(
             max(0, settings.gamepad_backend.findData(self._host_settings.gamepad_backend)))
         settings.gamepad_backend.blockSignals(False)
+        settings.capture_backend.blockSignals(True)
+        settings.capture_backend.setCurrentIndex(
+            max(0, settings.capture_backend.findData(self._host_settings.capture_backend)))
+        settings.capture_backend.blockSignals(False)
         settings.open_data_requested.connect(lambda: self._open_dir(self.root))
         settings.open_logs_requested.connect(lambda: self._open_dir(self.root / "logs"))
         settings.copy_diagnostics_requested.connect(self._copy_diagnostics)
@@ -348,7 +355,9 @@ class MainWindow(QMainWindow):
         if self.service.running:
             self._show_page("host")
             return
+        settings = replace(settings, capture_backend=self._host_settings.capture_backend)
         self._host_settings = settings
+        self.connection.host = settings
         self._active_mode = "host"
         self.host_page.preview_frame.preview.clear()
         self.host_page.preview_frame.preview.set_badge("本机屏幕")
@@ -618,9 +627,10 @@ class MainWindow(QMainWindow):
         phase = self.connection.phase
         self._on_peers(self.discovery.peers())
         if self._stream_window:
+            keep_settings = phase not in {"idle", "stopping"} and self._stream_window.picture_menu.isVisible()
             self._stream_window.set_session_active(
                 phase == "active" or self.connection._live is not None or self.connection._live_committing,
-                settings_ready=phase == "active")
+                settings_ready=phase == "active", keep_settings=keep_settings)
             self._stream_window.set_status(
                 "已连接" if phase == "active" else "调整中" if phase in {"updating", "validating", "negotiating"} else "连接中",
                 "ok" if phase == "active" else "busy",
@@ -715,6 +725,8 @@ class MainWindow(QMainWindow):
                 setattr(self._viewer_settings, f"stream_{name}", value)
         self._persist_ui()
         self.notice_bar.show_message("桌面已连接", "info")
+        if self._stream_window is not None and self._stream_window.picture_menu.isVisible():
+            self._stream_window.load_picture(picture, self.connection)
 
     def _edit_stream_picture(self) -> None:
         if self._stream_window is not None and self.connection.role == "viewer" and self.connection.phase == "active":
@@ -793,6 +805,12 @@ class MainWindow(QMainWindow):
             self.notice_bar.show_message("请先结束当前会话再切换手柄后端。", "warn")
             return
         self._host_settings.gamepad_backend = backend
+        self._persist_ui()
+
+    def _change_capture_backend(self, backend):
+        if backend not in ("auto", *WINDOWS_CAPTURE_BACKENDS):
+            return
+        self._host_settings.capture_backend = backend
         self._persist_ui()
 
     def _run_update_task(self, stage, action):
@@ -989,6 +1007,8 @@ class MainWindow(QMainWindow):
         nav_key = key if key in self._nav_buttons else "devices"
         self._nav_buttons[nav_key].setChecked(True)
         self._on_nav(index)
+        if key == "host" and self.service.codec_capabilities is None:
+            self.service.refresh_codecs(self._host_settings.ffmpeg_path)
 
     def _apply_overview_preset(self, key: str) -> None:
         if key == "file":
@@ -1048,8 +1068,7 @@ class MainWindow(QMainWindow):
             page.resolution.setCurrentText(target)
         page.fps.setValue(round(host.fps))
         page.bitrate.setValue(host.bitrate_kbps / 1000)
-        if host.encoder in ENCODERS:
-            page.encoder.setCurrentIndex(ENCODERS.index(host.encoder))
+        self._refresh_host_encoders()
         if host.preset in PRESETS:
             page.preset.setCurrentIndex(PRESETS.index(host.preset))
         page.file_path.setText(host.file_path)
@@ -1064,6 +1083,10 @@ class MainWindow(QMainWindow):
             display_count=self._display_count,
             control_port=host.control_port,
         )
+
+    def _refresh_host_encoders(self):
+        host = self._host_settings
+        self.host_page.set_encoder_options(self.service.codec_capabilities, host.encoder, host.codec)
 
     # ---- 窗口生命周期 ----
     def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名

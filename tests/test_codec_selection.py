@@ -22,7 +22,7 @@ from backend.media.stream import CodecId, StreamInfo
 from backend.media.video.codec.framing import VideoFramer
 from backend.media.video.codec.probe import (
     PROBE_SAMPLES, _sample_packets, checked_capabilities, codec_options,
-    compatible_choices, probe_video_codecs, public_capabilities, verify_backend,
+    available_implementations, compatible_choices, probe_video_codecs, public_capabilities, verify_backend,
     RecoveryPoint,
 )
 from backend.registry.codec_registry import CodecRegistry, build_default_registry
@@ -41,6 +41,19 @@ def available(codec):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_runtime_implementations_filter_format_kind_and_probe_status(self):
+        snapshot = {
+            "encoders": {"libx264": available("h264"), "libx265": available("hevc"),
+                         "libsvtav1": available("av1"),
+                         "h264_nvenc": {"codec": "h264", "state": "unavailable"}},
+            "decoders": {"h264": available("h264"), "hevc": available("hevc"),
+                         "av1": available("av1"), "av1_cuvid": {"codec": "av1", "state": "pending"}},
+        }
+        for codec, encoder in (("h264", "libx264"), ("hevc", "libx265"), ("av1", "libsvtav1")):
+            with self.subTest(codec=codec):
+                self.assertEqual(available_implementations(snapshot, "encoders", codec), [encoder])
+                self.assertEqual(available_implementations(snapshot, "decoders", codec), [codec])
+
     def test_software_encoders_produce_only_requested_recovery_points(self):
         import av
         from backend.media.video.codec.inprocess import InprocessEncoder

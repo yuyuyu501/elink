@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from backend.media.video.codec.probe import available_implementations, codec_label
 from .. import icons
 from ..service import HostSettings, SessionStats
 from .preview import PreviewFrame
@@ -49,7 +50,6 @@ from .widgets import (
     title,
 )
 
-ENCODERS = ["libx264", "h264_nvenc", "h264_qsv", "h264_amf"]
 PRESETS = ["ultrafast", "veryfast", "faster", "medium", "slow"]
 RESOLUTIONS = ["1920×1080", "1600×900", "1280×720", "960×540"]
 
@@ -437,7 +437,7 @@ class HostPage(QWidget):
         self.bitrate.setSingleStep(0.5)
         self.bitrate.setValue(4)
         self.encoder = QComboBox()
-        self.encoder.addItems(ENCODERS)
+        self.encoder.addItem("自动", "auto")
         self.preset = QComboBox()
         self.preset.addItems(PRESETS)
         self.preset.setCurrentText("veryfast")
@@ -522,6 +522,13 @@ class HostPage(QWidget):
     def _emit_start(self) -> None:
         self.start_requested.emit(self.settings())
 
+    def set_encoder_options(self, capabilities, preferred, codec):
+        self.encoder.clear()
+        self.encoder.addItem("自动", "auto")
+        for name in available_implementations(capabilities, "encoders", codec):
+            self.encoder.addItem(codec_label(name), name)
+        self.encoder.setCurrentIndex(max(0, self.encoder.findData(preferred)))
+
     def apply_profile(self, key: str) -> None:
         meta = PROFILES.get(key)
         if meta is None:
@@ -541,7 +548,7 @@ class HostPage(QWidget):
             height=height,
             fps=float(self.fps.value()),
             bitrate_kbps=round(self.bitrate.value() * 1000),
-            encoder=ENCODERS[self.encoder.currentIndex()],
+            encoder=self.encoder.currentData(),
             preset=PRESETS[self.preset.currentIndex()],
             file_path=self.file_path.text().strip(),
             control_port=int(self.control_port.value()),

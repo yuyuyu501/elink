@@ -16,6 +16,9 @@ class ConfigError(ElinkError):
     code = ErrorCode.INVALID_ARGUMENT
 
 
+WINDOWS_CAPTURE_BACKENDS = ("d3d11", "dxcam", "dxgi")
+
+
 @dataclass
 class CaptureConfig:
     """屏幕采集。``region`` 为 (x, y, width, height)，None 表示主显示器全屏。"""
@@ -25,6 +28,10 @@ class CaptureConfig:
     fps: float = 30.0
     width: int = 0
     height: int = 0
+
+    def validate(self) -> None:
+        if self.backend not in ("auto", *WINDOWS_CAPTURE_BACKENDS):
+            raise ConfigError(f"未知采集方式: {self.backend}")
 
     def clamped_region(self) -> tuple[int, int, int, int] | None:
         """H.264 要求偶数分辨率，这里统一向下取偶。"""
@@ -98,6 +105,7 @@ class AppConfig:
     log_level: str = "INFO"
 
     def validate(self) -> None:
+        self.capture.validate()
         if self.encode.codec not in {"h264", "hevc", "av1"}:
             raise ConfigError("不支持的视频格式")
         if not isinstance(self.encode.encoder, str) or not isinstance(self.encode.decoder, str):

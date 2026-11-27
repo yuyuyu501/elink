@@ -59,6 +59,7 @@ class HostSettings:
     """主机（被控）模式的界面参数。"""
 
     display_index: int = 0
+    capture_backend: str = "auto"
     width: int = 1920
     height: int = 1080
     fps: float = 30.0
@@ -1270,6 +1271,7 @@ def _display_region(index: int) -> tuple[int, int, int, int] | None:
 def _host_config(settings: HostSettings) -> tuple[AppConfig, list]:
     region = _display_region(settings.display_index)
     config = AppConfig(mode="send")
+    config.capture.backend = settings.capture_backend
     config.capture.region = region
     config.capture.fps = settings.fps
     config.encode.encoder = settings.encoder

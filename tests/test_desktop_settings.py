@@ -7,7 +7,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from frontend.desktop import settings
-from frontend.desktop.service import ViewerSettings
+from frontend.desktop.service import ViewerSettings, _host_config
 
 
 class DeviceNameSettingsTests(unittest.TestCase):
@@ -31,7 +31,7 @@ class DevicePictureSettingsTests(unittest.TestCase):
     def test_codec_modes_round_trip_independently_and_legacy_defaults_to_auto(self):
         preferences = {
             "device-a": {"codec": "h264", "encoder_device": "cpu", "decoder_device": "gpu"},
-            "device-b": {"codec": "hevc"},
+            "device-b": {"codec": "hevc", "encoder": "libx265", "decoder": "hevc"},
         }
         with TemporaryDirectory() as folder, patch.object(
             settings, "settings_file", return_value=Path(folder) / "config" / "desktop.json"
@@ -40,6 +40,25 @@ class DevicePictureSettingsTests(unittest.TestCase):
             viewer.codec_preferences = preferences
             self.assertTrue(settings.save(host, viewer))
             self.assertEqual(settings.load()[1].codec_preferences, preferences)
+
+    def test_capture_backend_round_trips_and_reaches_host_config(self):
+        with TemporaryDirectory() as folder, patch.object(
+            settings, "settings_file", return_value=Path(folder) / "desktop.json"
+        ), patch("frontend.desktop.service._display_region", return_value=None):
+            host, viewer = settings.load()
+            self.assertEqual(host.capture_backend, "auto")
+            host.capture_backend = "dxgi"
+            self.assertTrue(settings.save(host, viewer))
+            saved = settings.load()[0]
+            self.assertEqual(saved.capture_backend, "dxgi")
+            self.assertEqual(_host_config(saved)[0].capture.backend, "dxgi")
+
+    def test_removed_capture_backends_migrate_to_auto(self):
+        for value in ("gdi", "wgc", ["dxgi"], None):
+            with self.subTest(value=value), patch.object(settings, "_read", return_value={
+                "host": {"capture_backend": value},
+            }):
+                self.assertEqual(settings.load()[0].capture_backend, "auto")
 
     def test_volume_migrates_legacy_mute(self):
         for raw, expected in (({"muted": True}, 0), ({"muted": True, "volume": 35}, 35), ({}, 100)):

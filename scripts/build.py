@@ -85,8 +85,6 @@ def build(dist_dir: Path | None = None, *, clean: bool = True, console: bool = F
         "sounddevice",
         "--collect-all",
         "dxcam",
-        "--collect-all",
-        "windows_capture",
         "--hidden-import",
         "PySide6.QtOpenGLWidgets",
         "--icon",
@@ -204,7 +202,7 @@ def _write_build_info(output: Path) -> None:
     from frontend.desktop import __version__
 
     versions: dict[str, str] = {}
-    for name in ("PySide6", "pyinstaller", "av", "aiortc", "soundcard", "sounddevice", "dxcam", "windows-capture"):
+    for name in ("PySide6", "pyinstaller", "av", "aiortc", "soundcard", "sounddevice", "dxcam"):
         try:
             versions[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:

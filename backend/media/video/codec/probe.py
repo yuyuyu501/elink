@@ -348,6 +348,13 @@ def public_capabilities(snapshot: dict) -> dict:
     })
 
 
+def available_implementations(capabilities: dict | None, kind: str, codec: str) -> list[str]:
+    if capabilities is None:
+        return []
+    return sorted(name for name, item in capabilities.get(kind, {}).items()
+                  if item["codec"] == codec and item.get("state") == "available")
+
+
 def _decoder_uses_gpu(name: str) -> bool:
     return name.endswith(("_cuvid", "_amf", "_qsv", "_vaapi", "_mediacodec"))
 

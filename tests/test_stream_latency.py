@@ -17,7 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
 
-from backend.config.schema import VideoEncodeConfig
+from backend.config.schema import CaptureConfig, VideoEncodeConfig
 from backend.control_channel.protocol import ControlCommand, EventType, InputEvent
 from backend.control_channel.tcp import _ControlQueue
 from backend.media.frame import Frame
@@ -35,43 +35,46 @@ APP = QCoreApplication.instance() or QCoreApplication([])
 
 @unittest.skipUnless(sys.platform == "win32", "Windows desktop capture")
 class WindowsCaptureFallbackTests(unittest.TestCase):
-    def test_wgc_is_used_before_gdi_when_duplication_fails(self):
+    def test_auto_tries_backends_in_order_until_first_success(self):
         from backend.media.video.capture.windows import dxgi_desktop_duplication as capture
 
-        desktop = capture.DesktopCapture()
-        self.addCleanup(desktop.close)
-        with patch.object(capture, "_D3D11Source", side_effect=OSError("unsupported")), \
-             patch.dict(sys.modules, {"dxcam": SimpleNamespace(create=Mock(side_effect=OSError("unsupported")))}), \
-             patch("backend.media.video.capture.windows.windows_graphics_capture.WindowsGraphicsCapture") as wgc, \
-             patch.object(capture, "GdiCapture") as gdi:
-            desktop.open()
-            self.assertEqual(desktop.backend, "wgc")
-            wgc.return_value.open.assert_called_once_with()
-            gdi.assert_not_called()
+        order = ["d3d11", "dxcam", "dxgi"]
+        for index, selected in enumerate(order):
+            desktop = capture.DesktopCapture()
 
-    def test_wgc_copies_the_borrowed_frame_before_the_callback_returns(self):
-        import numpy as np
-        from backend.media.video.capture.windows.windows_graphics_capture import WindowsGraphicsCapture
+            def open_backend(name):
+                if name != selected:
+                    raise OSError("unsupported")
+                desktop.backend = name
 
-        pixels = np.full((4, 8, 4), 50, dtype=np.uint8)
-        handlers = {}
-        capture = Mock()
-        capture.event.side_effect = lambda handler: handlers.update({handler.__name__: handler})
-        control = capture.start_free_threaded.return_value
-        control.is_finished.return_value = False
+            with self.subTest(selected=selected), patch.object(
+                    desktop, "_open_backend", side_effect=open_backend) as start:
+                desktop.open()
+                self.assertEqual(desktop.backend, selected)
+                self.assertEqual([call.args[0] for call in start.call_args_list], order[:index + 1])
 
-        def start():
-            handlers["on_frame_arrived"](SimpleNamespace(frame_buffer=pixels), Mock())
-            return control
+    def test_manual_selection_never_falls_back(self):
+        from backend.media.video.capture.windows import dxgi_desktop_duplication as capture
 
-        capture.start_free_threaded.side_effect = start
-        with patch("windows_capture.WindowsCapture", return_value=capture):
-            with WindowsGraphicsCapture(region=(0, 0, 4, 2)) as source:
-                pixels.fill(0)
-                frame = source.read()
-                self.assertEqual((frame.width, frame.height), (4, 2))
-                self.assertEqual(bytes(frame.data), bytes([50]) * 32)
-        control.stop.assert_called_once_with()
+        for backend in ("d3d11", "dxcam", "dxgi"):
+            desktop = capture.DesktopCapture(CaptureConfig(backend=backend))
+            with self.subTest(backend=backend), patch.object(
+                    desktop, "_open_backend", side_effect=OSError("unsupported")) as start:
+                with self.assertRaises(capture.CaptureError) as result:
+                    desktop.open()
+                self.assertIn(f"{backend}: unsupported", result.exception.detail)
+                start.assert_called_once_with(backend)
+                self.assertEqual(desktop.backend, "")
+
+    def test_native_dxgi_reuses_last_frame_on_timeout(self):
+        from backend.media.video.capture.windows.dxgi_capture import DxgiCapture
+
+        source = DxgiCapture(None)
+        source.width, source.height = 2, 2
+        frame = bytes(range(16))
+        with patch.object(source, "_read", side_effect=[frame, None]):
+            self.assertEqual(source.read().data, frame)
+            self.assertEqual(source.read().data, frame)
 
 
 class RtcRecoveryTests(unittest.IsolatedAsyncioTestCase):

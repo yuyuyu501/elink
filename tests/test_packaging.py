@@ -123,7 +123,7 @@ class PackagingTests(unittest.TestCase):
         for index, flag in enumerate(args):
             if flag == "--hidden-import":
                 self.assertFalse(args[index + 1].startswith("--"))
-        for library in ("aiortc", "aioice", "pylibsrtp", "soundcard", "sounddevice", "dxcam", "windows_capture"):
+        for library in ("aiortc", "aioice", "pylibsrtp", "soundcard", "sounddevice", "dxcam"):
             self.assertIn(library, args)
         self.assertEqual(args[args.index("--collect-all") + 1], "av")
 

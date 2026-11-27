@@ -31,7 +31,7 @@ PySide6 桌面端，`scripts/` + `packaging/` 提供可验证的打包链路。
 | `media/video/filter/*` | 完整 | 缩放、裁剪、旋转、色彩空间（BT.601/709）、帧率、hwupload/hwdownload |
 | `media/sync/*` | 完整 | 系统时钟/流时钟、抖动缓冲、音视频同步 |
 | `media/device/*` | 完整 | 多显示器枚举、设备枚举、热插拔轮询、权限检查 |
-| `media/video/capture/*` | Windows 完整；Linux X11 完整；Android 需 pyjnius | WGC 无 WinRT 绑定时自动降级为 GDI |
+| `media/video/capture/*` | Windows、Linux X11；Android 需 pyjnius | Windows 自动依次尝试 D3D11、DXCam、DXGI |
 | `media/video/render/*` | 可用 | Windows 走 GDI 窗口上屏，Linux 走 ffmpeg SDL，Android 走 Surface+Canvas；**D3D11/D3D12 交换链未接入** |
 | `media/video/hwaccel/*` | 加速层 | D3D11VA/D3D12VA 解码可用；纹理为描述符；零拷贝通路做域/状态校验 |
 | `media/video/cursor/*` | Windows 完整 | 指针位图捕获 + alpha 合成 |

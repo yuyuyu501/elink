@@ -11,6 +11,7 @@ import json
 from dataclasses import asdict, dataclass, replace
 
 from backend.logging.logger import get_logger
+from backend.config.schema import WINDOWS_CAPTURE_BACKENDS
 
 from .paths import data_dir, settings_file
 from .service import HostSettings, ViewerSettings
@@ -57,6 +58,8 @@ def load() -> tuple[HostSettings, ViewerSettings]:
     viewer.volume = max(0, min(100, viewer.volume)) if type(viewer.volume) is int else 100
     host.clipboard_enabled = host.gamepad_enabled = True
     host.gamepad_backend = host.gamepad_backend if host.gamepad_backend in {"vigem", "elinkpad"} else "vigem"
+    if host.capture_backend not in ("auto", *WINDOWS_CAPTURE_BACKENDS):
+        host.capture_backend = "auto"
     viewer.clipboard_enabled = viewer.gamepad_enabled = True
     viewer.decoder = "h264" if viewer.decoder == "h264_pyav" else viewer.decoder
     host.transport = "file"
@@ -72,7 +75,7 @@ def load() -> tuple[HostSettings, ViewerSettings]:
         try:
             preference = codec_options({
                 key: options.get(key, "h264" if key == "codec" else "auto")
-                for key in ("codec", *CODEC_DEVICE_KEYS)
+                for key in ("codec", "encoder", "decoder", *CODEC_DEVICE_KEYS)
             })
             viewer.codec_preferences[peer] = codec_preference(preference)
         except (ValueError, AttributeError):
@@ -82,7 +85,11 @@ def load() -> tuple[HostSettings, ViewerSettings]:
 
 
 def codec_preference(options: dict) -> dict:
-    return {key: options[key] for key in ("codec", *CODEC_DEVICE_KEYS) if key in options}
+    return {
+        key: options[key]
+        for key in ("codec", "encoder", "decoder", *CODEC_DEVICE_KEYS)
+        if key in options and (key == "codec" or options[key] != "auto")
+    }
 
 
 def picture_settings(values: dict) -> dict:

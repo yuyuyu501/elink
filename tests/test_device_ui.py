@@ -13,7 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QPushButton, QStyle, QStyleOptionSlider
 from PySide6.QtTest import QTest
@@ -504,10 +504,9 @@ class WindowConnectionTests(unittest.TestCase):
                              pos=stream.resolution_menu.actionGeometry(choice).center())
             configure.assert_called_once_with(
                 {"width": 2560, "height": 1440, "fps": 30, "bitrate_kbps": 4000})
-            self.assertFalse(stream.panel.isVisible())
+            self.assertTrue(stream.panel.isVisible())
+            self.assertTrue(stream.resolution_menu.isVisible())
             configure.reset_mock()
-            stream.toggle_controls()
-            hover_action(stream.panel, stream.picture_button)
             hover_action(stream.picture_menu, stream.bitrate_menu.menuAction())
             self.assertTrue(stream.bitrate_menu.isVisible())
             self.assertEqual(stream.bitrate.value(), 4)
@@ -524,6 +523,9 @@ class WindowConnectionTests(unittest.TestCase):
             self.assertGreater(stream.bitrate.value(), 4)
             configure.assert_called_once()
             self.assertEqual(configure.call_args.args[0]["bitrate_kbps"], stream.bitrate.value() * 1000)
+            self.assertTrue(stream.bitrate_menu.isVisible())
+            outside = stream.bitrate_menu.mapFromGlobal(stream.mapToGlobal(QPoint(5, stream.height() - 5)))
+            QTest.mouseClick(stream.bitrate_menu, Qt.MouseButton.LeftButton, pos=outside)
             self.assertFalse(stream.panel.isVisible())
 
     def test_volume_submenu_and_resolution_status(self):
@@ -619,10 +621,10 @@ class WindowConnectionTests(unittest.TestCase):
         dialog = PictureDialog({"width": 1920, "height": 1080, "fps": 30, "bitrate_kbps": 4000},
                                connection=connection)
         dialog.codec.setCurrentIndex(dialog.codec.findData("hevc"))
-        self.assertFalse(hasattr(dialog, "encoder"))
-        self.assertFalse(hasattr(dialog, "decoder"))
         self.assertEqual(dialog.picture()["codec"], "hevc")
-        self.assertNotIn("encoder", dialog.picture())
+        encoder = dialog.codec_implementations["encoder"]
+        self.assertEqual([encoder.itemData(i) for i in range(encoder.count())], ["auto", "libx265"])
+        self.assertEqual(dialog.picture()["encoder"], "auto")
         self.assertNotIn("transport", dialog.picture())
         self.assertEqual([dialog.codec.itemData(i) for i in range(dialog.codec.count())], ["av1", "h264", "hevc"])
         self.assertFalse(dialog.codec.model().item(0).isEnabled())
@@ -634,36 +636,40 @@ class WindowConnectionTests(unittest.TestCase):
         dialog.close()
         dialog.deleteLater()
 
-    def test_cascading_codec_devices_filter_by_format_and_submit_independently(self):
+    def test_cascading_codec_implementations_filter_by_format_and_endpoint(self):
         self.window._session_connected(ViewerSettings())
         connection = self.window.connection
         connection.role, connection.phase, connection._codec_enabled = "viewer", "active", True
-        connection._applied_options = {"codec": "h264", "decoder_device": "cpu"}
+        connection._applied_options = {"codec": "h264", "decoder": "h264"}
         connection._peer_caps = {"encoders": {
-            "h264_nvenc": {"codec": "h264"},
-            "libx264": {"codec": "h264"},
-            "libx265": {"codec": "hevc"},
-        }}
-        self.window.service.codec_capabilities = {"decoders": {
-            "h264": {"codec": "h264"}, "hevc": {"codec": "hevc"},
-        }}
+            "h264_nvenc": {"codec": "h264", "state": "available"},
+            "libx265": {"codec": "hevc", "state": "available"},
+            "libsvtav1": {"codec": "av1", "state": "available"},
+        }, "decoders": {"h264_cuvid": {"codec": "h264", "state": "available"}}}
+        self.window.service.codec_capabilities = {
+            "encoders": {"libx264": {"codec": "h264", "state": "available"}},
+            "decoders": {codec: {"codec": codec, "state": "available"}
+                         for codec in ("h264", "hevc", "av1")},
+        }
         picture = {"width": 1920, "height": 1080, "fps": 60, "bitrate_kbps": 4000}
         stream = self.window._stream_window
+        stream.set_session_active(True)
         stream.load_picture(picture, connection)
-        encoder, decoder = ({action.data(): action for action in stream.codec_device_choices[key].actions()}
-                            for key in ("encoder_device", "decoder_device"))
-        self.assertTrue(encoder["gpu"].isEnabled())
-        self.assertFalse(decoder["gpu"].isEnabled())
-        self.assertTrue(decoder["cpu"].isChecked())
-        with patch.object(connection, "configure") as configure:
-            encoder["gpu"].trigger()
-            configure.assert_called_once_with({
-                **picture, "codec": "h264", "encoder_device": "gpu", "decoder_device": "cpu",
-            })
-        connection._applied_options = {"codec": "hevc"}
-        stream.load_picture(picture, connection)
-        self.assertTrue(encoder["cpu"].isEnabled())
-        self.assertFalse(encoder["gpu"].isEnabled())
+        for codec, encoder in (("h264", "h264_nvenc"), ("hevc", "libx265"), ("av1", "libsvtav1")):
+            connection._applied_options = {"codec": codec}
+            stream.load_picture(picture, connection)
+            actions = {role: {action.data(): action for action in group.actions()}
+                       for role, group in stream.codec_impl_groups.items()}
+            self.assertEqual(set(actions["encoder"]), {"auto", encoder})
+            self.assertEqual(set(actions["decoder"]), {"auto", codec})
+            with patch.object(connection, "configure") as configure:
+                actions["encoder"][encoder].trigger()
+                configure.assert_called_once_with({
+                    **picture, "codec": codec, "encoder": encoder, "decoder": "auto",
+                })
+        self.window._refresh_host_encoders()
+        local = self.window.host_page.encoder
+        self.assertEqual([local.itemData(i) for i in range(local.count())], ["auto", "libx264"])
 
     def test_overlay_uses_measured_units_expiry_and_shared_persisted_toggle(self):
         from frontend.desktop.service import SessionStats

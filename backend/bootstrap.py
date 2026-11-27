@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import BinaryIO
 
-from backend.config.schema import AppConfig
+from backend.config.schema import AppConfig, WINDOWS_CAPTURE_BACKENDS
 from backend.errors.base import ElinkError, ErrorCode
 from backend.event.bus import EventBus
 from backend.logging.logger import get_logger
@@ -95,7 +95,7 @@ def prepare_environment(config: AppConfig) -> tuple[ProbeResult, CodecRegistry]:
 def build_capture(config: AppConfig):
     """按平台构建屏幕采集实现。"""
     backend = config.capture.backend
-    if backend in {"auto", "gdi", "dxgi"}:
+    if backend in ("auto", *WINDOWS_CAPTURE_BACKENDS):
         if os.name != "nt":
             raise BootstrapError(
                 "当前里程碑只实现了 Windows 屏幕采集", detail=os.name

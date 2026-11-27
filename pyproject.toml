@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elink"
-version = "0.6.22"
+version = "0.6.23"
 description = "低延迟远程控制与串流：屏幕采集、WebRTC 传输、PySide6 桌面端"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -15,7 +15,6 @@ dependencies = [
     "av==16.1.0",
     "aiortc==1.14.0",
     "dxcam==0.0.5; sys_platform == 'win32'",
-    "windows-capture==1.5.0; sys_platform == 'win32'",
     "opencv-python<4.12; sys_platform == 'win32'",
     "soundcard==0.4.5",
     "sounddevice==0.5.3",

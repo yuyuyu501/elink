@@ -61,6 +61,7 @@ class SettingsPage(QWidget):
     copy_diagnostics_requested = Signal()
     admin_changed = Signal(bool)
     gamepad_changed = Signal(str)
+    capture_backend_changed = Signal(str)
     check_update_requested = Signal()
     cancel_update_requested = Signal()
     previews_changed = Signal(bool)
@@ -106,6 +107,15 @@ class SettingsPage(QWidget):
         self.gamepad_backend.setEnabled(sys.platform == "win32")
         general.add(label("本机手柄注入后端"))
         general.add(self.gamepad_backend)
+        self.capture_backend = QComboBox()
+        for name, value in (
+            ("自动", "auto"), ("D3D11", "d3d11"), ("DXCam", "dxcam"), ("DXGI", "dxgi")
+        ):
+            self.capture_backend.addItem(name, value)
+        self.capture_backend.setEnabled(sys.platform == "win32")
+        general.add(divider())
+        general.add(label("桌面采集方式"))
+        general.add(self.capture_backend)
         content.addWidget(general)
 
         discovery = Card("设备发现", "通过各网络接口自动寻找运行 Elink 的机器")
@@ -182,6 +192,8 @@ class SettingsPage(QWidget):
         self.admin_row.toggle.toggled.connect(self.admin_changed.emit)
         self.gamepad_backend.currentIndexChanged.connect(
             lambda: self.gamepad_changed.emit(self.gamepad_backend.currentData()))
+        self.capture_backend.currentIndexChanged.connect(
+            lambda: self.capture_backend_changed.emit(self.capture_backend.currentData()))
         self.check_update.clicked.connect(self.check_update_requested.emit)
         self.cancel_update.clicked.connect(self.cancel_update_requested.emit)
         self.update_previews.toggled.connect(self.previews_changed.emit)
