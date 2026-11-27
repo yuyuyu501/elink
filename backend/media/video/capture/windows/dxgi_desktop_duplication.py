@@ -1,4 +1,4 @@
-"""D3D11 capture/scaling and DXCam desktop duplication."""
+"""DXGI desktop duplication, WGC capture and GDI recovery."""
 
 from __future__ import annotations
 
@@ -249,35 +249,8 @@ class GdiCapture:
         self.close()
 
 
-def _desktop_output(region):
-    from dxcam.core.output import Output
-    from dxcam.util.io import enum_dxgi_adapters, enum_dxgi_outputs, get_output_metadata
-
-    metadata = get_output_metadata()
-    device_idx = 0
-    for adapter in enum_dxgi_adapters():
-        outputs = enum_dxgi_outputs(adapter)
-        for output_idx, pointer in enumerate(outputs):
-            output = Output(pointer)
-            if not output.attached_to_desktop:
-                continue
-            bounds = output.desc.DesktopCoordinates
-            if region is None:
-                matches = metadata.get(output.devicename, (None, False))[1]
-            else:
-                x, y, width, height = region
-                matches = (bounds.left <= x and bounds.top <= y
-                           and x + width <= bounds.right and y + height <= bounds.bottom)
-            if matches:
-                return device_idx, output_idx, (bounds.left, bounds.top), output.devicename
-        # DXCam numbers only adapters with outputs.
-        if outputs:
-            device_idx += 1
-    raise CaptureError("找不到采集区域对应的显示器")
-
-
 class DesktopCapture:
-    """Prefer D3D11, then DXGI on the adapter owning the requested desktop."""
+    """Prefer D3D11, then DXGI latest frames; recover an unavailable desktop."""
 
     def __init__(self, config=None, timebase=None):
         self.config = config or CaptureConfig()
@@ -290,6 +263,7 @@ class DesktopCapture:
         self._last = None
         self._start = 0
         self._draw_mouse = False
+        self._retry_at = 0.0
         self._gpu = None
 
     def reconfigure(self, width, height, fps):
@@ -309,9 +283,6 @@ class DesktopCapture:
     def open(self):
         self._start = time.perf_counter()
         self.close()
-        self.failures.clear()
-        self.backend = ""
-        self._last = None
         if self.config.backend != "gdi":
             try:
                 region = self.config.clamped_region()
@@ -328,32 +299,40 @@ class DesktopCapture:
                     self._gpu.close()
                 self._gpu = None
             try:
+                import dxcam
                 if not getattr(self, "_com_initialized", False):
                     self._com_initialized = ctypes.windll.ole32.CoInitializeEx(None, 2) in (0, 1)
-                import dxcam
+                self._source = dxcam.create(output_color="BGRA")
                 region = self.config.clamped_region()
-                device_idx, output_idx, origin, name = _desktop_output(region)
-                self._source = dxcam.create(
-                    device_idx=device_idx, output_idx=output_idx,
-                    output_color="BGRA", max_buffer_len=2)
                 if region:
                     x, y, w, h = region
-                    x, y = x - origin[0], y - origin[1]
                     region = (x, y, x + w, y + h)
                 self._source.start(region=region, target_fps=round(self.config.fps), video_mode=True)
                 self.backend = "dxcam"
-                logger.info("屏幕采集就绪: 后端=dxcam 显示器=%s 设备=%d 输出=%d",
-                            name, device_idx, output_idx)
                 return
             except Exception as exc:
                 self.failures.append(f"DXCam: {exc}")
                 self.close()
-                detail = "\n".join(self.failures)
-                logger.error("硬件桌面采集初始化失败: %s", detail)
-                raise CaptureError("硬件桌面采集初始化失败", detail=detail) from exc
+            try:
+                from .windows_graphics_capture import WindowsGraphicsCapture
+
+                region = self.config.clamped_region()
+                if region is None or region[:2] == (0, 0):
+                    self._draw_mouse = self.cursor_mode != "local"
+                    self._source = WindowsGraphicsCapture(
+                        region=region, timebase=self.timebase, draw_mouse=self._draw_mouse,
+                    )
+                    self._source.open()
+                    self.backend = "wgc"
+                    logger.info("屏幕采集就绪: %dx%d 后端=wgc", self._source.width, self._source.height)
+                    return
+            except Exception as exc:
+                self.failures.append(f"WGC: {exc}")
+                self.close()
         self._source = GdiCapture(self.config, self.timebase)
         self._source.open()
         self.backend = "gdi"
+        logger.info("采集回退 GDI: %s", self.failures[-3:])
 
     def read(self):
         import av
@@ -363,6 +342,11 @@ class DesktopCapture:
                 if self._draw_mouse != (self.cursor_mode != "local"):
                     self.open()
                 frame = Frame.from_av(self._gpu.read(), native=True)
+            elif self.backend == "wgc":
+                if self._draw_mouse != (self.cursor_mode != "local"):
+                    self.open()
+                    return self.read()
+                frame = self._source.read()
             elif self.backend == "dxcam":
                 pixels = self._source.get_latest_frame()
                 if pixels is None:
@@ -382,7 +366,7 @@ class DesktopCapture:
                 self.cursor.include_image = self.cursor_mode != "local"
                 state = self.cursor.read()
                 self.cursor_visible = state.visible
-                if self.backend != "d3d11" and not state.is_empty and self.cursor_mode != "local":
+                if self.backend == "dxcam" and not state.is_empty and self.cursor_mode != "local":
                     region = self.config.clamped_region()
                     # Overlay before resizing so desktop cursor coordinates stay correct.
                     if not self.config.width:
@@ -392,8 +376,16 @@ class DesktopCapture:
             self._last = frame
             return frame
         except (OSError, av.FFmpegError, CaptureError) as exc:
-            self.close()
-            raise CaptureError("桌面采集失败", detail=str(exc)) from exc
+            self.failures.append(str(exc))
+            if time.monotonic() >= self._retry_at:
+                self._retry_at = time.monotonic() + 1
+                try:
+                    self.open()
+                except Exception as recovery:
+                    self.failures.append(str(recovery))
+            if self._last is not None:
+                return self._last
+            raise
 
     def close(self):
         source, self._source = self._source, None

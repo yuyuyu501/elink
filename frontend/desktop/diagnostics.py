@@ -304,7 +304,7 @@ def _ffmpeg_report() -> dict:
 def _package_versions() -> dict:
     import importlib.metadata
 
-    wanted = ("PySide6", "pyinstaller", "av", "aiortc", "dxcam", "soundcard", "sounddevice", "numpy")
+    wanted = ("PySide6", "pyinstaller", "av", "aiortc", "dxcam", "windows-capture", "soundcard", "sounddevice", "numpy")
     versions = {}
     for name in wanted:
         try:
@@ -321,6 +321,7 @@ def _runtime_imports() -> dict:
     if os.name == "nt":
         # comtypes requires STA; soundcard can reuse an existing COM apartment.
         libraries.insert(0, "dxcam")
+        libraries.insert(1, "windows_capture")
     for library in libraries:
         importlib.import_module(library)
     return dict.fromkeys(libraries, "ok")
